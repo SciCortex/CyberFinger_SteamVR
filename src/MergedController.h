@@ -81,6 +81,19 @@ private:
     std::chrono::steady_clock::time_point m_lastSettingsPoll;
     void PollSettingsIfNeeded();
 
+    // Wrist frame → controller grip frame (settings-tunable rotation +
+    // local-space offset). Only for the bridge/HTSK pose path — external
+    // source devices already publish controller-convention poses.
+    void ApplyGripCorrection();
+
+    // Finite-difference velocity for the HTSK pose path (the packet carries
+    // none, and zero velocity ruins SteamVR's pose prediction).
+    void EstimateVelocity();
+    float  m_prevPos[3] = {};
+    float  m_velEst[3] = {};
+    double m_prevPoseTime = 0.0;
+    bool   m_prevPoseValid = false;
+
 };
 
 } // namespace merged_ctrl

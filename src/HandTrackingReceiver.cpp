@@ -146,6 +146,7 @@ void HandTrackingReceiver::ProcessPacket(const HandTrackingPacket& pkt) {
     state.valid = true;
     state.timestamp = NowSeconds();
     state.confidence = pkt.confidence / 255.f;
+    state.flags = pkt.flags;
 
     // Log first packet per hand
     static bool firstHT[2] = {false, false};

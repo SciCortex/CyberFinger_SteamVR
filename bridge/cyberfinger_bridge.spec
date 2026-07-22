@@ -51,6 +51,11 @@ a = Analysis(
         ('assets/icon_32x32.png', 'assets'),
         ('assets/icon_32x32_bw.png', 'assets'),
         ('assets/icon.png', 'assets'),
+        # OpenVR action manifest + default bindings — resolved at runtime via
+        # resource_path(); without them the hand skeleton silently never binds.
+        ('assets/cyberfinger_actions.json', 'assets'),
+        ('assets/cyberfinger_bindings_knuckles.json', 'assets'),
+        ('assets/cyberfinger_bindings_oculus_touch.json', 'assets'),
     ] + vgamepad_datas,
     hiddenimports=[
         'vgamepad',
