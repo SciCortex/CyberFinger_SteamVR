@@ -57,26 +57,26 @@ VR_INPUT_UUID   = "0000cf01-0000-1000-8000-00805f9b34fb"
 INPUT_REPORT_FMT = "<BBhhBBI"
 INPUT_REPORT_SIZE = struct.calcsize(INPUT_REPORT_FMT)
 
-# The GATT report grew twice, and each revision is a strict prefix of the next
-# (see CyberFingerFW_ESP32/src/vr_gatt.h — the first 28 bytes are frozen), so
-# the widest layout the payload can support is the correct one to apply:
+# The report is VARIABLE-LENGTH (see CyberFingerFW_ESP32/src/vr_gatt.h). The
+# first 28 bytes are frozen, then imu_present at offset 28, then one appended
+# block per set bit, in bit order — absent IMUs are omitted entirely to cut
+# latency. PARSE BY imu_present, NEVER BY TOTAL LENGTH.
 #
-#   12 bytes — base report, no IMU at all
-#   28 bytes — one appended quaternion (primary body IMU)
-#   61 bytes — presence bitmask + two further quaternions
+#   [0..27]  frozen prefix: hand..seq, then q[4] = PRIMARY body quaternion
+#   [28]     imu_present bitmask
+#   then, each only if its bit is set:
+#     PRIMARY  (0x01): a_body1[3] int16   (6B)  — its quat is the header q
+#     SECONDARY(0x02): q_body2[4] f + a_body2[3] int16   (22B)
+#     JOINT    (0x04): q_joint[4] f + a_joint[3] int16   (22B)
 #
+# Legacy pre-imu_present firmware still parses: 12 bytes = base, no IMU;
+# exactly 28 bytes = base + primary quat with no presence byte.
 INPUT_REPORT_IMU_FMT = "<BBhhBBI4f"
-INPUT_REPORT_IMU_SIZE = struct.calcsize(INPUT_REPORT_IMU_FMT)
+INPUT_REPORT_IMU_SIZE = struct.calcsize(INPUT_REPORT_IMU_FMT)  # 28
 
-INPUT_REPORT_MULTI_FMT = "<BBhhBBI4fB4f4f"
-INPUT_REPORT_MULTI_SIZE = struct.calcsize(INPUT_REPORT_MULTI_FMT)
-
-# 79 bytes — three raw body-frame accel vectors appended, one per IMU slot in
-# the same order as the quaternions. Still a strict suffix, so it is unpacked
-# separately from the 61-byte prefix above rather than duplicating that layout.
-ACCEL_TAIL_FMT = "<9h"
-ACCEL_TAIL_SIZE = struct.calcsize(ACCEL_TAIL_FMT)
-INPUT_REPORT_ACCEL_SIZE = INPUT_REPORT_MULTI_SIZE + ACCEL_TAIL_SIZE
+IMU_PRESENT_OFFSET = INPUT_REPORT_IMU_SIZE  # 28
+QUAT_FMT, QUAT_SIZE = "<4f", 16
+ACCEL_FMT, ACCEL_SIZE = "<3h", 6  # raw int16 x/y/z, ACCEL_LSB_PER_G counts
 
 ZERO_ACCEL = (0, 0, 0)
 ACCEL_LSB_PER_G = 2048.0  # VR_ACCEL_LSB_PER_G — ±16g on every sensor
@@ -86,6 +86,23 @@ GRAVITY_MS2 = 9.80665
 IMU_BODY_PRIMARY   = 0x01
 IMU_BODY_SECONDARY = 0x02
 IMU_JOINT          = 0x04
+
+# Appended block size per bit (0 for the base "no bit"): PRIMARY is accel-only
+# (quat lives in the header); SECONDARY/JOINT carry quat + accel.
+IMU_BLOCK_SIZE = {
+    IMU_BODY_PRIMARY:   ACCEL_SIZE,
+    IMU_BODY_SECONDARY: QUAT_SIZE + ACCEL_SIZE,
+    IMU_JOINT:          QUAT_SIZE + ACCEL_SIZE,
+}
+
+
+def expected_report_len(present):
+    """Total bytes a variable-length report with this imu_present should be."""
+    n = IMU_PRESENT_OFFSET + 1  # frozen prefix + imu_present byte
+    for bit in (IMU_BODY_PRIMARY, IMU_BODY_SECONDARY, IMU_JOINT):
+        if present & bit:
+            n += IMU_BLOCK_SIZE[bit]
+    return n
 
 IMU_SLOT_LABELS = (
     (IMU_BODY_PRIMARY,   "BODY 1"),
@@ -349,6 +366,7 @@ class BLEManager:
         self._polling_chars = []
         self._ble_devices = []     # track opened BLE device handles
         self._gatt_services = []   # track opened GATT service handles
+        self._warned_report_len = False  # one-shot report-length mismatch warning
 
     def start(self):
         self._running = True
@@ -464,39 +482,55 @@ class BLEManager:
         if len(data) < INPUT_REPORT_SIZE:
             return
 
-        # Each revision is a strict prefix of the next, so decode with the
-        # widest layout this payload can satisfy and leave the rest at defaults.
+        # Variable-length: the frozen prefix is always present; IMU blocks are
+        # walked by imu_present, never inferred from total length.
         present = 0
-        quats = (IDENTITY_QUAT, IDENTITY_QUAT, IDENTITY_QUAT)
-        accels = (ZERO_ACCEL, ZERO_ACCEL, ZERO_ACCEL)
+        quats = [IDENTITY_QUAT, IDENTITY_QUAT, IDENTITY_QUAT]
+        accels = [ZERO_ACCEL, ZERO_ACCEL, ZERO_ACCEL]
         has_accel = False
 
-        if len(data) >= INPUT_REPORT_MULTI_SIZE:
+        if len(data) >= INPUT_REPORT_IMU_SIZE:
             (hand, buttons, joy_x, joy_y, trigger, battery, seq,
-             q1w, q1x, q1y, q1z,
-             present,
-             q2w, q2x, q2y, q2z,
-             q3w, q3x, q3y, q3z) = struct.unpack(
-                INPUT_REPORT_MULTI_FMT, data[:INPUT_REPORT_MULTI_SIZE])
-            quats = ((q1w, q1x, q1y, q1z),
-                     (q2w, q2x, q2y, q2z),
-                     (q3w, q3x, q3y, q3z))
+             qw, qx, qy, qz) = struct.unpack(
+                INPUT_REPORT_IMU_FMT, data[:INPUT_REPORT_IMU_SIZE])
+            quats[0] = (qw, qx, qy, qz)
 
-            if len(data) >= INPUT_REPORT_ACCEL_SIZE:
-                a = struct.unpack(ACCEL_TAIL_FMT,
-                                  data[INPUT_REPORT_MULTI_SIZE:INPUT_REPORT_ACCEL_SIZE])
-                accels = (a[0:3], a[3:6], a[6:9])
-                has_accel = True
-
-        elif len(data) >= INPUT_REPORT_IMU_SIZE:
-            hand, buttons, joy_x, joy_y, trigger, battery, seq, qw, qx, qy, qz = \
-                struct.unpack(INPUT_REPORT_IMU_FMT, data[:INPUT_REPORT_IMU_SIZE])
-            # This revision has no presence bitmask. An all-zero quaternion is
-            # the only signal that the IMU failed to come up.
-            if any(abs(v) > 1e-6 for v in (qw, qx, qy, qz)):
-                present = IMU_BODY_PRIMARY
-                quats = ((qw, qx, qy, qz), IDENTITY_QUAT, IDENTITY_QUAT)
-
+            if len(data) > IMU_PRESENT_OFFSET:
+                # Modern variable-length report: presence byte then blocks.
+                present = data[IMU_PRESENT_OFFSET]
+                off = IMU_PRESENT_OFFSET + 1
+                try:
+                    # PRIMARY: accel only; its quaternion is the header q above.
+                    if present & IMU_BODY_PRIMARY:
+                        accels[0] = struct.unpack_from(ACCEL_FMT, data, off)
+                        off += ACCEL_SIZE
+                        has_accel = True
+                    # SECONDARY / JOINT: quaternion then accel.
+                    for bit, slot in ((IMU_BODY_SECONDARY, 1), (IMU_JOINT, 2)):
+                        if present & bit:
+                            quats[slot] = struct.unpack_from(QUAT_FMT, data, off)
+                            off += QUAT_SIZE
+                            accels[slot] = struct.unpack_from(ACCEL_FMT, data, off)
+                            off += ACCEL_SIZE
+                            has_accel = True
+                except struct.error:
+                    # Truncated block — keep what parsed, drop the presence bits
+                    # we couldn't back with data so downstream stays consistent.
+                    exp = expected_report_len(present)
+                    if len(data) != exp and not self._warned_report_len:
+                        self._warned_report_len = True
+                        self.app.log(f"IMU report length {len(data)} != expected "
+                                     f"{exp} for present=0x{present:02X}")
+                    present = 0
+                    for bit, slot in ((IMU_BODY_PRIMARY, 0),
+                                      (IMU_BODY_SECONDARY, 1), (IMU_JOINT, 2)):
+                        if accels[slot] != ZERO_ACCEL or quats[slot] != IDENTITY_QUAT:
+                            present |= bit
+            else:
+                # Legacy 28-byte report: primary quat, no presence byte. All-zero
+                # quaternion is the only signal the IMU failed to come up.
+                if any(abs(v) > 1e-6 for v in quats[0]):
+                    present = IMU_BODY_PRIMARY
         else:
             hand, buttons, joy_x, joy_y, trigger, battery, seq = \
                 struct.unpack(INPUT_REPORT_FMT, data[:INPUT_REPORT_SIZE])
