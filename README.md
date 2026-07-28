@@ -1,7 +1,15 @@
 # CyberFinger — SteamVR Driver
 
 A SteamVR driver that merges **two CyberFingers** + **hand tracking** into a pair of
-virtual VR controllers (soon with full skeletal hand data).
+virtual VR controllers with full skeletal hand data.
+
+The bridge GUI fuses three sources into each controller:
+
+| Source | Provides |
+|--------|----------|
+| CyberFinger controllers (BLE) | buttons, joystick, analog trigger, battery |
+| Runtime hand tracking (e.g. Steam Link cameras, via OpenVR skeletal input) | 31-bone finger skeleton, 6DOF wrist pose |
+| Controller IMUs | orientation — currently displayed and forwarded to SlimeVR; fusion into the controller pose is planned |
 
 Note: this is a *work-in-progress*, and currently very alpha software. 
 
@@ -59,7 +67,9 @@ Copy the built driver folder into SteamVR's driver directory:
 <Steam>/steamapps/common/SteamVR/drivers/cyberfinger/
 ├── driver.vrdrivermanifest
 ├── resources/
-│   ├── settings/default.vrsettings
+│   ├── settings/
+│   │   ├── default.vrsettings      (default values)
+│   │   └── settingsschema.vrsettings  (SteamVR Settings sliders)
 │   └── input/
 │       ├── cyberfinger_profile.json
 │       └── cyberfinger_bindings.json
@@ -69,6 +79,17 @@ Copy the built driver folder into SteamVR's driver directory:
 ```
 
 (That is, if Visual Studio didn't do it already for you above)
+
+**Alternative — register the build directory in place** (no copying; useful while
+developing, since a rebuild is immediately live):
+
+```bash
+"<Steam>/steamapps/common/SteamVR/bin/win64/vrpathreg.exe" adddriver <repo>/out/build/x64-Release/driver/cyberfinger
+```
+
+Verify with `vrpathreg show`. A registered driver appears in *SteamVR Settings →
+Startup/Shutdown → Manage Add-ons* — if `cyberfinger` is missing there, it is not
+registered (or SteamVR is in safe mode after a crash, which disables add-ons).
 
 ### 2. Enable the driver
 
@@ -91,12 +112,15 @@ Add to `<Steam>/config/steamvr.vrsettings`:
 Under the bridge directory:
 
 ```bash
-python cyberfinger_bridge.py
+pip install -r requirements.txt
+python cyberfinger_gui.py
 ```
-add --debug for more info. 
 
+Select **VR Mode (controllers + hand tracking → SteamVR)** and press Start. The
+headless `python cyberfinger_bridge.py` (add `--debug`) still exists, but it
+forwards buttons only — no skeleton, no pose.
 
-Launch these *after* SteamVR is running but *before* your VR application.
+Launch *after* SteamVR is running but *before* your VR application.
 
 Make sure your cyberfinger is in "VR mode" where each hand communicates directly over BLE with the cyberfinger_bridge using a custom protocol, 
 not the legacy "Gamepad" mode (which has the two cyberfingers merged into one XInput device).
@@ -111,9 +135,39 @@ All settings are in `default.vrsettings` or the global SteamVR settings file:
 | Setting                    | Default          | Description                                  |
 |----------------------------|------------------|----------------------------------------------|
 | `enable`                   | `true`           | Enable/disable the driver                    |
-| `serialNumber_left`        | `MERGED_CTRL_L`  | Serial number for left controller            |
-| `serialNumber_right`       | `MERGED_CTRL_R`  | Serial number for right controller           |
+| `serialNumber_left`        | `CYBERFINGER_L`  | Serial number for left controller            |
+| `serialNumber_right`       | `CYBERFINGER_R`  | Serial number for right controller           |
 | `handtracking_udp_port`    | `27015`          | UDP port for hand tracking data              |
+| `grip_angle_x/y/z`         | `-60.0/35.0/0.0` | Wrist → controller grip rotation, degrees    |
+| `pose_offset_x/y/z`        | `0.0/-0.10/0.0`  | Grip origin offset in controller-local metres |
+
+The `grip_angle_*` and `pose_offset_*` values convert the tracked **wrist** pose
+into the **grip** pose a controller is expected to publish. They are re-read at
+10 Hz, so edits apply live — adjust them if your hands appear consistently
+rotated or displaced from where they really are. `grip_angle_y` is mirrored
+automatically for the left hand, as is `pose_offset_x`.
+
+## Hand skeleton & 6DOF
+
+The bridge reads the hand skeleton the VR runtime is already tracking (Steam
+Link camera hand tracking, Ultraleap, …) through OpenVR **skeletal input**,
+using its own action manifest in `bridge/assets/`. This requires the `openvr`
+Python package (in `requirements.txt`) and works alongside whatever else is
+running.
+
+Practical notes, learned the hard way:
+
+- **The skeleton only attaches once the hand devices deliver an input event.**
+  In an empty SteamVR (no game, SteamVR Home disabled) that may not happen on
+  its own. A **thumb-index pinch** attaches it instantly; so does starting any
+  VR app. The bridge retries on its own and says so in its console.
+- **Do not pick a binding in *Manage Controller Bindings* for CyberFinger
+  Bridge.** Doing so can pin a legacy binding that silently disables the
+  skeleton actions. The bridge detects this, warns, and clears the stale pin
+  automatically the next time it starts while SteamVR is closed.
+- 6DOF comes from the hand devices' poses, forwarded to the driver in the raw
+  tracking universe. If no pose source is available the controllers report as
+  untracked rather than teleporting to a fixed position.
 
 # Wire Protocol (UDP)
 
@@ -121,8 +175,8 @@ Both packet types are sent to `127.0.0.1:<port>` (default 27015) and distinguish
 
 ## Hand Tracking Packet (bridge → driver)
 
-(This bridge is not currently needed)
-Source: C++ hand tracking bridge (reads from OpenVR/Ultraleap).
+Source: the bridge GUI (`cyberfinger_gui.py` + `vr_controller.py`), reading the
+runtime hand skeleton via OpenVR skeletal input.
 See `HandTrackingReceiver.h :: HandTrackingPacket`.
 
 ```
@@ -131,8 +185,8 @@ Offset  Size    Field
 4       1       Version: 1
 5       1       Hand: 0=left, 1=right
 6       1       Confidence: 0-255
-7       1       Reserved
-8       12      Position: float[3] (xyz meters, tracking space)
+7       1       Flags: bit0 = pos/quat carry a real pose
+8       12      Position: float[3] (xyz meters, RAW tracking universe)
 20      16      Orientation: float[4] (wxyz quaternion)
 36      868     Bones: float[31][7] (per bone: xyz pos + wxyz quat)
 904     20      Curls: float[5] (thumb, index, middle, ring, pinky; 0-1)
@@ -140,9 +194,17 @@ Offset  Size    Field
 Total: 924 bytes
 ```
 
+Bones are **parent-relative** transforms in OpenVR's standard 31-bone hand
+order, fed straight to `UpdateSkeletonComponent` — the driver performs no space
+conversion or mirroring. Everything is little-endian and tightly packed.
+
+The driver treats skeleton data as stale after 150 ms (falling back to a
+gamepad-driven synthetic pose) and gamepad data after 250 ms (zeroing inputs),
+so both packet types are streamed continuously rather than on change.
+
 ## Gamepad Packet (BLE bridge → driver)
 
-Source: Python BLE bridge (`cyberfinger_bridge.py`), forwarding VR GATT notifications from ESP32 CyberFinger devices.
+Source: the Python bridge, forwarding VR GATT notifications from ESP32 CyberFinger devices.
 See `HandTrackingReceiver.h :: GamepadPacket`.
 
 ```
@@ -178,37 +240,53 @@ Total: 12 bytes
 
 ## Troubleshooting
 
-- **Controllers show up but no position**: The hand tracking bridge isn't
-  running or isn't receiving data. Check that Steam Link hand tracking is
-  enabled on your Quest, or that your Ultraleap is connected.
+- **Controllers show up but no position**: no pose source. Check that hand
+  tracking is enabled (Steam Link: controllers down, hands in camera view) and
+  that the bridge's console reports the hands tracking. The driver logs its
+  pose source every ~2 s in `vrserver.txt` as `POSE: bridge (HTSK)`,
+  `POSE: source device` or `POSE: NO SOURCE (untracked)`.
 
-- **Buttons don't register**: Check cyberfinger_bridge.py is running and receiving events. Check cyberfingers are in "VR mode".
+- **Hands are consistently rotated or offset from where they really are**:
+  tune `grip_angle_*` / `pose_offset_*` (see Configuration) — they apply live.
 
-- **Skeleton not animating**: Verify the bridge is sending data (check
-  `vrserver.txt` log for "HandTrackingReceiver" messages). The bridge must be
-  started after SteamVR.
+- **Buttons don't register**: check the bridge is running and receiving events,
+  and that the CyberFingers are in "VR mode".
+
+- **Skeleton not animating**: check the bridge's console. If it says the hands
+  are inactive with `0 binding origin(s)`, do a **thumb-index pinch** — that
+  usually completes binding attachment instantly. Also verify `vrserver.txt`
+  shows `HandTrackingReceiver` messages.
+
+- **Bridge appears in the binding UI but the skeleton stops working
+  afterwards**: a legacy binding got pinned to the app. Close SteamVR and
+  start the bridge — it clears stale pins automatically.
+
+- **`cyberfinger` missing from Manage Add-ons**: the driver is not registered
+  (`vrpathreg adddriver …`), or SteamVR is running in safe mode after a crash.
 
 ## Architecture
 
-The project has three main components:
+The project has two main components:
 
 1. **SteamVR Driver** (`driver_cyberfinger.dll/.so`): Loaded by SteamVR,
-   creates two virtual controller devices. Listens on a UDP port for hand tracking
-   and cyberfinger button and joy events, and updates SteamVR with
-   merged input each frame.
+   creates two virtual controller devices. Listens on a UDP port for skeleton,
+   pose and button data, and updates SteamVR each frame. It performs no fusion
+   of its own — it converts wrist → grip pose, estimates velocity, and
+   publishes what it is given.
 
-2. **Hand Tracking Bridge** (`handtracking_bridge`): Standalone process that
-   reads hand tracking data from SteamVR's input API (which receives it from
-   Quest via Steam Link, or from Ultraleap's SteamVR plugin) and forwards it
-   over UDP localhost to the driver. (not currently needed)
-   
-3. **CyberFinger Bridge** (`cyberfinger_bridge.py`): Standalone process that 
-   reads joystick and button events sent from the cyberfinger firmware 
-   operating in "VR mode". 
+2. **Bridge GUI** (`bridge/cyberfinger_gui.py`, with `vr_controller.py`):
+   Connects to the controllers over BLE, reads the runtime hand skeleton and hand
+   device poses via OpenVR, fuses them, and streams both packet types to the
+   driver. Also provides the visualisation, SlimeVR tracker emulation, and the
+   non-VR gamepad modes.
 
 The bridge exists as a separate process because SteamVR drivers cannot use the
 client-side VR input API to read hand tracking from *other* drivers — they can
 only provide input, not consume it.
+
+Fusion deliberately lives in the bridge (`FusedVRMode._compose`), where the
+controller IMU, camera skeleton and per-source uncertainty can be combined without
+rebuilding the driver.
 
 ## License
 

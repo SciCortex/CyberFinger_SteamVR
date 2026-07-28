@@ -24,6 +24,8 @@ import queue
 import json
 import math
 
+from vr_controller import FusedVRMode
+
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -52,31 +54,29 @@ except Exception:
 VR_SERVICE_UUID = "0000cf00-0000-1000-8000-00805f9b34fb"
 VR_INPUT_UUID   = "0000cf01-0000-1000-8000-00805f9b34fb"
 
-GAMEPAD_MAGIC    = 0x50474643
-GAMEPAD_PACK_FMT = "<IBBhhBB"
 INPUT_REPORT_FMT = "<BBhhBBI"
 INPUT_REPORT_SIZE = struct.calcsize(INPUT_REPORT_FMT)
 
-# The GATT report grew twice, and each revision is a strict prefix of the next
-# (see CyberFingerFW_ESP32/src/vr_gatt.h — the first 28 bytes are frozen), so
-# the widest layout the payload can support is the correct one to apply:
+# The report is VARIABLE-LENGTH (see CyberFingerFW_ESP32/src/vr_gatt.h). The
+# first 28 bytes are frozen, then imu_present at offset 28, then one appended
+# block per set bit, in bit order — absent IMUs are omitted entirely to cut
+# latency. PARSE BY imu_present, NEVER BY TOTAL LENGTH.
 #
-#   12 bytes — base report, no IMU at all
-#   28 bytes — one appended quaternion (primary body IMU)
-#   61 bytes — presence bitmask + two further quaternions
+#   [0..27]  frozen prefix: hand..seq, then q[4] = PRIMARY body quaternion
+#   [28]     imu_present bitmask
+#   then, each only if its bit is set:
+#     PRIMARY  (0x01): a_body1[3] int16   (6B)  — its quat is the header q
+#     SECONDARY(0x02): q_body2[4] f + a_body2[3] int16   (22B)
+#     JOINT    (0x04): q_joint[4] f + a_joint[3] int16   (22B)
 #
+# Legacy pre-imu_present firmware still parses: 12 bytes = base, no IMU;
+# exactly 28 bytes = base + primary quat with no presence byte.
 INPUT_REPORT_IMU_FMT = "<BBhhBBI4f"
-INPUT_REPORT_IMU_SIZE = struct.calcsize(INPUT_REPORT_IMU_FMT)
+INPUT_REPORT_IMU_SIZE = struct.calcsize(INPUT_REPORT_IMU_FMT)  # 28
 
-INPUT_REPORT_MULTI_FMT = "<BBhhBBI4fB4f4f"
-INPUT_REPORT_MULTI_SIZE = struct.calcsize(INPUT_REPORT_MULTI_FMT)
-
-# 79 bytes — three raw body-frame accel vectors appended, one per IMU slot in
-# the same order as the quaternions. Still a strict suffix, so it is unpacked
-# separately from the 61-byte prefix above rather than duplicating that layout.
-ACCEL_TAIL_FMT = "<9h"
-ACCEL_TAIL_SIZE = struct.calcsize(ACCEL_TAIL_FMT)
-INPUT_REPORT_ACCEL_SIZE = INPUT_REPORT_MULTI_SIZE + ACCEL_TAIL_SIZE
+IMU_PRESENT_OFFSET = INPUT_REPORT_IMU_SIZE  # 28
+QUAT_FMT, QUAT_SIZE = "<4f", 16
+ACCEL_FMT, ACCEL_SIZE = "<3h", 6  # raw int16 x/y/z, ACCEL_LSB_PER_G counts
 
 ZERO_ACCEL = (0, 0, 0)
 ACCEL_LSB_PER_G = 2048.0  # VR_ACCEL_LSB_PER_G — ±16g on every sensor
@@ -86,6 +86,23 @@ GRAVITY_MS2 = 9.80665
 IMU_BODY_PRIMARY   = 0x01
 IMU_BODY_SECONDARY = 0x02
 IMU_JOINT          = 0x04
+
+# Appended block size per bit (0 for the base "no bit"): PRIMARY is accel-only
+# (quat lives in the header); SECONDARY/JOINT carry quat + accel.
+IMU_BLOCK_SIZE = {
+    IMU_BODY_PRIMARY:   ACCEL_SIZE,
+    IMU_BODY_SECONDARY: QUAT_SIZE + ACCEL_SIZE,
+    IMU_JOINT:          QUAT_SIZE + ACCEL_SIZE,
+}
+
+
+def expected_report_len(present):
+    """Total bytes a variable-length report with this imu_present should be."""
+    n = IMU_PRESENT_OFFSET + 1  # frozen prefix + imu_present byte
+    for bit in (IMU_BODY_PRIMARY, IMU_BODY_SECONDARY, IMU_JOINT):
+        if present & bit:
+            n += IMU_BLOCK_SIZE[bit]
+    return n
 
 IMU_SLOT_LABELS = (
     (IMU_BODY_PRIMARY,   "BODY 1"),
@@ -146,7 +163,7 @@ SLIME_SENSOR_BODY  = 0
 SLIME_SENSOR_JOINT = 1
 
 # The server drops a tracker after 3 s of silence, so the service thread has to
-# keep answering heartbeats even when no glove data is flowing.
+# keep answering heartbeats even when no controller data is flowing.
 SLIME_TIMEOUT = 3.0
 
 SLIME_FIRMWARE_VERSION = "CyberFinger"
@@ -308,7 +325,7 @@ class HandState:
         return 1.0 if (self.buttons & BTN_TRIGGER) else 0.0
 
     def reset_link(self):
-        """Clear per-connection capability flags before (re)attaching a glove."""
+        """Clear per-connection capability flags before (re)attaching a unit."""
         self.imu_present = 0
         self.quat = IDENTITY_QUAT
         self.quat_body2 = IDENTITY_QUAT
@@ -349,6 +366,7 @@ class BLEManager:
         self._polling_chars = []
         self._ble_devices = []     # track opened BLE device handles
         self._gatt_services = []   # track opened GATT service handles
+        self._warned_report_len = False  # one-shot report-length mismatch warning
 
     def start(self):
         self._running = True
@@ -464,39 +482,60 @@ class BLEManager:
         if len(data) < INPUT_REPORT_SIZE:
             return
 
-        # Each revision is a strict prefix of the next, so decode with the
-        # widest layout this payload can satisfy and leave the rest at defaults.
+        # Variable-length: the frozen prefix is always present; IMU blocks are
+        # walked by imu_present, never inferred from total length.
         present = 0
-        quats = (IDENTITY_QUAT, IDENTITY_QUAT, IDENTITY_QUAT)
-        accels = (ZERO_ACCEL, ZERO_ACCEL, ZERO_ACCEL)
+        quats = [IDENTITY_QUAT, IDENTITY_QUAT, IDENTITY_QUAT]
+        accels = [ZERO_ACCEL, ZERO_ACCEL, ZERO_ACCEL]
         has_accel = False
 
-        if len(data) >= INPUT_REPORT_MULTI_SIZE:
+        if len(data) >= INPUT_REPORT_IMU_SIZE:
             (hand, buttons, joy_x, joy_y, trigger, battery, seq,
-             q1w, q1x, q1y, q1z,
-             present,
-             q2w, q2x, q2y, q2z,
-             q3w, q3x, q3y, q3z) = struct.unpack(
-                INPUT_REPORT_MULTI_FMT, data[:INPUT_REPORT_MULTI_SIZE])
-            quats = ((q1w, q1x, q1y, q1z),
-                     (q2w, q2x, q2y, q2z),
-                     (q3w, q3x, q3y, q3z))
+             qw, qx, qy, qz) = struct.unpack(
+                INPUT_REPORT_IMU_FMT, data[:INPUT_REPORT_IMU_SIZE])
+            quats[0] = (qw, qx, qy, qz)
 
-            if len(data) >= INPUT_REPORT_ACCEL_SIZE:
-                a = struct.unpack(ACCEL_TAIL_FMT,
-                                  data[INPUT_REPORT_MULTI_SIZE:INPUT_REPORT_ACCEL_SIZE])
-                accels = (a[0:3], a[3:6], a[6:9])
-                has_accel = True
-
-        elif len(data) >= INPUT_REPORT_IMU_SIZE:
-            hand, buttons, joy_x, joy_y, trigger, battery, seq, qw, qx, qy, qz = \
-                struct.unpack(INPUT_REPORT_IMU_FMT, data[:INPUT_REPORT_IMU_SIZE])
-            # This revision has no presence bitmask. An all-zero quaternion is
-            # the only signal that the IMU failed to come up.
-            if any(abs(v) > 1e-6 for v in (qw, qx, qy, qz)):
-                present = IMU_BODY_PRIMARY
-                quats = ((qw, qx, qy, qz), IDENTITY_QUAT, IDENTITY_QUAT)
-
+            if len(data) > IMU_PRESENT_OFFSET:
+                # Modern variable-length report: presence byte then blocks.
+                present = data[IMU_PRESENT_OFFSET]
+                # Length must agree with imu_present, or firmware and bridge
+                # disagree about the wire format. Checked up front rather than
+                # only on truncation: an OVER-long payload still unpacks, so it
+                # would otherwise mis-parse every slot in silence.
+                exp = expected_report_len(present)
+                if len(data) != exp and not self._warned_report_len:
+                    self._warned_report_len = True
+                    self.app.log(f"IMU report length {len(data)} != expected "
+                                 f"{exp} for present=0x{present:02X}")
+                off = IMU_PRESENT_OFFSET + 1
+                try:
+                    # PRIMARY: accel only; its quaternion is the header q above.
+                    if present & IMU_BODY_PRIMARY:
+                        accels[0] = struct.unpack_from(ACCEL_FMT, data, off)
+                        off += ACCEL_SIZE
+                        has_accel = True
+                    # SECONDARY / JOINT: quaternion then accel.
+                    for bit, slot in ((IMU_BODY_SECONDARY, 1), (IMU_JOINT, 2)):
+                        if present & bit:
+                            quats[slot] = struct.unpack_from(QUAT_FMT, data, off)
+                            off += QUAT_SIZE
+                            accels[slot] = struct.unpack_from(ACCEL_FMT, data, off)
+                            off += ACCEL_SIZE
+                            has_accel = True
+                except struct.error:
+                    # Truncated block — keep what parsed, drop the presence bits
+                    # we couldn't back with data so downstream stays consistent.
+                    # The mismatch was already logged above.
+                    present = 0
+                    for bit, slot in ((IMU_BODY_PRIMARY, 0),
+                                      (IMU_BODY_SECONDARY, 1), (IMU_JOINT, 2)):
+                        if accels[slot] != ZERO_ACCEL or quats[slot] != IDENTITY_QUAT:
+                            present |= bit
+            else:
+                # Legacy 28-byte report: primary quat, no presence byte. All-zero
+                # quaternion is the only signal the IMU failed to come up.
+                if any(abs(v) > 1e-6 for v in quats[0]):
+                    present = IMU_BODY_PRIMARY
         else:
             hand, buttons, joy_x, joy_y, trigger, battery, seq = \
                 struct.unpack(INPUT_REPORT_FMT, data[:INPUT_REPORT_SIZE])
@@ -507,7 +546,11 @@ class BLEManager:
         if present != state.imu_present:
             hn = "L" if h == 0 else "R"
             names = [label for bit, label in IMU_SLOT_LABELS if present & bit]
-            self.app.log(f"{hn} IMU: {', '.join(names) if names else 'none detected'}")
+            # Byte count and raw bitmask included so a slot going missing can be
+            # blamed on the wire or on this parser without a sniffer: the length
+            # is what actually arrived, before any truncation fallback ran.
+            self.app.log(f"{hn} IMU: {', '.join(names) if names else 'none detected'}"
+                         f"  ({len(data)}B, present=0x{present:02X})")
         state.imu_present = present
         state.quat, state.quat_body2, state.quat_joint = quats
         state.has_accel = has_accel
@@ -683,33 +726,20 @@ class BLEManager:
             pass
 
 
-# ── VR Mode (UDP forwarding) ─────────────────────────────────────────────
-
-class VRMode:
-    def __init__(self, port=27015):
-        self.port = port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.target = ("127.0.0.1", port)
-
-    def on_input(self, hand, state):
-        pkt = struct.pack(GAMEPAD_PACK_FMT,
-                          GAMEPAD_MAGIC, hand, state.buttons,
-                          state.joy_x, state.joy_y, state.trigger, state.battery)
-        try:
-            self.sock.sendto(pkt, self.target)
-        except Exception:
-            pass
-
-    def stop(self):
-        self.sock.close()
+# ── VR Mode ──────────────────────────────────────────────────────────────
+#
+# Lives in vr_controller.py (FusedVRMode): fuses the runtime hand skeleton,
+# device 6DOF and controller buttons into driver_cyberfinger's emulated
+# controllers. The old CFGP-only VRMode is subsumed by it — with no skeleton
+# source available, FusedVRMode degrades to exactly that behavior.
 
 
 # ── SlimeVR forwarding (runs alongside whichever mode is active) ─────────
 
 class SlimeVRTracker:
-    """One emulated SlimeVR tracker — one glove, up to two sensors.
+    """One emulated SlimeVR tracker — one CyberFinger unit, up to two sensors.
 
-    The server keys trackers by the MAC in the handshake, so each glove gets a
+    The server keys trackers by the MAC in the handshake, so each unit gets a
     stable synthetic MAC and its own socket. Rotation packets are pushed from
     the BLE thread via send_rotation(); a service thread owns the handshake,
     heartbeat replies and periodic sensor-info re-announcements.
@@ -899,7 +929,7 @@ class SlimeVRTracker:
 
 
 class SlimeVRForwarder:
-    """Feeds glove IMU quaternions to a SlimeVR server as two emulated trackers.
+    """Feeds CyberFinger IMU quaternions to a SlimeVR server as emulated trackers.
 
     Runs in parallel with the active mode rather than replacing it — VR/Gamepad
     still get buttons and sticks while SlimeVR gets orientation.
@@ -1115,7 +1145,7 @@ def _write_app_manifest():
             "strings": {
                 "en_us": {
                     "name": "CyberFinger Bridge",
-                    "description": "CyberFinger glove bridge — hand skeleton display",
+                    "description": "CyberFinger bridge — hand skeleton display",
                 },
             },
         }],
@@ -1160,6 +1190,14 @@ class OpenVRSkeletonSource:
         # World pose of the hand device relative to the HMD, for the 6DOF
         # display. Swapped atomically like .hands.
         self.pose_info = [None, None]
+        # Driver stream (VR fusion mode): when feed_enabled, each tracked
+        # hand publishes (bones31x7 parent-space, curls5, confidence,
+        # (pos, quat)) — the payload FusedVRMode packs into HTSK packets.
+        self.feed_enabled = False
+        self.driver_feed = [None, None]
+        # Per hand: (position, rotation rows) in the raw tracking universe —
+        # what the driver needs, as opposed to pose_info's head-relative form.
+        self.raw_pose = [None, None]
         self.hands = [None, None]   # 0 = left, 1 = right
         self.status = "starting..."
         self._running = False
@@ -1341,6 +1379,8 @@ class OpenVRSkeletonSource:
         self._ready = False
         self.hands = [None, None]
         self.pose_info = [None, None]
+        self.driver_feed = [None, None]
+        self.raw_pose = [None, None]
         self._vrin = None
         self._system = None
         try:
@@ -1446,15 +1486,19 @@ class OpenVRSkeletonSource:
             for hand, role in ((0, openvr.TrackedControllerRole_LeftHand),
                                (1, openvr.TrackedControllerRole_RightHand)):
                 info = None
-                if hmd is not None:
-                    idx = self._system.getTrackedDeviceIndexForControllerRole(role)
-                    if idx != openvr.k_unTrackedDeviceIndexInvalid:
-                        dev = self._extract_pose(poses[idx])
-                        if dev is not None:
+                raw = None
+                idx = self._system.getTrackedDeviceIndexForControllerRole(role)
+                if idx != openvr.k_unTrackedDeviceIndexInvalid:
+                    dev = self._extract_pose(poses[idx])
+                    if dev is not None:
+                        raw = (dev[0], dev[1])
+                        if hmd is not None:
                             info = self._relative_pose(hmd, dev)
                 self.pose_info[hand] = info
+                self.raw_pose[hand] = raw
         except Exception:
             self.pose_info = [None, None]
+            self.raw_pose = [None, None]
 
         if not self._poll_actions:
             return  # bisect stage 4: passive only
@@ -1490,6 +1534,13 @@ class OpenVRSkeletonSource:
                     self._err_logged[hand] = True
                     self._log(f"Skeleton: {hn} read error: {e!r}")
             self.hands[hand] = joints
+            feed = None
+            if joints is not None and self.feed_enabled:
+                try:
+                    feed = self._make_feed(action, hand)
+                except Exception:
+                    feed = None
+            self.driver_feed[hand] = feed
 
         # "connected" alone is misleading when the actions never go active —
         # surface the most likely cause right in the panel placeholder. Hands
@@ -1668,16 +1719,58 @@ class OpenVRSkeletonSource:
         dist = math.sqrt(sum(v * v for v in rel))
         return drot, local, dist, local_v
 
-    def _fetch_bones(self, action, n):
+    def _fetch_bones(self, action, n, space=None):
         # Must pass a caller-allocated ctypes array: pyopenvr's wrapper
         # quietly substitutes a 1-element array for any non-array argument
         # and calls the C API with count=1, which the runtime rejects as
         # InvalidBoneCount no matter what count we intended.
+        if space is None:
+            space = openvr.VRSkeletalTransformSpace_Model
         arr = (openvr.VRBoneTransform_t * n)()
         self._vrin.getSkeletalBoneData(
-            action, openvr.VRSkeletalTransformSpace_Model,
+            action, space,
             openvr.VRSkeletalMotionRange_WithoutController, arr)
         return arr
+
+    def _make_feed(self, action, hand):
+        """Payload for the driver stream (VR fusion mode).
+
+        The driver's UpdateSkeletonComponent expects PARENT-relative bone
+        transforms — a separate fetch from the model-space set the panels
+        draw. Curls come from the runtime's own summary; confidence maps the
+        skeletal tracking level onto the packet's 0-255 scale.
+        """
+        n = self._bone_count[hand]
+        if n <= 0:
+            return None
+        arr = self._fetch_bones(action, n,
+                                openvr.VRSkeletalTransformSpace_Parent)
+        bones = tuple(
+            (t.position.v[0], t.position.v[1], t.position.v[2],
+             t.orientation.w, t.orientation.x, t.orientation.y,
+             t.orientation.z)
+            for t in arr)
+        try:
+            summary = self._vrin.getSkeletalSummaryData(
+                action, getattr(openvr, "VRSummaryType_FromDevice", 1))
+            curls = tuple(float(summary.flFingerCurl[i]) for i in range(5))
+        except Exception:
+            curls = (0.0,) * 5
+        try:
+            level = int(self._vrin.getSkeletalTrackingLevel(action))
+            confidence = {0: 128, 1: 192, 2: 255}.get(level, 255)
+        except Exception:
+            confidence = 255
+        # Wrist pose for the driver, in the RAW tracking universe — the same
+        # space driver poses are submitted in. Head-relative would be wrong
+        # here (that form is only for the GUI's dome inset).
+        pose = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))
+        pose_valid = False
+        raw = self.raw_pose[hand]
+        if raw is not None:
+            pose = (raw[0], matrix_to_quat(raw[1]))
+            pose_valid = True
+        return bones, curls, confidence, pose, pose_valid
 
 
 # ── Gamepad Mode (ViGEm Xbox 360) ────────────────────────────────────────
@@ -2005,7 +2098,7 @@ class CyberFingerApp:
         self._config = self._load_config()
 
         self.ble = BLEManager(self)
-        self.vr_mode = VRMode()
+        self.vr_mode = None              # created lazily on start (FusedVRMode)
         self.gamepad_mode = None         # created lazily on first use
         self.vrchat_gamepad_mode = None  # created lazily on first use
         self.active_mode = None
@@ -2206,7 +2299,7 @@ class CyberFingerApp:
         self.mode_var = tk.StringVar(value=self._config.get("mode", "vr"))
         radio_frame = ttk.Frame(ctrl_frame)
         radio_frame.pack(side=tk.LEFT)
-        ttk.Radiobutton(radio_frame, text="VR Mode (BLE→SteamVR)",
+        ttk.Radiobutton(radio_frame, text="VR Mode (controllers + hand tracking → SteamVR)",
                         variable=self.mode_var, value="vr").pack(anchor=tk.W)
         ttk.Radiobutton(radio_frame, text="Gamepad Mode (BLE→Xbox 360, Resonite)",
                         variable=self.mode_var, value="gamepad").pack(anchor=tk.W)
@@ -2389,16 +2482,16 @@ class CyberFingerApp:
         self._config["slimevr_body_imu"] = self.slimevr_body_var.get()
         self._save_config()
 
-        if mode == "vr":
-            self.active_mode = self.vr_mode
-        elif mode == "gamepad":
+        if mode == "gamepad":
             self.gamepad_mode = GamepadMode()
             self.active_mode = self.gamepad_mode
         elif mode == "gamepad_vrc":
             self.vrchat_gamepad_mode = GamepadModeVRChat()
             self.active_mode = self.vrchat_gamepad_mode
-        else:
-            self.active_mode = self.vr_mode  # fallback
+        else:  # "vr" and fallback
+            self.vr_mode = FusedVRMode(self.skeleton, self.ble, self.log)
+            self.vr_mode.start()
+            self.active_mode = self.vr_mode
         self.log(f"Starting {mode.upper()} mode...")
         if mode == "vrchat":
             self.log(">>> VRChat: enable OSC via Action Menu → OSC → Enabled")
@@ -2434,6 +2527,7 @@ class CyberFingerApp:
 
         # Recreate for next start
         self.ble = BLEManager(self)
+        self.vr_mode = None              # recreated lazily on next start
         self.gamepad_mode = None         # recreated lazily on next start
         self.vrchat_gamepad_mode = None  # recreated lazily on next start
 
@@ -2525,6 +2619,28 @@ class CyberFingerApp:
 # Fixed camera angles — a three-quarter view so all three axes stay distinct.
 _VIEW_YAW   = math.radians(35.0)
 _VIEW_PITCH = math.radians(20.0)
+
+
+def matrix_to_quat(m):
+    """3x3 rotation matrix (row tuples) → unit quaternion (w, x, y, z)."""
+    t = m[0][0] + m[1][1] + m[2][2]
+    if t > 0:
+        s = math.sqrt(t + 1.0) * 2.0
+        return (0.25 * s,
+                (m[2][1] - m[1][2]) / s,
+                (m[0][2] - m[2][0]) / s,
+                (m[1][0] - m[0][1]) / s)
+    if m[0][0] > m[1][1] and m[0][0] > m[2][2]:
+        s = math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0
+        return ((m[2][1] - m[1][2]) / s, 0.25 * s,
+                (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s)
+    if m[1][1] > m[2][2]:
+        s = math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0
+        return ((m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s,
+                0.25 * s, (m[1][2] + m[2][1]) / s)
+    s = math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0
+    return ((m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s,
+            (m[1][2] + m[2][1]) / s, 0.25 * s)
 
 
 def quat_to_matrix(q):

@@ -264,9 +264,41 @@ void MergedController::UpdateInputs() {
 // ── Pose update — reads VRLink hand tracker pose directly from server ─────
 
 void MergedController::UpdatePose() {
-    // Find the VRLink hand tracker device by serial name
-    // Cache the device index so we don't search every frame
-    if (m_sourceDeviceIdx == vr::k_unTrackedDeviceIndexInvalid) {
+    PollSettingsIfNeeded();
+
+    bool gotPose = false;
+
+    // ── Primary: pose fused and streamed by the bridge (HTSK packet) ──────
+    // The bridge owns fusion (camera hand tracking + controllers, later IMU
+    // blending) and sends the wrist pose in the raw tracking universe,
+    // quaternion order w,x,y,z. flags bit0 says the fields are real; a
+    // bridge without a pose source sends identity with flags=0.
+    {
+        HandTrackingState ht = (m_hand == 0) ? m_handTracking->GetLeft()
+                                             : m_handTracking->GetRight();
+        if ((ht.flags & kPoseValidFlag) &&
+            m_handTracking->HasRecentData(m_hand, 0.25)) {
+            m_pose.poseIsValid = true;
+            m_pose.deviceIsConnected = true;
+            m_pose.result = vr::TrackingResult_Running_OK;
+
+            m_pose.vecPosition[0] = ht.pos[0];
+            m_pose.vecPosition[1] = ht.pos[1];
+            m_pose.vecPosition[2] = ht.pos[2];
+            m_pose.qRotation.w = ht.quat[0];
+            m_pose.qRotation.x = ht.quat[1];
+            m_pose.qRotation.y = ht.quat[2];
+            m_pose.qRotation.z = ht.quat[3];
+
+            ApplyGripCorrection();
+            EstimateVelocity();
+            gotPose = true;
+        }
+    }
+
+    // ── Fallback: external Hand_Left/Hand_Right tracked device ────────────
+    // Cache the device index so we don't search every frame.
+    if (!gotPose && m_sourceDeviceIdx == vr::k_unTrackedDeviceIndexInvalid) {
         m_sourceDeviceIdx = FindSourceDevice();
         if (m_sourceDeviceIdx != vr::k_unTrackedDeviceIndexInvalid) {
             DriverLog("[%s] Found source hand tracker at device index %d\n",
@@ -274,9 +306,7 @@ void MergedController::UpdatePose() {
         }
     }
 
-    bool gotPose = false;
-
-    if (m_sourceDeviceIdx != vr::k_unTrackedDeviceIndexInvalid) {
+    if (!gotPose && m_sourceDeviceIdx != vr::k_unTrackedDeviceIndexInvalid) {
         // Read the raw pose from the VRLink hand tracker
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
         vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.f, poses, vr::k_unMaxTrackedDeviceCount);
@@ -321,59 +351,11 @@ void MergedController::UpdatePose() {
                 m_pose.qRotation.z = 0.25f * s;
             }
 
-            // Apply grip correction rotation (3-axis Euler XYZ).
-            // Configured via SteamVR Settings > CyberFinger sliders.
-            // Read live so slider changes apply immediately.
-            {
-                vr::EVRSettingsError serr;
-                PollSettingsIfNeeded();
-                /*
-                float ax = vr::VRSettings()->GetFloat("driver_cyberfinger", "grip_angle_x", &serr);
-                if (serr != vr::VRSettingsError_None) ax = -60.f;
-                float ay = vr::VRSettings()->GetFloat("driver_cyberfinger", "grip_angle_y", &serr);
-                if (serr != vr::VRSettingsError_None) ay = 0.f;
-                float az = vr::VRSettings()->GetFloat("driver_cyberfinger", "grip_angle_z", &serr);
-                if (serr != vr::VRSettingsError_None) az = 0.f;
-                */
-
-                // Convert degrees to radians (half-angles for quaternion)
-                float hx = (m_gripAx * 3.14159265f / 180.f) * 0.5f;
-                float hy = (m_hand == 0) 
-                    ? -(m_gripAy * 3.14159265f / 180.f) * 0.5f 
-                    :  (m_gripAy * 3.14159265f / 180.f) * 0.5f;
-                float hz = (m_gripAz * 3.14159265f / 180.f) * 0.5f;
-
-                // Euler XYZ to quaternion
-                float cx = std::cos(hx), sx = std::sin(hx);
-                float cy = std::cos(hy), sy = std::sin(hy);
-                float cz = std::cos(hz), sz = std::sin(hz);
-
-                float cw = cx*cy*cz + sx*sy*sz;
-                float cqx = sx*cy*cz - cx*sy*sz;
-                float cqy = cx*sy*cz + sx*cy*sz;
-                float cqz = cx*cy*sz - sx*sy*cz;
-
-                // result = deviceQuat * correctionQuat
-                float rw = m_pose.qRotation.w;
-                float rx = m_pose.qRotation.x;
-                float ry = m_pose.qRotation.y;
-                float rz = m_pose.qRotation.z;
-
-                m_pose.qRotation.w = rw*cw - rx*cqx - ry*cqy - rz*cqz;
-                m_pose.qRotation.x = rw*cqx + rx*cw + ry*cqz - rz*cqy;
-                m_pose.qRotation.y = rw*cqy - rx*cqz + ry*cw + rz*cqx;
-                m_pose.qRotation.z = rw*cqz + rx*cqy - ry*cqx + rz*cw;
-
-                /*
-                // Apply position offset in controller-local space
-                float wx, wy, wz;
-                RotateVecByQuat(m_pose.qRotation, m_offX, m_offY, m_offZ, wx, wy, wz);
-                if (m_hand==0) m_pose.vecPosition[0] -= wx;
-                else m_pose.vecPosition[0] += wx;
-                m_pose.vecPosition[1] += wy;
-                m_pose.vecPosition[2] += wz;
-                */
-            }
+            // Deliberately NO grip correction here: an external tracked
+            // device (Steam Link / VRLink hand tracker presenting as a
+            // controller) already publishes a controller-convention pose.
+            // Applying the wrist→grip correction on top of it was the old
+            // "controllers sit rotated/offset from the hand" bug.
 
             m_pose.vecVelocity[0] = srcPose.vVelocity.v[0];
             m_pose.vecVelocity[1] = srcPose.vVelocity.v[1];
@@ -392,25 +374,22 @@ void MergedController::UpdatePose() {
     // Debug: log tracking state periodically
     static int poseLogCount[2] = {0, 0};
     if (++poseLogCount[m_hand] % 180 == 0) {
-        if (gotPose) {
-            DriverLog("[%s] POSE: direct dev=%d pos=(%.3f,%.3f,%.3f)\n",
-                      m_serial.c_str(), m_sourceDeviceIdx,
-                      m_pose.vecPosition[0], m_pose.vecPosition[1], m_pose.vecPosition[2]);
-        } else {
-            DriverLog("[%s] POSE: no source device (fallback)\n", m_serial.c_str());
-        }
+        DriverLog("[%s] POSE: %s pos=(%.3f,%.3f,%.3f)\n",
+                  m_serial.c_str(),
+                  gotPose ? (m_sourceDeviceIdx != vr::k_unTrackedDeviceIndexInvalid
+                             ? "source device" : "bridge (HTSK)")
+                          : "NO SOURCE (untracked)",
+                  m_pose.vecPosition[0], m_pose.vecPosition[1], m_pose.vecPosition[2]);
     }
 
     if (!gotPose) {
-        // Fallback — fixed position so controllers remain visible
-        m_pose.poseIsValid = true;
-        m_pose.result = vr::TrackingResult_Running_OK;
+        // No pose source. Report the controller as untracked and hold the
+        // last position rather than teleporting it to a fixed spot in front
+        // of the user: a bogus "valid" pose makes games place the hand
+        // somewhere real, which is worse than a hand that visibly stops.
+        m_pose.poseIsValid = false;
+        m_pose.result = vr::TrackingResult_Running_OutOfRange;
         m_pose.deviceIsConnected = true;
-
-        m_pose.vecPosition[0] = (m_hand == 0) ? -0.2 : 0.2;
-        m_pose.vecPosition[1] = 1.0;
-        m_pose.vecPosition[2] = -0.3;
-        m_pose.qRotation = {1, 0, 0, 0};
 
         m_pose.vecVelocity[0] = 0;
         m_pose.vecVelocity[1] = 0;
@@ -418,6 +397,7 @@ void MergedController::UpdatePose() {
         m_pose.vecAngularVelocity[0] = 0;
         m_pose.vecAngularVelocity[1] = 0;
         m_pose.vecAngularVelocity[2] = 0;
+        m_prevPoseValid = false;  // don't diff across a tracking gap
     }
 
     vr::VRServerDriverHost()->TrackedDevicePoseUpdated(
@@ -494,6 +474,78 @@ void MergedController::UpdateSkeleton() {
                       m_serial.c_str(), (int)err);
         }
     }
+}
+
+void MergedController::ApplyGripCorrection() {
+    // Wrist frame → controller grip frame, tunable live via SteamVR
+    // Settings > CyberFinger (grip_angle_* degrees, pose_offset_* meters).
+    // Rotation AND translation together: rotating the wrist pose without
+    // moving the origin swings the rendered controller around the wrist,
+    // which reads as a position error.
+
+    // Euler XYZ (half-angles), Y mirrored for the left hand
+    float hx = (m_gripAx * 3.14159265f / 180.f) * 0.5f;
+    float hy = (m_hand == 0)
+        ? -(m_gripAy * 3.14159265f / 180.f) * 0.5f
+        :  (m_gripAy * 3.14159265f / 180.f) * 0.5f;
+    float hz = (m_gripAz * 3.14159265f / 180.f) * 0.5f;
+
+    float cx = std::cos(hx), sx = std::sin(hx);
+    float cy = std::cos(hy), sy = std::sin(hy);
+    float cz = std::cos(hz), sz = std::sin(hz);
+
+    float cw  = cx*cy*cz + sx*sy*sz;
+    float cqx = sx*cy*cz - cx*sy*sz;
+    float cqy = cx*sy*cz + sx*cy*sz;
+    float cqz = cx*cy*sz - sx*sy*cz;
+
+    // result = deviceQuat * correctionQuat
+    float rw = (float)m_pose.qRotation.w;
+    float rx = (float)m_pose.qRotation.x;
+    float ry = (float)m_pose.qRotation.y;
+    float rz = (float)m_pose.qRotation.z;
+
+    m_pose.qRotation.w = rw*cw - rx*cqx - ry*cqy - rz*cqz;
+    m_pose.qRotation.x = rw*cqx + rx*cw + ry*cqz - rz*cqy;
+    m_pose.qRotation.y = rw*cqy - rx*cqz + ry*cw + rz*cqx;
+    m_pose.qRotation.z = rw*cqz + rx*cqy - ry*cqx + rz*cw;
+
+    // Local-space offset (defined for the right hand, X mirrored for left)
+    float ox = (m_hand == 0) ? -m_offX : m_offX;
+    float wx, wy, wz;
+    RotateVecByQuat(m_pose.qRotation, ox, m_offY, m_offZ, wx, wy, wz);
+    m_pose.vecPosition[0] += wx;
+    m_pose.vecPosition[1] += wy;
+    m_pose.vecPosition[2] += wz;
+}
+
+void MergedController::EstimateVelocity() {
+    using namespace std::chrono;
+    double now = duration<double>(steady_clock::now().time_since_epoch()).count();
+
+    if (m_prevPoseValid) {
+        double dt = now - m_prevPoseTime;
+        if (dt > 1e-4 && dt < 0.25) {
+            for (int i = 0; i < 3; ++i) {
+                float raw = (float)((m_pose.vecPosition[i] - m_prevPos[i]) / dt);
+                // Light smoothing: UDP arrival jitter would otherwise make
+                // the velocity (and SteamVR's prediction) buzz.
+                m_velEst[i] = 0.7f * m_velEst[i] + 0.3f * raw;
+                m_pose.vecVelocity[i] = m_velEst[i];
+            }
+        }
+    } else {
+        m_pose.vecVelocity[0] = m_pose.vecVelocity[1] = m_pose.vecVelocity[2] = 0;
+    }
+    m_pose.vecAngularVelocity[0] = 0;
+    m_pose.vecAngularVelocity[1] = 0;
+    m_pose.vecAngularVelocity[2] = 0;
+
+    m_prevPos[0] = (float)m_pose.vecPosition[0];
+    m_prevPos[1] = (float)m_pose.vecPosition[1];
+    m_prevPos[2] = (float)m_pose.vecPosition[2];
+    m_prevPoseTime = now;
+    m_prevPoseValid = true;
 }
 
 void MergedController::PollSettingsIfNeeded()

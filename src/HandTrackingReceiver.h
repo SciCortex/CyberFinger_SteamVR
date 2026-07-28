@@ -35,9 +35,11 @@ struct HandTrackingPacket {
     uint8_t  version;        // 1
     uint8_t  hand;           // 0=left, 1=right
     uint8_t  confidence;     // 0-255 tracking confidence
-    uint8_t  reserved;
+    uint8_t  flags;          // bit0: pos/quat fields are valid (kPoseValidFlag)
 
-    // Hand root pose (wrist position + orientation in HMD-relative space)
+    // Hand root pose in the RAW tracking universe (same space driver poses
+    // are submitted in). Only meaningful when flags & kPoseValidFlag — a
+    // bridge without a pose source sends identity and flags=0.
     float    pos[3];         // meters
     float    quat[4];        // wxyz orientation
 
@@ -51,6 +53,7 @@ struct HandTrackingPacket {
 
 static constexpr uint32_t kHandTrackingMagic = 0x4B535448; // 'HTSK'
 static constexpr uint8_t  kHandTrackingVersion = 1;
+static constexpr uint8_t  kPoseValidFlag = 0x01;
 
 // ── Gamepad packet (from BLE bridge) ────────────────────────────────────
 // Sent over the same UDP port, distinguished by magic.
@@ -59,8 +62,8 @@ static constexpr uint8_t  kHandTrackingVersion = 1;
 struct GamepadPacket {
     uint32_t magic;          // 'CFGP' = 0x50474643
     uint8_t  hand;           // 0=left, 1=right
-    uint8_t  buttons;        // bit0=AX(trigger), bit1=BY(grip), bit2=BP(menu),
-                             // bit3=ST(joy click), bit4=STARTSELECT
+    uint8_t  buttons;        // bitmask (authoritative: MergedController::UpdateInputs)
+                             // bit0=trigger, bit1=grip, bit2=B, bit3=joy click, bit4=A
     int16_t  joy_x;          // -32767..32767
     int16_t  joy_y;          // -32767..32767
     uint8_t  trigger_analog; // 0-255
@@ -88,8 +91,9 @@ struct HandTrackingState {
     bool valid = false;
     double timestamp = 0.0;
     float confidence = 0.f;
+    uint8_t flags = 0;       // HandTrackingPacket::flags (kPoseValidFlag etc.)
 
-    // Wrist pose in HMD-relative space
+    // Wrist pose in the raw tracking universe (valid iff flags & kPoseValidFlag)
     float pos[3] = {};
     float quat[4] = {1, 0, 0, 0};
 
