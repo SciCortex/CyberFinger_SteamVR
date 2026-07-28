@@ -4,9 +4,9 @@
 ; Or: right-click setup.iss → Compile
 
 #define MyAppName "CyberFinger Bridge"
-#define MyAppVersion "1.3.1"
+#define MyAppVersion "1.4.1"
 #define MyAppPublisher "SciCortex Technologies Corp."
-#define MyAppURL "https://github.com/DrSciCortex/CyberFinger"
+#define MyAppURL "https://github.com/DrSciCortex/CyberFinger_SteamVR/bridge"
 #define MyAppExeName "CyberFingerBridge.exe"
 #define ViGEmSetup "ViGEmBus_1.22.0_x64_x86_arm64.exe"
 
