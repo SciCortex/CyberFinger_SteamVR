@@ -498,6 +498,15 @@ class BLEManager:
             if len(data) > IMU_PRESENT_OFFSET:
                 # Modern variable-length report: presence byte then blocks.
                 present = data[IMU_PRESENT_OFFSET]
+                # Length must agree with imu_present, or firmware and bridge
+                # disagree about the wire format. Checked up front rather than
+                # only on truncation: an OVER-long payload still unpacks, so it
+                # would otherwise mis-parse every slot in silence.
+                exp = expected_report_len(present)
+                if len(data) != exp and not self._warned_report_len:
+                    self._warned_report_len = True
+                    self.app.log(f"IMU report length {len(data)} != expected "
+                                 f"{exp} for present=0x{present:02X}")
                 off = IMU_PRESENT_OFFSET + 1
                 try:
                     # PRIMARY: accel only; its quaternion is the header q above.
@@ -516,11 +525,7 @@ class BLEManager:
                 except struct.error:
                     # Truncated block — keep what parsed, drop the presence bits
                     # we couldn't back with data so downstream stays consistent.
-                    exp = expected_report_len(present)
-                    if len(data) != exp and not self._warned_report_len:
-                        self._warned_report_len = True
-                        self.app.log(f"IMU report length {len(data)} != expected "
-                                     f"{exp} for present=0x{present:02X}")
+                    # The mismatch was already logged above.
                     present = 0
                     for bit, slot in ((IMU_BODY_PRIMARY, 0),
                                       (IMU_BODY_SECONDARY, 1), (IMU_JOINT, 2)):
@@ -541,7 +546,11 @@ class BLEManager:
         if present != state.imu_present:
             hn = "L" if h == 0 else "R"
             names = [label for bit, label in IMU_SLOT_LABELS if present & bit]
-            self.app.log(f"{hn} IMU: {', '.join(names) if names else 'none detected'}")
+            # Byte count and raw bitmask included so a slot going missing can be
+            # blamed on the wire or on this parser without a sniffer: the length
+            # is what actually arrived, before any truncation fallback ran.
+            self.app.log(f"{hn} IMU: {', '.join(names) if names else 'none detected'}"
+                         f"  ({len(data)}B, present=0x{present:02X})")
         state.imu_present = present
         state.quat, state.quat_body2, state.quat_joint = quats
         state.has_accel = has_accel
