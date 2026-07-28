@@ -4,7 +4,7 @@
 ; Or: right-click setup.iss → Compile
 
 #define MyAppName "CyberFinger Bridge"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.3.1"
 #define MyAppPublisher "SciCortex Technologies Corp."
 #define MyAppURL "https://github.com/DrSciCortex/CyberFinger"
 #define MyAppExeName "CyberFingerBridge.exe"
