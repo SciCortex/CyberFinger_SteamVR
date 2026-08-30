@@ -14,6 +14,21 @@ pynput
 pygobject
 python-osc
 
+# ── Hand skeleton (optional; the gamepad modes do not need either) ───────
+#
+# Two backends, picked automatically at startup — see "Hand skeleton backends"
+# in README.md. Install whichever matches your runtime, or both.
+#
+# Monado / WiVRn: the native OpenXR backend. Required there, because an
+# OpenVR-on-OpenXR layer (xrizer, OpenComposite) structurally cannot feed a
+# non-rendering background app — this one uses XR_MND_headless +
+# XR_EXT_hand_tracking instead. Pulls numpy/glfw/pyopengl transitively; the
+# graphics ones go unused in a headless session.
+pyopenxr
+
+# SteamVR: the OpenVR skeletal-input backend.
+openvr
+
 # tkinter is usually pre-installed; if not:
 #   Ubuntu/Debian: sudo apt install python3-tk
 #   Fedora:        sudo dnf install python3-tkinter

@@ -1,6 +1,6 @@
 {
-  "controller_type": "oculus_touch",
-  "name": "CyberFinger skeleton (Touch / Steam Link)",
+  "controller_type": "knuckles",
+  "name": "CyberFinger skeleton (Index)",
   "description": "Hand skeleton bindings for the CyberFinger Bridge display",
   "bindings": {
     "/actions/cyberfinger": {
@@ -13,7 +13,8 @@
           "output": "/actions/cyberfinger/in/skeleton_right",
           "path": "/user/hand/right/input/skeleton/right"
         }
-      ]
+      ],
+      "sources": []
     }
   }
 }

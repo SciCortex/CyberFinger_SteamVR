@@ -3,28 +3,51 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 """
-CyberFinger Bridge GUI
+CyberFinger Bridge GUI — Windows
 
-Combines VR (BLE→UDP) and Gamepad (BLE→ViGEm Xbox 360) bridge modes
-into a single application with visual feedback, system tray icon,
-and optional auto-start.
+Combines VR (fused controllers + hand skeleton → SteamVR driver) and Gamepad
+(BLE→ViGEm Xbox 360) bridge modes into a single application with visual
+feedback, system tray icon, and optional auto-start.
+
+Only the Windows-specific layers live here — BLE over WinRT, the ViGEm virtual
+gamepad, tray icon loading and the app shell. The protocol, SlimeVR emulation,
+OpenVR skeleton client, driver stream and visualisation panels are shared with
+the Linux bridge in bridge_common/.
 """
 
 import asyncio
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext
-import struct
-import socket
 import time
 import sys
 import os
-import base64
 import queue
 import json
-import math
 
-from vr_controller import FusedVRMode
+# bridge_common lives beside this package in the repo; PyInstaller picks it up
+# via `pathex` in the spec, so this only matters when running from source.
+# APPENDED, never inserted: the repo root also holds the OpenVR SDK's `openvr/`
+# directory, and ahead of site-packages that dir imports as a namespace package
+# which shadows pyopenvr — satisfying `import openvr` with an API-less module.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+from bridge_common.graphics import (COLOR_ACCENT, COLOR_ACCENT2, COLOR_BG,
+                                    COLOR_BG2, COLOR_BG3, COLOR_FG,
+                                    COLOR_FG_DIM, COLOR_GREEN, COLOR_ORANGE,
+                                    COLOR_RED, FONT)
+from bridge_common.panels import HandPanel, SkeletonPanel
+from bridge_common.platform import config_dir
+from bridge_common.protocol import (BTN_C, BTN_D, BTN_E, BTN_GRIP, BTN_JCLICK,
+                                    BTN_MENU, BTN_STSEL, BTN_TRIGGER,
+                                    HandState, describe_imus, fmt_buttons,
+                                    parse_report)
+from bridge_common.skeleton import HAS_OPENVR, create_skeleton_source
+from bridge_common.slimevr import (SLIME_DEFAULT_HOST, SLIME_DEFAULT_PORT,
+                                   SlimeVRForwarder)
+from bridge_common.vr_controller import FusedVRMode
 
 try:
     import pystray
@@ -40,204 +63,6 @@ try:
 except ImportError:
     HAS_PYNPUT = False
 
-# pyopenvr — used to read the hand skeleton SteamVR itself is tracking (e.g.
-# Steam Link camera hand tracking). Broad except: the import can also fail on
-# a missing openvr_api.dll, not just an absent package.
-try:
-    import openvr
-    HAS_OPENVR = True
-except Exception:
-    HAS_OPENVR = False
-
-# ── BLE protocol ─────────────────────────────────────────────────────────
-
-VR_SERVICE_UUID = "0000cf00-0000-1000-8000-00805f9b34fb"
-VR_INPUT_UUID   = "0000cf01-0000-1000-8000-00805f9b34fb"
-
-INPUT_REPORT_FMT = "<BBhhBBI"
-INPUT_REPORT_SIZE = struct.calcsize(INPUT_REPORT_FMT)
-
-# The report is VARIABLE-LENGTH (see CyberFingerFW_ESP32/src/vr_gatt.h). The
-# first 28 bytes are frozen, then imu_present at offset 28, then one appended
-# block per set bit, in bit order — absent IMUs are omitted entirely to cut
-# latency. PARSE BY imu_present, NEVER BY TOTAL LENGTH.
-#
-#   [0..27]  frozen prefix: hand..seq, then q[4] = PRIMARY body quaternion
-#   [28]     imu_present bitmask
-#   then, each only if its bit is set:
-#     PRIMARY  (0x01): a_body1[3] int16   (6B)  — its quat is the header q
-#     SECONDARY(0x02): q_body2[4] f + a_body2[3] int16   (22B)
-#     JOINT    (0x04): q_joint[4] f + a_joint[3] int16   (22B)
-#
-# Legacy pre-imu_present firmware still parses: 12 bytes = base, no IMU;
-# exactly 28 bytes = base + primary quat with no presence byte.
-INPUT_REPORT_IMU_FMT = "<BBhhBBI4f"
-INPUT_REPORT_IMU_SIZE = struct.calcsize(INPUT_REPORT_IMU_FMT)  # 28
-
-IMU_PRESENT_OFFSET = INPUT_REPORT_IMU_SIZE  # 28
-QUAT_FMT, QUAT_SIZE = "<4f", 16
-ACCEL_FMT, ACCEL_SIZE = "<3h", 6  # raw int16 x/y/z, ACCEL_LSB_PER_G counts
-
-ZERO_ACCEL = (0, 0, 0)
-ACCEL_LSB_PER_G = 2048.0  # VR_ACCEL_LSB_PER_G — ±16g on every sensor
-GRAVITY_MS2 = 9.80665
-
-# VrImuBit — which quaternion slots carry real data
-IMU_BODY_PRIMARY   = 0x01
-IMU_BODY_SECONDARY = 0x02
-IMU_JOINT          = 0x04
-
-# Appended block size per bit (0 for the base "no bit"): PRIMARY is accel-only
-# (quat lives in the header); SECONDARY/JOINT carry quat + accel.
-IMU_BLOCK_SIZE = {
-    IMU_BODY_PRIMARY:   ACCEL_SIZE,
-    IMU_BODY_SECONDARY: QUAT_SIZE + ACCEL_SIZE,
-    IMU_JOINT:          QUAT_SIZE + ACCEL_SIZE,
-}
-
-
-def expected_report_len(present):
-    """Total bytes a variable-length report with this imu_present should be."""
-    n = IMU_PRESENT_OFFSET + 1  # frozen prefix + imu_present byte
-    for bit in (IMU_BODY_PRIMARY, IMU_BODY_SECONDARY, IMU_JOINT):
-        if present & bit:
-            n += IMU_BLOCK_SIZE[bit]
-    return n
-
-IMU_SLOT_LABELS = (
-    (IMU_BODY_PRIMARY,   "BODY 1"),
-    (IMU_BODY_SECONDARY, "BODY 2"),
-    (IMU_JOINT,          "JOINT"),
-)
-
-IDENTITY_QUAT = (1.0, 0.0, 0.0, 0.0)
-
-# ── SlimeVR tracker emulation ────────────────────────────────────────────
-#
-# Wire format taken from SlimeVR-Tracker-ESP (src/network/{packets.h,
-# connection.cpp}). Everything multi-byte is BIG-endian — the opposite of the
-# BLE report above, which is the easy mistake to make here.
-#
-# Outbound framing is a 4-byte packet type (three zero bytes then the type)
-# followed by a big-endian u64 packet counter, then the payload. Handshake is
-# the one exception: it always carries packet number 0.
-
-SLIME_DEFAULT_HOST = "127.0.0.1"
-SLIME_DEFAULT_PORT = 6969
-
-SLIME_SEND_HEARTBEAT     = 0
-SLIME_SEND_HANDSHAKE     = 3
-SLIME_SEND_ACCEL         = 4
-SLIME_SEND_BATTERY_LEVEL = 12
-SLIME_SEND_SENSOR_INFO   = 15
-SLIME_SEND_ROTATION_DATA = 17
-
-SLIME_RECV_HEARTBEAT = 1
-SLIME_RECV_HANDSHAKE = 3
-SLIME_RECV_PING_PONG = 10
-
-SLIME_HANDSHAKE_REPLY = b"Hey OVR =D 5"
-
-SLIME_BOARD            = 4    # BOARD_CUSTOM
-SLIME_MCU              = 2    # MCU_ESP32
-SLIME_IMU_TYPE         = 16   # SensorTypeID::ICM45686 — what CyberFinger actually runs
-SLIME_PROTOCOL_VERSION = 22
-# TRACKER_TYPE_SVR_ROTATION. The GLOVE_LEFT/RIGHT types exist, but they make the
-# server expect per-finger sensors we do not have, so we present as plain
-# rotation trackers and let the user assign body parts in the SlimeVR GUI.
-SLIME_TRACKER_TYPE_ROTATION = 0
-
-SLIME_SENSOR_OFFLINE = 0
-SLIME_SENSOR_OK      = 1
-SLIME_DATA_TYPE_NORMAL     = 1  # DATA_TYPE_NORMAL
-SLIME_SENSOR_DATA_ROTATION = 0  # SENSOR_DATATYPE_ROTATION
-
-# SensorPosition, from sensors/sensorposition.h
-SLIME_POS_LEFT_LOWER_ARM  = 13
-SLIME_POS_RIGHT_LOWER_ARM = 14
-SLIME_POS_LEFT_HAND       = 17
-SLIME_POS_RIGHT_HAND      = 18
-
-# Sensor ids within one emulated tracker
-SLIME_SENSOR_BODY  = 0
-SLIME_SENSOR_JOINT = 1
-
-# The server drops a tracker after 3 s of silence, so the service thread has to
-# keep answering heartbeats even when no controller data is flowing.
-SLIME_TIMEOUT = 3.0
-
-SLIME_FIRMWARE_VERSION = "CyberFinger"
-SLIME_VENDOR_NAME      = "DrSciCortex"
-SLIME_VENDOR_URL       = "https://github.com/DrSciCortex"
-SLIME_PRODUCT_NAME     = "CyberFinger"
-
-BTN_TRIGGER = 0x01  # bit0 — AX  (trigger)
-BTN_GRIP    = 0x02  # bit1 — BY  (grip)
-BTN_C       = 0x04  # bit2 — CZ
-BTN_D       = 0x08  # bit3 — DD
-BTN_E       = 0x10  # bit4 — EE
-BTN_MENU    = 0x20  # bit5 — BP  (bumper/menu)
-BTN_JCLICK  = 0x40  # bit6 — ST  (stick click)
-BTN_STSEL   = 0x80  # bit7 — STARTSELECT
-
-BUTTON_NAMES = {
-    BTN_TRIGGER: "TRIG",
-    BTN_GRIP:    "GRIP",
-    BTN_C:       "C",
-    BTN_D:       "D",
-    BTN_E:       "E",
-    BTN_MENU:    "MENU",
-    BTN_JCLICK:  "JCLK",
-    BTN_STSEL:   "ST/SE",
-}
-
-# Brand colors
-COLOR_BG       = "#1a1a1a"
-COLOR_BG2      = "#242424"
-COLOR_BG3      = "#2e2e2e"
-COLOR_FG       = "#e0e0e0"
-COLOR_FG_DIM   = "#888888"
-COLOR_ACCENT   = "#e6007e"  # CyberFinger pink
-COLOR_ACCENT2  = "#ff2d9b"
-COLOR_GREEN    = "#00e676"
-COLOR_RED      = "#ff1744"
-COLOR_ORANGE   = "#ff9100"
-COLOR_BLUE     = "#448aff"
-
-
-def linear_accel_ms2(quat, accel_raw):
-    """Gravity-corrected acceleration in the SENSOR frame, in m/s².
-
-    Uses the quaternion from the same packet to rotate gravity into the sensor
-    frame and subtract it. This is the derivation documented in vr_gatt.h, which
-    is SlimeVR's own, so the result feeds straight into PACKET_ACCEL.
-    """
-    q0, q1, q2, q3 = quat
-    gx = 2.0 * (q1 * q3 - q0 * q2)
-    gy = 2.0 * (q0 * q1 + q2 * q3)
-    gz = q0 * q0 - q1 * q1 - q2 * q2 + q3 * q3
-    scale = GRAVITY_MS2 / ACCEL_LSB_PER_G
-    return (accel_raw[0] * scale - gx * GRAVITY_MS2,
-            accel_raw[1] * scale - gy * GRAVITY_MS2,
-            accel_raw[2] * scale - gz * GRAVITY_MS2)
-
-
-def _blend(c1, c2, t):
-    """Blend two #rrggbb colors; t=0 → c1, t=1 → c2."""
-    t = max(0.0, min(1.0, t))
-    a, b = int(c1[1:], 16), int(c2[1:], 16)
-    parts = []
-    for shift in (16, 8, 0):
-        va = (a >> shift) & 255
-        vb = (b >> shift) & 255
-        parts.append(int(va + (vb - va) * t))
-    return "#%02x%02x%02x" % tuple(parts)
-
-
-def fmt_buttons(btn):
-    parts = [name for bit, name in BUTTON_NAMES.items() if btn & bit]
-    return "+".join(parts) if parts else "none"
-
 
 def ibuffer_to_bytes(ibuffer):
     from winrt.windows.storage.streams import DataReader
@@ -250,7 +75,7 @@ def ibuffer_to_bytes(ibuffer):
 
 
 def resource_path(relative):
-    """Get path to resource, works for dev and PyInstaller."""
+    """Get path to a bridge/ resource, works for dev and PyInstaller."""
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative)
@@ -282,78 +107,10 @@ def _generate_fallback_icon(color):
     return img
 
 
-# ── Hand state ───────────────────────────────────────────────────────────
-
-class HandState:
-    def __init__(self):
-        self.buttons = 0
-        self.joy_x = 0
-        self.joy_y = 0
-        self.trigger = 0
-        self.battery = 100
-        self.packet_count = 0
-        self.timestamp = 0.0
-        self.connected = False
-        self.name = ""
-        # Orientation — absent slots stay identity. imu_present is 0 on older
-        # firmware and on units with no working IMU, which is what drives the
-        # "no IMU installed" placeholder in the panel.
-        self.imu_present = 0
-        self.quat = IDENTITY_QUAT        # primary body IMU
-        self.quat_body2 = IDENTITY_QUAT  # secondary body IMU
-        self.quat_joint = IDENTITY_QUAT  # joint IMU
-        # Raw sensor-frame acceleration per slot, ACCEL_LSB_PER_G counts. Only
-        # meaningful when has_accel is set — firmware predating the 79-byte
-        # report leaves these zero, which is NOT the same as "at rest".
-        self.has_accel = False
-        self.accel = ZERO_ACCEL
-        self.accel_body2 = ZERO_ACCEL
-        self.accel_joint = ZERO_ACCEL
-
-    @property
-    def joy_x_float(self):
-        return max(-1.0, min(1.0, self.joy_x / 32767.0))
-
-    @property
-    def joy_y_float(self):
-        return max(-1.0, min(1.0, self.joy_y / 32767.0))
-
-    @property
-    def trigger_float(self):
-        if self.trigger > 10:
-            return self.trigger / 255.0
-        return 1.0 if (self.buttons & BTN_TRIGGER) else 0.0
-
-    def reset_link(self):
-        """Clear per-connection capability flags before (re)attaching a unit."""
-        self.imu_present = 0
-        self.quat = IDENTITY_QUAT
-        self.quat_body2 = IDENTITY_QUAT
-        self.quat_joint = IDENTITY_QUAT
-        self.has_accel = False
-        self.accel = ZERO_ACCEL
-        self.accel_body2 = ZERO_ACCEL
-        self.accel_joint = ZERO_ACCEL
-
-    @property
-    def has_imu(self):
-        return self.imu_present != 0
-
-    def active_imus(self):
-        """[(label, quat)] for slots this unit actually populates, in wire order."""
-        quats = {
-            IMU_BODY_PRIMARY:   self.quat,
-            IMU_BODY_SECONDARY: self.quat_body2,
-            IMU_JOINT:          self.quat_joint,
-        }
-        return [(label, quats[bit]) for bit, label in IMU_SLOT_LABELS
-                if self.imu_present & bit]
-
-
 # ── BLE discovery + subscription (runs in asyncio thread) ────────────────
 
 class BLEManager:
-    """Manages BLE connections in a background asyncio thread."""
+    """Manages BLE connections in a background asyncio thread (WinRT GATT)."""
 
     def __init__(self, app):
         self.app = app
@@ -411,7 +168,6 @@ class BLEManager:
                     pass
             self._ble_devices = []
             # Give Windows time to release BLE handles
-            import time
             time.sleep(0.5)
             try:
                 loop.close()
@@ -437,6 +193,7 @@ class BLEManager:
             mac, name, ble_dev = left_dev
             self._ble_devices.append(ble_dev)
             self.left.name = name
+            self.left.address = mac
             self.left.connected = True
             self.left.reset_link()
             result = await self._setup_device("LEFT", ble_dev)
@@ -451,6 +208,7 @@ class BLEManager:
             mac, name, ble_dev = right_dev
             self._ble_devices.append(ble_dev)
             self.right.name = name
+            self.right.address = mac
             self.right.connected = True
             self.right.reset_link()
             result = await self._setup_device("RIGHT", ble_dev)
@@ -479,95 +237,34 @@ class BLEManager:
                 await asyncio.sleep(0.1)
 
     def _handle_data(self, data):
-        if len(data) < INPUT_REPORT_SIZE:
+        report = parse_report(data)
+        if report is None:
             return
 
-        # Variable-length: the frozen prefix is always present; IMU blocks are
-        # walked by imu_present, never inferred from total length.
-        present = 0
-        quats = [IDENTITY_QUAT, IDENTITY_QUAT, IDENTITY_QUAT]
-        accels = [ZERO_ACCEL, ZERO_ACCEL, ZERO_ACCEL]
-        has_accel = False
-
-        if len(data) >= INPUT_REPORT_IMU_SIZE:
-            (hand, buttons, joy_x, joy_y, trigger, battery, seq,
-             qw, qx, qy, qz) = struct.unpack(
-                INPUT_REPORT_IMU_FMT, data[:INPUT_REPORT_IMU_SIZE])
-            quats[0] = (qw, qx, qy, qz)
-
-            if len(data) > IMU_PRESENT_OFFSET:
-                # Modern variable-length report: presence byte then blocks.
-                present = data[IMU_PRESENT_OFFSET]
-                # Length must agree with imu_present, or firmware and bridge
-                # disagree about the wire format. Checked up front rather than
-                # only on truncation: an OVER-long payload still unpacks, so it
-                # would otherwise mis-parse every slot in silence.
-                exp = expected_report_len(present)
-                if len(data) != exp and not self._warned_report_len:
-                    self._warned_report_len = True
-                    self.app.log(f"IMU report length {len(data)} != expected "
-                                 f"{exp} for present=0x{present:02X}")
-                off = IMU_PRESENT_OFFSET + 1
-                try:
-                    # PRIMARY: accel only; its quaternion is the header q above.
-                    if present & IMU_BODY_PRIMARY:
-                        accels[0] = struct.unpack_from(ACCEL_FMT, data, off)
-                        off += ACCEL_SIZE
-                        has_accel = True
-                    # SECONDARY / JOINT: quaternion then accel.
-                    for bit, slot in ((IMU_BODY_SECONDARY, 1), (IMU_JOINT, 2)):
-                        if present & bit:
-                            quats[slot] = struct.unpack_from(QUAT_FMT, data, off)
-                            off += QUAT_SIZE
-                            accels[slot] = struct.unpack_from(ACCEL_FMT, data, off)
-                            off += ACCEL_SIZE
-                            has_accel = True
-                except struct.error:
-                    # Truncated block — keep what parsed, drop the presence bits
-                    # we couldn't back with data so downstream stays consistent.
-                    # The mismatch was already logged above.
-                    present = 0
-                    for bit, slot in ((IMU_BODY_PRIMARY, 0),
-                                      (IMU_BODY_SECONDARY, 1), (IMU_JOINT, 2)):
-                        if accels[slot] != ZERO_ACCEL or quats[slot] != IDENTITY_QUAT:
-                            present |= bit
-            else:
-                # Legacy 28-byte report: primary quat, no presence byte. All-zero
-                # quaternion is the only signal the IMU failed to come up.
-                if any(abs(v) > 1e-6 for v in quats[0]):
-                    present = IMU_BODY_PRIMARY
-        else:
-            hand, buttons, joy_x, joy_y, trigger, battery, seq = \
-                struct.unpack(INPUT_REPORT_FMT, data[:INPUT_REPORT_SIZE])
-
-        h = min(hand, 1)
+        # The report carries its own hand byte here: WinRT delivers both
+        # devices' notifications through one manager, so the packet is the
+        # authority on which controller sent it.
+        h = min(report.hand, 1)
         state = self.left if h == 0 else self.right
+        hn = "L" if h == 0 else "R"
 
-        if present != state.imu_present:
-            hn = "L" if h == 0 else "R"
-            names = [label for bit, label in IMU_SLOT_LABELS if present & bit]
+        if not report.length_ok and not self._warned_report_len:
+            self._warned_report_len = True
+            self.app.log(f"IMU report length {report.raw_len} != expected "
+                         f"{report.expected_len} for "
+                         f"present=0x{report.imu_present:02X}")
+
+        buttons_changed, imu_changed = state.apply(report)
+
+        if imu_changed:
             # Byte count and raw bitmask included so a slot going missing can be
-            # blamed on the wire or on this parser without a sniffer: the length
+            # blamed on the wire or on the parser without a sniffer: the length
             # is what actually arrived, before any truncation fallback ran.
-            self.app.log(f"{hn} IMU: {', '.join(names) if names else 'none detected'}"
-                         f"  ({len(data)}B, present=0x{present:02X})")
-        state.imu_present = present
-        state.quat, state.quat_body2, state.quat_joint = quats
-        state.has_accel = has_accel
-        state.accel, state.accel_body2, state.accel_joint = accels
-
-        old_buttons = state.buttons
-        state.buttons = buttons
-        state.joy_x = joy_x
-        state.joy_y = joy_y
-        state.trigger = trigger
-        state.battery = battery
-        state.timestamp = time.time()
-        state.packet_count += 1
-
-        if buttons != old_buttons:
-            hn = "L" if h == 0 else "R"
-            self.app.log(f"{hn} BTN: {fmt_buttons(buttons)}")
+            self.app.log(f"{hn} IMU: {describe_imus(report.imu_present)}"
+                         f"  ({report.raw_len}B, "
+                         f"present=0x{report.imu_present:02X})")
+        if buttons_changed:
+            self.app.log(f"{hn} BTN: {fmt_buttons(report.buttons)}")
 
         self.app.on_input(h, state)
 
@@ -711,7 +408,7 @@ class BLEManager:
             else:
                 self.app.log(f"{label}: Using polling mode")
                 return ("poll", vr_input, None)
-        except Exception as e:
+        except Exception:
             self.app.log(f"{label}: Notify failed, polling")
             return ("poll", vr_input, None)
 
@@ -728,1049 +425,10 @@ class BLEManager:
 
 # ── VR Mode ──────────────────────────────────────────────────────────────
 #
-# Lives in vr_controller.py (FusedVRMode): fuses the runtime hand skeleton,
-# device 6DOF and controller buttons into driver_cyberfinger's emulated
-# controllers. The old CFGP-only VRMode is subsumed by it — with no skeleton
-# source available, FusedVRMode degrades to exactly that behavior.
-
-
-# ── SlimeVR forwarding (runs alongside whichever mode is active) ─────────
-
-class SlimeVRTracker:
-    """One emulated SlimeVR tracker — one CyberFinger unit, up to two sensors.
-
-    The server keys trackers by the MAC in the handshake, so each unit gets a
-    stable synthetic MAC and its own socket. Rotation packets are pushed from
-    the BLE thread via send_rotation(); a service thread owns the handshake,
-    heartbeat replies and periodic sensor-info re-announcements.
-    """
-
-    def __init__(self, hand, host, port, log=None):
-        self.hand = hand  # 0 = left, 1 = right
-        self.hand_name = "L" if hand == 0 else "R"
-        self.target = (host, port)
-        self._log = log or (lambda msg: None)
-
-        # Locally-administered MAC (0x02 prefix) so it cannot collide with real
-        # hardware, stable across restarts so SlimeVR keeps its assignment.
-        self.mac = bytes((0x02, 0xCF, 0x00, 0x00, 0x00, hand + 1))
-
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(("0.0.0.0", 0))  # ephemeral — the server owns 6969
-        self.sock.settimeout(0.2)
-
-        self._lock = threading.Lock()
-        self._packet_number = 0
-        self._connected = False
-        self._last_inbound = 0.0
-        self._last_handshake = 0.0
-        self._last_sensor_info = 0.0
-        self._sensors = ()  # ((sensor_id, position), ...) currently advertised
-        self._running = False
-        self._thread = None
-
-    # ── framing ──
-
-    def _send(self, ptype, payload, packet_number=None):
-        with self._lock:
-            if packet_number is None:
-                packet_number = self._packet_number
-                self._packet_number += 1
-            pkt = struct.pack(">IQ", ptype, packet_number) + payload
-            try:
-                self.sock.sendto(pkt, self.target)
-            except Exception:
-                pass
-
-    @staticmethod
-    def _short_string(text):
-        raw = text.encode("utf-8")[:255]
-        return bytes((len(raw),)) + raw
-
-    def _handshake_payload(self):
-        sstr = self._short_string
-        return (struct.pack(">IIIIIII",
-                            SLIME_BOARD, SLIME_IMU_TYPE, SLIME_MCU,
-                            0, 0, 0,  # legacy IMU fields, unused
-                            SLIME_PROTOCOL_VERSION)
-                + sstr(SLIME_FIRMWARE_VERSION)
-                + self.mac
-                + bytes((SLIME_TRACKER_TYPE_ROTATION,))
-                + sstr(SLIME_VENDOR_NAME)
-                + sstr(SLIME_VENDOR_URL)
-                + sstr(SLIME_PRODUCT_NAME)
-                + sstr("")   # UPDATE_ADDRESS
-                + sstr(""))  # UPDATE_NAME
-
-    # ── outbound data ──
-
-    def set_sensors(self, sensors):
-        """Declare which sensors this tracker exposes, as ((id, position), ...)."""
-        if sensors == self._sensors:
-            return
-        # Retire anything that just disappeared so the server stops waiting on it.
-        gone = [s for s in self._sensors if s not in sensors]
-        self._sensors = tuple(sensors)
-        if self._connected:
-            for sid, pos in gone:
-                self._send_sensor_info(sid, pos, SLIME_SENSOR_OFFLINE)
-        self._last_sensor_info = 0.0  # re-announce on the next service tick
-
-    def _send_sensor_info(self, sensor_id, position, state=SLIME_SENSOR_OK):
-        self._send(SLIME_SEND_SENSOR_INFO,
-                   struct.pack(">BBBHBBBff",
-                               sensor_id, state, SLIME_IMU_TYPE,
-                               0,      # sensorConfigData
-                               0,      # hasCompletedRestCalibration
-                               position, SLIME_SENSOR_DATA_ROTATION,
-                               0.0, 0.0))  # TPS counters, debug only
-
-    def send_rotation(self, sensor_id, quat):
-        """quat is CyberFinger order (w, x, y, z); the wire wants x, y, z, w."""
-        if not self._connected:
-            return
-        w, x, y, z = quat
-        self._send(SLIME_SEND_ROTATION_DATA,
-                   struct.pack(">BBffffB", sensor_id, SLIME_DATA_TYPE_NORMAL,
-                               x, y, z, w, 0))
-
-    def send_accel(self, sensor_id, accel):
-        """Gravity-corrected sensor-frame acceleration, m/s². Note that unlike
-        every other packet the sensor id comes last here."""
-        if not self._connected:
-            return
-        x, y, z = accel
-        self._send(SLIME_SEND_ACCEL, struct.pack(">fffB", x, y, z, sensor_id))
-
-    def send_battery(self, percent):
-        if not self._connected:
-            return
-        frac = max(0.0, min(1.0, percent / 100.0))
-        # The server wants a voltage too; approximate a single li-ion cell.
-        self._send(SLIME_SEND_BATTERY_LEVEL,
-                   struct.pack(">ff", 3.3 + 0.9 * frac, frac))
-
-    # ── service thread ──
-
-    def start(self):
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._service_loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._running = False
-        if self._connected:
-            for sid, pos in self._sensors:
-                self._send_sensor_info(sid, pos, SLIME_SENSOR_OFFLINE)
-        self._connected = False
-        if self._thread:
-            self._thread.join(timeout=1.0)
-            self._thread = None
-        try:
-            self.sock.close()
-        except Exception:
-            pass
-
-    def _service_loop(self):
-        while self._running:
-            try:
-                data, addr = self.sock.recvfrom(2048)
-            except socket.timeout:
-                data = None
-            except Exception:
-                data = None
-            if data:
-                self._handle_inbound(data, addr)
-
-            now = time.time()
-            if not self._connected:
-                if now - self._last_handshake >= 1.0:
-                    self._last_handshake = now
-                    self._send(SLIME_SEND_HANDSHAKE, self._handshake_payload(),
-                               packet_number=0)
-            elif now - self._last_inbound > SLIME_TIMEOUT:
-                self._connected = False
-                self._log(f"SlimeVR: {self.hand_name} timed out, re-announcing")
-            elif now - self._last_sensor_info >= 1.0:
-                self._last_sensor_info = now
-                for sid, pos in self._sensors:
-                    self._send_sensor_info(sid, pos)
-
-    def _handle_inbound(self, data, addr):
-        # The handshake reply is unframed: type in byte 0, payload right after.
-        # Framed packets always start with a zero byte, so there is no ambiguity.
-        if data[0] == SLIME_RECV_HANDSHAKE:
-            if data[1:13] != SLIME_HANDSHAKE_REPLY:
-                return
-            self.target = addr  # latch the server's real source port
-            self._last_inbound = time.time()
-            if not self._connected:
-                self._connected = True
-                self._last_sensor_info = 0.0
-                self._log(f"SlimeVR: {self.hand_name} tracker connected")
-            return
-
-        if len(data) < 4:
-            return
-        self._last_inbound = time.time()
-
-        ptype = data[3]
-        if ptype == SLIME_RECV_HEARTBEAT:
-            self._send(SLIME_SEND_HEARTBEAT, b"")
-        elif ptype == SLIME_RECV_PING_PONG:
-            with self._lock:
-                try:
-                    self.sock.sendto(data, self.target)  # echoed verbatim
-                except Exception:
-                    pass
-
-
-class SlimeVRForwarder:
-    """Feeds CyberFinger IMU quaternions to a SlimeVR server as emulated trackers.
-
-    Runs in parallel with the active mode rather than replacing it — VR/Gamepad
-    still get buttons and sticks while SlimeVR gets orientation.
-    """
-
-    # (sensor id, left position, right position) per logical sensor
-    _BODY_POS  = (SLIME_POS_LEFT_LOWER_ARM, SLIME_POS_RIGHT_LOWER_ARM)
-    _JOINT_POS = (SLIME_POS_LEFT_HAND, SLIME_POS_RIGHT_HAND)
-
-    def __init__(self, host=SLIME_DEFAULT_HOST, port=SLIME_DEFAULT_PORT,
-                 body_slot="body1", log=None):
-        self.body_slot = body_slot
-        self._log = log or (lambda msg: None)
-        self.trackers = {
-            0: SlimeVRTracker(0, host, port, log),
-            1: SlimeVRTracker(1, host, port, log),
-        }
-        self._last_battery = {0: 0.0, 1: 0.0}
-
-    def start(self):
-        for tracker in self.trackers.values():
-            tracker.start()
-
-    def stop(self):
-        for tracker in self.trackers.values():
-            tracker.stop()
-
-    def set_body_slot(self, body_slot):
-        self.body_slot = body_slot
-
-    def _body_slot(self, state):
-        """Pick between the two redundant body IMUs, honouring the user's choice.
-
-        Body 1 and Body 2 are the same physical location (ICM at 0x69, QMI at
-        0x6B), not two tracked points, so only one is ever forwarded.
-        """
-        order = ((IMU_BODY_PRIMARY, state.quat, state.accel),
-                 (IMU_BODY_SECONDARY, state.quat_body2, state.accel_body2))
-        if self.body_slot == "body2":
-            order = tuple(reversed(order))
-        for bit, quat, accel in order:
-            if state.imu_present & bit:
-                return quat, accel
-        return None
-
-    def on_input(self, hand, state):
-        """Called from the BLE thread on each input report."""
-        tracker = self.trackers.get(hand)
-        if tracker is None:
-            return
-
-        body = self._body_slot(state)
-        joint = ((state.quat_joint, state.accel_joint)
-                 if state.imu_present & IMU_JOINT else None)
-
-        sensors = []
-        if body is not None:
-            sensors.append((SLIME_SENSOR_BODY, self._BODY_POS[hand]))
-        if joint is not None:
-            sensors.append((SLIME_SENSOR_JOINT, self._JOINT_POS[hand]))
-        tracker.set_sensors(tuple(sensors))
-
-        for sensor_id, slot in ((SLIME_SENSOR_BODY, body),
-                                (SLIME_SENSOR_JOINT, joint)):
-            if slot is None:
-                continue
-            quat, accel_raw = slot
-            tracker.send_rotation(sensor_id, quat)
-            # Older firmware sends no accel at all; its zeroed vector would
-            # decode as a constant 1g of linear acceleration, so skip it.
-            if state.has_accel:
-                tracker.send_accel(sensor_id, linear_accel_ms2(quat, accel_raw))
-
-        now = time.time()
-        if now - self._last_battery[hand] >= 10.0:
-            self._last_battery[hand] = now
-            tracker.send_battery(state.battery)
-
-
-# ── Runtime hand skeleton (display only) ─────────────────────────────────
-#
-# Reads the 31-bone hand skeleton the VR runtime is tracking — e.g. Steam
-# Link's camera-based hand tracking — for display under each hand panel.
-#
-# Backend contract (duck-typed, like the bridge modes): .start(), .stop(),
-# .status (short string for the panel placeholder), and .hands — a 2-list
-# indexed by hand (0=left, 1=right) holding either None or a tuple of
-# (x, y, z) joint positions in a wrist-origin space. Backends swap whole
-# tuples in atomically, so readers need no lock.
-#
-# Windows backend is OpenVR skeletal input: its Background app type attaches
-# to a running SteamVR without a graphics session and without contending with
-# the focused game — something OpenXR on SteamVR cannot do yet (no headless,
-# XR_EXTX_overlay still provisional). An OpenXR backend for bridge_linux /
-# Monado can slot into create_skeleton_source() when that lands.
-
-# Hand skeleton indices: 0 root/palm, 1 wrist, then five finger chains off
-# the wrist, tips at 5/10/15/20/25. This layout is shared by SteamVR's native
-# 31-bone skeleton (26-30 are aux bones, ignored) and the 26-bone OpenXR-style
-# set Steam Link reports; bone count itself is queried from the runtime.
-SKELETON_CHAINS = (
-    (1, 2, 3, 4, 5),          # thumb
-    (1, 6, 7, 8, 9, 10),      # index
-    (1, 11, 12, 13, 14, 15),  # middle
-    (1, 16, 17, 18, 19, 20),  # ring
-    (1, 21, 22, 23, 24, 25),  # pinky
-)
-SKELETON_TIPS = frozenset((5, 10, 15, 20, 25))
-
-SKELETON_ACTION_SET = "/actions/cyberfinger"
-SKELETON_ACTIONS = ("/actions/cyberfinger/in/skeleton_left",
-                    "/actions/cyberfinger/in/skeleton_right")
-
-SKELETON_APP_KEY = "drscicortex.cyberfinger.bridge"
-
-# VR events worth narrating in the console — resolved by name at runtime so a
-# pyopenvr build lacking one just skips it.
-_SKELETON_EVENTS = (
-    "VREvent_TrackedDeviceActivated",
-    "VREvent_TrackedDeviceDeactivated",
-    "VREvent_TrackedDeviceRoleChanged",
-    "VREvent_TrackedDeviceUserInteractionStarted",   # headset put on
-    "VREvent_TrackedDeviceUserInteractionEnded",     # headset taken off
-    "VREvent_EnterStandbyMode",
-    "VREvent_LeaveStandbyMode",
-    "VREvent_Input_BindingLoadFailed",
-    "VREvent_Input_BindingLoadSuccessful",
-    "VREvent_Input_ActionManifestReloaded",
-    "VREvent_SceneApplicationChanged",
-)
-
-_HMD_ACTIVITY_LEVELS = {
-    "k_EDeviceActivityLevel_Unknown": "activity unknown",
-    "k_EDeviceActivityLevel_Idle": "idle (not worn)",
-    "k_EDeviceActivityLevel_UserInteraction": "active (worn)",
-    "k_EDeviceActivityLevel_UserInteraction_Timeout": "recently active",
-    "k_EDeviceActivityLevel_Standby": "standby",
-    "k_EDeviceActivityLevel_Idle_Timeout": "idle timeout",
-}
-
-
-STEAMVR_SETTINGS_PATH = os.path.join(
-    os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
-    "Steam", "config", "steamvr.vrsettings")
-
-
-def _clean_pinned_bindings_offline(log):
-    """Drop workshop binding pins for our app key from steamvr.vrsettings.
-
-    SteamVR's binding UI can autosave a legacy workshop binding as this app's
-    pinned selection, which silently disables our skeleton actions (see
-    _check_pinned_binding). Editing the file is only safe while vrserver is
-    down — it rewrites the file on exit — so this runs from the retry path
-    after openvr.init fails. Only vr-input-workshop:// pins are dropped; a
-    deliberately hand-picked local binding survives. Returns True if the file
-    was changed.
-    """
-    try:
-        with open(STEAMVR_SETTINGS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return False
-    section = data.get(SKELETON_APP_KEY)
-    if not isinstance(section, dict):
-        return False
-    removed = []
-    for key in list(section.keys()):
-        if not key.endswith("_steamvrinput"):
-            continue
-        val = section[key]
-        if isinstance(val, str) and not val.startswith("vr-input-workshop://"):
-            continue  # a non-workshop pin was chosen on purpose; keep it
-        removed.append(key)
-        del section[key]
-    if not removed:
-        return False
-    if not section:
-        del data[SKELETON_APP_KEY]
-    try:
-        tmp = STEAMVR_SETTINGS_PATH + ".cyberfinger.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=3)
-        os.replace(tmp, STEAMVR_SETTINGS_PATH)
-    except Exception as e:
-        log(f"Skeleton: could not clean steamvr.vrsettings: {e!r}")
-        return False
-    log(f"Skeleton: removed stale binding pin(s) from steamvr.vrsettings: "
-        + ", ".join(removed))
-    return True
-
-
-def _write_app_manifest():
-    """Write a .vrmanifest reflecting how this process was actually launched.
-
-    Registering it (plus identifyApplication) is what makes SteamVR show
-    "CyberFinger Bridge" in Manage Controller Bindings instead of filing us
-    under an auto-generated "python.exe" key. Generated at runtime because the
-    truthful binary path differs between `python cyberfinger_gui.py` and the
-    PyInstaller exe. Returns the manifest path.
-    """
-    if getattr(sys, "frozen", False):
-        binary, arguments = sys.executable, ""
-    else:
-        binary = sys.executable
-        arguments = f'"{os.path.abspath(sys.argv[0])}"'
-    manifest = {
-        "applications": [{
-            "app_key": SKELETON_APP_KEY,
-            "launch_type": "binary",
-            "binary_path_windows": binary,
-            "arguments": arguments,
-            "is_dashboard_overlay": False,
-            "strings": {
-                "en_us": {
-                    "name": "CyberFinger Bridge",
-                    "description": "CyberFinger bridge — hand skeleton display",
-                },
-            },
-        }],
-    }
-    cfg_dir = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
-                           "CyberFingerBridge")
-    os.makedirs(cfg_dir, exist_ok=True)
-    path = os.path.join(cfg_dir, "cyberfinger.vrmanifest")
-    with open(path, "w") as f:
-        json.dump(manifest, f, indent=2)
-    return path
-
-
-def create_skeleton_source(log=None, bisect=False):
-    """Pick the skeleton backend for this platform, or None if unavailable.
-
-    bisect=True ("skeleton_bisect" in settings.json) brings the OpenVR
-    session up in staged steps with 20 s holds, so if SteamVR falls over the
-    last stage announced in the console names the culprit.
-    """
-    if HAS_OPENVR:
-        return OpenVRSkeletonSource(log, bisect=bisect)
-    return None
-
-
-class OpenVRSkeletonSource:
-    """Polls SteamVR for hand skeletons in a background thread.
-
-    Connects as a Background app so it never launches SteamVR itself; while
-    SteamVR is down it just retries quietly.
-    """
-
-    RETRY_S = 5.0
-    HOLD_S = 20.0  # per-stage hold in bisect mode
-
-    def __init__(self, log=None, bisect=False):
-        self._log = log or (lambda msg: None)
-        self._bisect = bisect
-        self._poll_actions = True
-        self._ready_at = 0.0
-        # Per hand: (rot_3x3_rows, head_local_pos_xyz, distance_m) or None.
-        # World pose of the hand device relative to the HMD, for the 6DOF
-        # display. Swapped atomically like .hands.
-        self.pose_info = [None, None]
-        # Driver stream (VR fusion mode): when feed_enabled, each tracked
-        # hand publishes (bones31x7 parent-space, curls5, confidence,
-        # (pos, quat)) — the payload FusedVRMode packs into HTSK packets.
-        self.feed_enabled = False
-        self.driver_feed = [None, None]
-        # Per hand: (position, rotation rows) in the raw tracking universe —
-        # what the driver needs, as opposed to pose_info's head-relative form.
-        self.raw_pose = [None, None]
-        self.hands = [None, None]   # 0 = left, 1 = right
-        self.status = "starting..."
-        self._running = False
-        self._thread = None
-        self._ready = False
-        self._logged_waiting = False
-        self._offline_cleaned = False
-        self._reset_requested = False
-        self._reset_count = 0
-        self._vrin = None
-        self._system = None
-        self._actions = [None, None]
-        self._action_set = None
-        self._event_names = {getattr(openvr, n): n[8:] for n in _SKELETON_EVENTS
-                             if hasattr(openvr, n)}
-        self._activity_names = {getattr(openvr, k): v
-                                for k, v in _HMD_ACTIVITY_LEVELS.items()
-                                if hasattr(openvr, k)}
-
-    def start(self):
-        if self._running:
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._running = False
-        if self._thread:
-            self._thread.join(timeout=1.0)
-            self._thread = None
-        self._teardown()
-
-    # ── OpenVR session ──
-
-    def _init_openvr(self):
-        self._stage_connect()
-        self._hold("1/5 client connected (idle)")
-        self._stage_identity()
-        self._hold("2/5 app identity registered")
-        self._stage_actions()
-        self._hold("3/5 action manifest + handles loaded")
-
-        # In bisect mode stage 4 is passive polling (events + HMD activity
-        # only); _loop promotes to stage 5 (action polling) after the hold.
-        self._poll_actions = not self._bisect
-        self._ready = True
-        self._ready_at = time.time()
-        self.status = "connected"
-        self._connected_at = time.time()
-        self._hand_active = [None, None]   # tri-state: unknown / False / True
-        self._ever_active = False
-        self._bone_count = [0, 0]
-        self._err_logged = [False, False]
-        self._hmd_activity = None
-        self._last_diag = time.time()
-        self._inactive_since = None
-        self._ctype_logged = {}
-        self._logged_waiting = False
-        self._reset_requested = False
-        self._log("Skeleton: connected to SteamVR")
-        # Binding attachment completes on the device's first delivered input
-        # event (observed: a thumb-index pinch attaches instantly after
-        # standby). A haptic pulse is the one output we can push without
-        # bound actions; on some stacks it nudges that same path awake.
-        for role in (openvr.TrackedControllerRole_LeftHand,
-                     openvr.TrackedControllerRole_RightHand):
-            try:
-                idx = self._system.getTrackedDeviceIndexForControllerRole(role)
-                if idx != openvr.k_unTrackedDeviceIndexInvalid:
-                    self._system.triggerHapticPulse(idx, 0, 1000)
-            except Exception:
-                pass
-        if self._bisect:
-            self._log("Skeleton BISECT: stage 4/5 passive polling "
-                      f"(events + HMD activity) — holding {int(self.HOLD_S)} s")
-        self._log_controller_types()
-
-    def _stage_connect(self):
-        # Probe as Background first: that type never auto-launches SteamVR,
-        # so the bridge stays passive while VR is down. Once the server is
-        # known to be up, reconnect as Overlay — overlay apps' action sets
-        # keep getting pumped even in the void (no scene app; this machine
-        # runs with SteamVR Home disabled), where a Background app's skeleton
-        # bindings may never attach origins.
-        openvr.init(openvr.VRApplication_Background)
-        openvr.shutdown()
-        openvr.init(openvr.VRApplication_Overlay)
-        self._system = openvr.VRSystem()
-        self._vrin = openvr.VRInput()
-        # Hold a real (hidden) overlay handle, not just the app type: after
-        # the vrlink HMD cycles through standby in the void, vrserver stops
-        # attaching binding origins for clients without one.
-        try:
-            self._overlay = openvr.VROverlay().createOverlay(
-                "drscicortex.cyberfinger.bridge.anchor", "CyberFinger Bridge")
-        except Exception as e:
-            self._overlay = None
-            self._log(f"Skeleton: overlay anchor failed: {type(e).__name__}")
-
-    def _stage_identity(self):
-        # Identify as our own app key so SteamVR's binding UI lists us as
-        # "CyberFinger Bridge" rather than an auto-generated python.exe entry.
-        # Best-effort: skeleton reading works without it, rebinding does not.
-        try:
-            vrapps = openvr.VRApplications()
-            vrapps.addApplicationManifest(_write_app_manifest(), True)  # temporary
-            vrapps.identifyApplication(os.getpid(), SKELETON_APP_KEY)
-        except Exception as e:
-            self._log(f"Skeleton: app identity registration failed: {e!r}")
-
-    def _stage_actions(self):
-        self._manifest_path = resource_path(
-            os.path.join("assets", "cyberfinger_actions.json"))
-        self._vrin.setActionManifestPath(self._manifest_path)
-        self._action_set = self._vrin.getActionSetHandle(SKELETON_ACTION_SET)
-        self._actions = [self._vrin.getActionHandle(a) for a in SKELETON_ACTIONS]
-
-    def _hold(self, label):
-        """In bisect mode, announce the stage and idle through its window so a
-        SteamVR-side death lands unambiguously inside one stage."""
-        if not self._bisect:
-            return
-        self._log(f"Skeleton BISECT: stage {label} — holding {int(self.HOLD_S)} s")
-        deadline = time.time() + self.HOLD_S
-        while self._running and time.time() < deadline:
-            time.sleep(0.2)
-        if not self._running:
-            raise RuntimeError("stopped during bisect hold")
-
-    def _log_controller_types(self):
-        """Log each hand's controller type — this is the string a binding file
-        must name, so it is the first thing to check when nothing draws."""
-        for role, name in ((openvr.TrackedControllerRole_LeftHand, "L"),
-                           (openvr.TrackedControllerRole_RightHand, "R")):
-            try:
-                idx = self._system.getTrackedDeviceIndexForControllerRole(role)
-                if idx == openvr.k_unTrackedDeviceIndexInvalid:
-                    continue
-                ctype = self._system.getStringTrackedDeviceProperty(
-                    idx, openvr.Prop_ControllerType_String)
-            except Exception:
-                continue
-            if ctype and ctype != self._ctype_logged.get(name):
-                self._ctype_logged[name] = ctype
-                self._log(f"Skeleton: {name} controller type '{ctype}'")
-                self._check_pinned_binding(ctype)
-
-    def _check_pinned_binding(self, ctype):
-        """Warn if a saved workshop binding pins this controller type.
-
-        Opening SteamVR's binding UI on an app can autosave a legacy workshop
-        binding as the app's "current" selection (steamvr.vrsettings, key
-        <ctype>_250820_CurrentURL_steamvrinput). A pin overrides our
-        default_bindings entirely, and a legacy binding carries no skeleton
-        actions — so the skeleton goes permanently inactive with no error
-        anywhere.
-
-        Reads the settings FILE, never the IVRSettings API: every vrserver
-        c0000005 today followed an IVRSettings call from this client within
-        seconds (getString included), while runs without any settings IPC were
-        crash-free — so this client does not speak IVRSettings at all. Repair
-        also happens on the file, offline — see
-        _clean_pinned_bindings_offline, run while SteamVR is down.
-        """
-        try:
-            with open(STEAMVR_SETTINGS_PATH, "r", encoding="utf-8") as f:
-                section = json.load(f).get(SKELETON_APP_KEY, {})
-            val = section.get(f"{ctype}_250820_CurrentURL_steamvrinput")
-        except Exception:
-            return
-        if val and str(val).startswith("vr-input-workshop://"):
-            self._log(f"Skeleton: WARNING — saved binding {val} overrides the "
-                      f"defaults for '{ctype}'; skeleton will stay inactive. "
-                      "Fix: close SteamVR and relaunch this bridge (auto-clean), "
-                      "or pick the CyberFinger default binding in SteamVR.")
-
-    def _teardown(self):
-        self._ready = False
-        self.hands = [None, None]
-        self.pose_info = [None, None]
-        self.driver_feed = [None, None]
-        self.raw_pose = [None, None]
-        self._vrin = None
-        self._system = None
-        try:
-            openvr.shutdown()
-        except Exception:
-            pass
-
-    def _loop(self):
-        while self._running:
-            if not self._ready:
-                try:
-                    self._init_openvr()
-                except Exception:
-                    self._teardown()
-                    self.status = "SteamVR not running"
-                    if not self._logged_waiting:
-                        self._logged_waiting = True
-                        self._log("Skeleton: SteamVR not running, will retry")
-                    # With vrserver down it is safe to sweep out any stale
-                    # workshop binding pin that would mute the skeleton.
-                    if not self._offline_cleaned:
-                        self._offline_cleaned = True
-                        try:
-                            _clean_pinned_bindings_offline(self._log)
-                        except Exception:
-                            pass
-                    # Sleep in short slices so stop() stays responsive.
-                    deadline = time.time() + self.RETRY_S
-                    while self._running and time.time() < deadline:
-                        time.sleep(0.2)
-                    continue
-            try:
-                self._poll()
-            except Exception:
-                self._teardown()
-                self.status = "SteamVR lost, retrying"
-                self._log("Skeleton: lost SteamVR connection")
-                continue
-            if self._reset_requested:
-                # Bindings never attached (input context built while the HMD
-                # was asleep). A fresh client connect attaches immediately —
-                # the manual-reload observation, automated.
-                self._reset_requested = False
-                self._log("Skeleton: bindings never attached — reconnecting")
-                self._teardown()
-                self.status = "reconnecting..."
-                continue
-            if (self._bisect and not self._poll_actions
-                    and time.time() - self._ready_at >= self.HOLD_S):
-                self._poll_actions = True
-                self._log("Skeleton BISECT: stage 5/5 full action polling "
-                          "(updateActionState + skeletal reads)")
-            time.sleep(1.0 / 30.0)
-
-    def _poll(self):
-        # A quit event means SteamVR is going down — raise into the retry path
-        # so the session is torn down promptly instead of erroring out call by
-        # call while SteamVR waits on us to exit.
-        ev = openvr.VREvent_t()
-        while self._system.pollNextEvent(ev):
-            if ev.eventType == openvr.VREvent_Quit:
-                self._system.acknowledgeQuit_Exiting()
-                raise RuntimeError("SteamVR quit")
-            name = self._event_names.get(ev.eventType)
-            if name:
-                self._log(f"Skeleton: event {name} (device {ev.trackedDeviceIndex})")
-            if ev.eventType in (openvr.VREvent_TrackedDeviceActivated,
-                                openvr.VREvent_TrackedDeviceRoleChanged):
-                self._log_controller_types()
-                # Devices returning from standby may accept a different bone
-                # count, and any earlier read failure is stale news — reset so
-                # recovery is attempted and new failures get logged again.
-                self._bone_count = [0, 0]
-                self._err_logged = [False, False]
-            # A scene app starting is the one event known to un-wedge
-            # vrserver's binding attachment, so it re-arms fast reconnects.
-            # Device churn does NOT — it's constant with camera hand tracking.
-            if ev.eventType == getattr(openvr,
-                                       "VREvent_SceneApplicationChanged", -1):
-                self._reset_count = 0
-
-        # HMD activity explains most "why is nothing tracking" confusion —
-        # Steam Link only streams hand skeletons while the headset is worn.
-        try:
-            lvl = self._system.getTrackedDeviceActivityLevel(
-                openvr.k_unTrackedDeviceIndex_Hmd)
-        except Exception:
-            lvl = None
-        if lvl != self._hmd_activity:
-            self._hmd_activity = lvl
-            self._log("Skeleton: HMD "
-                      + self._activity_names.get(lvl, f"activity {lvl}"))
-
-        # World poses for the 6DOF display. Device poses come from IVRSystem,
-        # not the skeletal actions, so this works even while the skeleton is
-        # still warming up.
-        try:
-            poses = (openvr.TrackedDevicePose_t
-                     * openvr.k_unMaxTrackedDeviceCount)()
-            self._system.getDeviceToAbsoluteTrackingPose(
-                openvr.TrackingUniverseStanding, 0.0, poses)
-            hmd = self._extract_pose(poses[openvr.k_unTrackedDeviceIndex_Hmd])
-            for hand, role in ((0, openvr.TrackedControllerRole_LeftHand),
-                               (1, openvr.TrackedControllerRole_RightHand)):
-                info = None
-                raw = None
-                idx = self._system.getTrackedDeviceIndexForControllerRole(role)
-                if idx != openvr.k_unTrackedDeviceIndexInvalid:
-                    dev = self._extract_pose(poses[idx])
-                    if dev is not None:
-                        raw = (dev[0], dev[1])
-                        if hmd is not None:
-                            info = self._relative_pose(hmd, dev)
-                self.pose_info[hand] = info
-                self.raw_pose[hand] = raw
-        except Exception:
-            self.pose_info = [None, None]
-            self.raw_pose = [None, None]
-
-        if not self._poll_actions:
-            return  # bisect stage 4: passive only
-
-        active = (openvr.VRActiveActionSet_t * 1)()
-        active[0].ulActionSet = self._action_set
-        self._vrin.updateActionState(active)
-
-        for hand, action in enumerate(self._actions):
-            hn = "L" if hand == 0 else "R"
-            joints = None
-            try:
-                data = self._vrin.getSkeletalActionData(action)
-                if bool(data.bActive) != self._hand_active[hand]:
-                    # Don't log the initial unknown→False transition: hands
-                    # simply not being tracked yet at startup is the normal
-                    # case, not an event.
-                    if data.bActive or self._hand_active[hand] is not None:
-                        self._log(f"Skeleton: {hn} hand "
-                                  + ("tracking" if data.bActive else "lost"))
-                    self._hand_active[hand] = bool(data.bActive)
-                if data.bActive:
-                    self._ever_active = True
-                    self._err_logged[hand] = False  # re-arm error reporting
-                    self._reset_count = 0
-                    bones = self._get_bones(action, hand)
-                    if bones is not None:
-                        joints = tuple(
-                            (t.position.v[0], t.position.v[1], t.position.v[2])
-                            for t in bones)
-            except Exception as e:
-                if not self._err_logged[hand]:
-                    self._err_logged[hand] = True
-                    self._log(f"Skeleton: {hn} read error: {e!r}")
-            self.hands[hand] = joints
-            feed = None
-            if joints is not None and self.feed_enabled:
-                try:
-                    feed = self._make_feed(action, hand)
-                except Exception:
-                    feed = None
-            self.driver_feed[hand] = feed
-
-        # "connected" alone is misleading when the actions never go active —
-        # surface the most likely cause right in the panel placeholder. Hands
-        # leaving camera view is the everyday case; a hand that has never once
-        # tracked long after connect suggests a binding problem instead.
-        if any(self._hand_active):
-            self.status = "connected"
-        elif self._ever_active:
-            self.status = "hands not in view"
-        elif time.time() - self._connected_at > 30.0:
-            self.status = "no data — try a finger pinch"
-
-        # While nothing is tracking, narrate the state so the console answers
-        # "why" instead of leaving a frozen status — including when tracking
-        # worked earlier and then got stuck after a standby/wake cycle. Fast
-        # cadence for the first minute of an inactive stretch, then slow, so
-        # an idle bridge doesn't flood the console overnight.
-        now = time.time()
-        if any(self._hand_active):
-            self._inactive_since = None
-        else:
-            if self._inactive_since is None:
-                self._inactive_since = now
-            cadence = 5.0 if now - self._inactive_since < 60.0 else 60.0
-            if now - self._last_diag >= cadence:
-                self._last_diag = now
-                roles_held, total_origins = self._diag()
-                # Stuck-state self-heal: devices hold hand roles and the HMD
-                # is worn, yet after a grace period no origins ever attached.
-                worn = getattr(openvr, "k_EDeviceActivityLevel_UserInteraction", 1)
-                # Two quick reconnect attempts, then slow periodic retries
-                # forever — the wedge clears on SteamVR's schedule (settling
-                # after boot, or a scene app starting), so give up never,
-                # just quietly.
-                grace = 20.0 if self._reset_count < 2 else 120.0
-                if (roles_held and total_origins == 0
-                        and self._hmd_activity == worn
-                        and now - self._connected_at > grace):
-                    if self._reset_count == 0:
-                        self._log("Skeleton: tip — a thumb-index pinch "
-                                  "usually completes attachment instantly")
-                    elif self._reset_count == 2:
-                        self._log(
-                            "Skeleton: bindings still not attaching — "
-                            "dropping to slow retries (every 2 min). "
-                            "A finger pinch or starting any VR app "
-                            "usually fixes it instantly")
-                    self._reset_count += 1
-                    self._reset_requested = True
-
-    def _diag(self):
-        roles_held = 0
-        total_origins = 0
-        for hand, action in enumerate(self._actions):
-            hn = "L" if hand == 0 else "R"
-            role = (openvr.TrackedControllerRole_LeftHand if hand == 0
-                    else openvr.TrackedControllerRole_RightHand)
-            parts = []
-            try:
-                idx = self._system.getTrackedDeviceIndexForControllerRole(role)
-                if idx == openvr.k_unTrackedDeviceIndexInvalid:
-                    parts.append("no device holds this hand role")
-                else:
-                    roles_held += 1
-                    conn = self._system.isTrackedDeviceConnected(idx)
-                    parts.append(f"device #{idx}"
-                                 + ("" if conn else " (disconnected)"))
-            except Exception as e:
-                parts.append(f"role query failed: {e!r}")
-            try:
-                data = self._vrin.getSkeletalActionData(action)
-                parts.append("action ACTIVE" if data.bActive else "action inactive")
-            except Exception as e:
-                parts.append(f"skeletal data error: {e!r}")
-            # pyopenvr's getActionOrigins wrapper is broken (2.12 ends with
-            # `originsOut.value` on a ctypes array) — call the C function
-            # table directly instead.
-            try:
-                count = getattr(openvr, "k_unMaxActionOriginCount", 16)
-                origins = (openvr.VRInputValueHandle_t * count)()
-                # Pass the array itself: ctypes converts it to the pointer the
-                # prototype wants. byref(origins[0]) is a TypeError, because
-                # indexing a simple-type ctypes array yields a plain int —
-                # the exact bug inside pyopenvr's own wrapper.
-                err = self._vrin.function_table.getActionOrigins(
-                    self._action_set, action, origins, count)
-                if err == 0:
-                    n = sum(1 for o in origins if o)
-                    total_origins += n
-                    parts.append(f"{n} binding origin(s)")
-                else:
-                    parts.append(f"origins error {err}")
-            except Exception as e:
-                parts.append(f"origins query failed: {type(e).__name__}")
-            try:
-                parts.append(
-                    f"tracking level {int(self._vrin.getSkeletalTrackingLevel(action))}")
-            except Exception:
-                pass
-            self._log(f"Skeleton: {hn} diag — " + ", ".join(parts))
-        return roles_held, total_origins
-
-    def _get_bones(self, action, hand):
-        """Fetch bone transforms, discovering the count the runtime accepts.
-
-        getBoneCount cannot be trusted: with Steam Link hand tracking it
-        reports the standard 31-bone skeleton while GetSkeletalBoneData
-        demands the count the driver actually submits (rejecting everything
-        else as InvalidBoneCount). So probe — reported count first, then the
-        two known skeleton sizes, then the rest — and cache what works.
-        """
-        n = self._bone_count[hand]
-        if n < 0:
-            return None  # probing already failed for this hand; stay quiet
-        if n > 0:
-            try:
-                return self._fetch_bones(action, n)
-            except Exception as e:
-                if type(e).__name__ != "InputError_InvalidBoneCount":
-                    raise
-                self._bone_count[hand] = 0  # skeleton changed; re-probe
-
-        hn = "L" if hand == 0 else "R"
-        try:
-            reported = self._vrin.getBoneCount(action)
-        except Exception:
-            reported = 0
-        candidates = []
-        for c in [reported, 26, 31] + list(range(1, 65)):
-            if c > 0 and c not in candidates:
-                candidates.append(c)
-        for c in candidates:
-            try:
-                bones = self._fetch_bones(action, c)
-            except Exception as e:
-                if type(e).__name__ == "InputError_InvalidBoneCount":
-                    continue
-                raise
-            self._bone_count[hand] = c
-            extra = f" (runtime claims {reported})" if reported != c else ""
-            self._log(f"Skeleton: {hn} using {c} bones{extra}")
-            return bones
-        self._bone_count[hand] = -1
-        self._log(f"Skeleton: {hn} rejected every bone count 1-64 "
-                  f"(runtime claims {reported})")
-        return None
-
-    @staticmethod
-    def _extract_pose(pose):
-        """TrackedDevicePose_t → (position, rotation rows, velocity), or None."""
-        if not pose.bPoseIsValid:
-            return None
-        m = pose.mDeviceToAbsoluteTracking.m
-        rot = tuple(tuple(float(m[r][c]) for c in range(3)) for r in range(3))
-        pos = tuple(float(m[r][3]) for r in range(3))
-        vel = tuple(float(pose.vVelocity.v[i]) for i in range(3))
-        return pos, rot, vel
-
-    @staticmethod
-    def _relative_pose(hmd, dev):
-        """(hand world rotation, head-local position, distance, head-local
-        velocity relative to the head).
-
-        Head frame follows OpenVR device convention: +x right, +y up,
-        -z forward — what the dome inset projects.
-        """
-        (hpos, hrot, hvel), (dpos, drot, dvel) = hmd, dev
-        rel = tuple(dpos[i] - hpos[i] for i in range(3))
-        relv = tuple(dvel[i] - hvel[i] for i in range(3))
-        # Rows of hrot are the head axes in world space, so head-local is
-        # R^T · v.
-        local = tuple(sum(hrot[r][i] * rel[r] for r in range(3))
-                      for i in range(3))
-        local_v = tuple(sum(hrot[r][i] * relv[r] for r in range(3))
-                        for i in range(3))
-        dist = math.sqrt(sum(v * v for v in rel))
-        return drot, local, dist, local_v
-
-    def _fetch_bones(self, action, n, space=None):
-        # Must pass a caller-allocated ctypes array: pyopenvr's wrapper
-        # quietly substitutes a 1-element array for any non-array argument
-        # and calls the C API with count=1, which the runtime rejects as
-        # InvalidBoneCount no matter what count we intended.
-        if space is None:
-            space = openvr.VRSkeletalTransformSpace_Model
-        arr = (openvr.VRBoneTransform_t * n)()
-        self._vrin.getSkeletalBoneData(
-            action, space,
-            openvr.VRSkeletalMotionRange_WithoutController, arr)
-        return arr
-
-    def _make_feed(self, action, hand):
-        """Payload for the driver stream (VR fusion mode).
-
-        The driver's UpdateSkeletonComponent expects PARENT-relative bone
-        transforms — a separate fetch from the model-space set the panels
-        draw. Curls come from the runtime's own summary; confidence maps the
-        skeletal tracking level onto the packet's 0-255 scale.
-        """
-        n = self._bone_count[hand]
-        if n <= 0:
-            return None
-        arr = self._fetch_bones(action, n,
-                                openvr.VRSkeletalTransformSpace_Parent)
-        bones = tuple(
-            (t.position.v[0], t.position.v[1], t.position.v[2],
-             t.orientation.w, t.orientation.x, t.orientation.y,
-             t.orientation.z)
-            for t in arr)
-        try:
-            summary = self._vrin.getSkeletalSummaryData(
-                action, getattr(openvr, "VRSummaryType_FromDevice", 1))
-            curls = tuple(float(summary.flFingerCurl[i]) for i in range(5))
-        except Exception:
-            curls = (0.0,) * 5
-        try:
-            level = int(self._vrin.getSkeletalTrackingLevel(action))
-            confidence = {0: 128, 1: 192, 2: 255}.get(level, 255)
-        except Exception:
-            confidence = 255
-        # Wrist pose for the driver, in the RAW tracking universe — the same
-        # space driver poses are submitted in. Head-relative would be wrong
-        # here (that form is only for the GUI's dome inset).
-        pose = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))
-        pose_valid = False
-        raw = self.raw_pose[hand]
-        if raw is not None:
-            pose = (raw[0], matrix_to_quat(raw[1]))
-            pose_valid = True
-        return bones, curls, confidence, pose, pose_valid
+# Lives in bridge_common/vr_controller.py (FusedVRMode): fuses the runtime hand
+# skeleton, device 6DOF and controller buttons into driver_cyberfinger's
+# emulated controllers. The old CFGP-only VRMode is subsumed by it — with no
+# skeleton source available, FusedVRMode degrades to exactly that behavior.
 
 
 # ── Gamepad Mode (ViGEm Xbox 360) ────────────────────────────────────────
@@ -2092,8 +750,7 @@ class CyberFingerApp:
         self._window_visible = True
 
         # Config persistence
-        self._config_dir = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")),
-                                        "CyberFingerBridge")
+        self._config_dir = config_dir()
         self._config_path = os.path.join(self._config_dir, "settings.json")
         self._config = self._load_config()
 
@@ -2107,7 +764,8 @@ class CyberFingerApp:
         # the OpenVR client can be ruled in/out when debugging SteamVR-side
         # trouble without touching code.
         self.skeleton = (create_skeleton_source(
-                             self.log, self._config.get("skeleton_bisect", False))
+                             self.log, self._config.get("skeleton_bisect", False),
+                             self._config.get("skeleton_backend", "auto"))
                          if self._config.get("skeleton_enabled", True) else None)
 
         self._build_ui()
@@ -2248,38 +906,38 @@ class CyberFingerApp:
         style.theme_use('clam')
         style.configure(".", background=COLOR_BG, foreground=COLOR_FG)
         style.configure("TFrame", background=COLOR_BG)
-        style.configure("TLabel", background=COLOR_BG, foreground=COLOR_FG, font=("Consolas", 10))
+        style.configure("TLabel", background=COLOR_BG, foreground=COLOR_FG, font=(FONT, 10))
         style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_ACCENT,
-                        font=("Consolas", 14, "bold"))
+                        font=(FONT, 14, "bold"))
         style.configure("Status.TLabel", background=COLOR_BG, foreground=COLOR_FG_DIM,
-                        font=("Consolas", 9))
+                        font=(FONT, 9))
         style.configure("Hand.TLabel", background=COLOR_BG2, foreground=COLOR_FG,
-                        font=("Consolas", 10))
+                        font=(FONT, 10))
         style.configure("TRadiobutton", background=COLOR_BG, foreground=COLOR_FG,
-                        font=("Consolas", 10), focuscolor=COLOR_BG)
+                        font=(FONT, 10), focuscolor=COLOR_BG)
         style.map("TRadiobutton",
                   background=[("active", COLOR_BG)],
                   foreground=[("active", COLOR_ACCENT)])
         style.configure("Small.TRadiobutton", background=COLOR_BG, foreground=COLOR_FG,
-                        font=("Consolas", 9), focuscolor=COLOR_BG)
+                        font=(FONT, 9), focuscolor=COLOR_BG)
         style.map("Small.TRadiobutton",
                   background=[("active", COLOR_BG)],
                   foreground=[("active", COLOR_ACCENT)])
         style.configure("TCheckbutton", background=COLOR_BG, foreground=COLOR_FG,
-                        font=("Consolas", 9), focuscolor=COLOR_BG)
+                        font=(FONT, 9), focuscolor=COLOR_BG)
         style.map("TCheckbutton",
                   background=[("active", COLOR_BG)],
                   foreground=[("active", COLOR_ACCENT)])
         style.configure("Accent.TButton", background=COLOR_ACCENT, foreground="white",
-                        font=("Consolas", 11, "bold"), padding=(20, 8))
+                        font=(FONT, 11, "bold"), padding=(20, 8))
         style.map("Accent.TButton",
                   background=[("active", COLOR_ACCENT2), ("disabled", COLOR_BG3)])
         style.configure("Stop.TButton", background=COLOR_RED, foreground="white",
-                        font=("Consolas", 11, "bold"), padding=(20, 8))
+                        font=(FONT, 11, "bold"), padding=(20, 8))
         style.map("Stop.TButton",
                   background=[("active", "#ff4444"), ("disabled", COLOR_BG3)])
         style.configure("Console.TButton", background=COLOR_BG3, foreground=COLOR_FG,
-                        font=("Consolas", 9), padding=(10, 2))
+                        font=(FONT, 9), padding=(10, 2))
         style.map("Console.TButton",
                   background=[("active", COLOR_BG2)],
                   foreground=[("active", COLOR_ACCENT)])
@@ -2376,7 +1034,7 @@ class CyberFingerApp:
         self.log_text = scrolledtext.ScrolledText(
             self.log_frame, height=8,
             bg=COLOR_BG2, fg=COLOR_FG, insertbackground=COLOR_FG,
-            font=("Consolas", 9), relief=tk.FLAT, borderwidth=0,
+            font=(FONT, 9), relief=tk.FLAT, borderwidth=0,
             selectbackground=COLOR_ACCENT, selectforeground="white",
             state=tk.DISABLED, wrap=tk.WORD
         )
@@ -2493,7 +1151,7 @@ class CyberFingerApp:
             self.vr_mode.start()
             self.active_mode = self.vr_mode
         self.log(f"Starting {mode.upper()} mode...")
-        if mode == "vrchat":
+        if mode == "gamepad_vrc":
             self.log(">>> VRChat: enable OSC via Action Menu → OSC → Enabled")
             self.log(">>> VRChat window must be focused for Use/Grab to work")
 
@@ -2612,496 +1270,6 @@ class CyberFingerApp:
         if not HAS_OPENVR:
             self.log("Hand skeleton: not available (pip install openvr)")
         self.root.mainloop()
-
-
-# ── Minimal 3D helpers (orthographic, no external deps) ──────────────────
-
-# Fixed camera angles — a three-quarter view so all three axes stay distinct.
-_VIEW_YAW   = math.radians(35.0)
-_VIEW_PITCH = math.radians(20.0)
-
-
-def matrix_to_quat(m):
-    """3x3 rotation matrix (row tuples) → unit quaternion (w, x, y, z)."""
-    t = m[0][0] + m[1][1] + m[2][2]
-    if t > 0:
-        s = math.sqrt(t + 1.0) * 2.0
-        return (0.25 * s,
-                (m[2][1] - m[1][2]) / s,
-                (m[0][2] - m[2][0]) / s,
-                (m[1][0] - m[0][1]) / s)
-    if m[0][0] > m[1][1] and m[0][0] > m[2][2]:
-        s = math.sqrt(1.0 + m[0][0] - m[1][1] - m[2][2]) * 2.0
-        return ((m[2][1] - m[1][2]) / s, 0.25 * s,
-                (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s)
-    if m[1][1] > m[2][2]:
-        s = math.sqrt(1.0 + m[1][1] - m[0][0] - m[2][2]) * 2.0
-        return ((m[0][2] - m[2][0]) / s, (m[0][1] + m[1][0]) / s,
-                0.25 * s, (m[1][2] + m[2][1]) / s)
-    s = math.sqrt(1.0 + m[2][2] - m[0][0] - m[1][1]) * 2.0
-    return ((m[1][0] - m[0][1]) / s, (m[0][2] + m[2][0]) / s,
-            (m[1][2] + m[2][1]) / s, 0.25 * s)
-
-
-def quat_to_matrix(q):
-    """Unit quaternion (w, x, y, z) → 3x3 rotation matrix as row tuples."""
-    w, x, y, z = q
-    n = math.sqrt(w * w + x * x + y * y + z * z)
-    if n < 1e-9:
-        return ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))
-    w, x, y, z = w / n, x / n, y / n, z / n
-    return (
-        (1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z),       2.0 * (x * z + w * y)),
-        (2.0 * (x * y + w * z),       1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)),
-        (2.0 * (x * z - w * y),       2.0 * (y * z + w * x),       1.0 - 2.0 * (x * x + y * y)),
-    )
-
-
-def quat_to_euler_deg(q):
-    """Unit quaternion (w, x, y, z) → (roll, pitch, yaw) in degrees."""
-    w, x, y, z = q
-
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    roll = math.atan2(sinr_cosp, cosr_cosp)
-
-    # Clamp guards against gimbal-lock inputs drifting just past ±1.
-    sinp = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
-    pitch = math.asin(sinp)
-
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    yaw = math.atan2(siny_cosp, cosy_cosp)
-
-    return (math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
-
-
-def rotate_vec(m, v):
-    """Apply a 3x3 row-major matrix to a 3-vector."""
-    return (
-        m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
-        m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
-        m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
-    )
-
-
-def project(v, cx, cy, scale):
-    """World point → (screen_x, screen_y, depth). Larger depth is nearer."""
-    x, y, z = v
-
-    # Yaw about world Y, then pitch about the camera's X.
-    cyaw, syaw = math.cos(_VIEW_YAW), math.sin(_VIEW_YAW)
-    xe = x * cyaw - z * syaw
-    ze = x * syaw + z * cyaw
-
-    cp, sp = math.cos(_VIEW_PITCH), math.sin(_VIEW_PITCH)
-    ye = y * cp - ze * sp
-    depth = y * sp + ze * cp
-
-    # Screen y is inverted so +Y points up on the canvas.
-    return (cx + xe * scale, cy - ye * scale, depth)
-
-
-# ── Hand visualization panel ─────────────────────────────────────────────
-
-class HandPanel:
-    """Canvas-based hand state visualization."""
-
-    def __init__(self, parent, label, side):
-        self.label = label
-        self.frame = ttk.Frame(parent)
-        self.frame.pack(side=side, fill=tk.BOTH, expand=True, padx=(0, 4) if side == tk.LEFT else (4, 0))
-
-        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, height=350)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-
-        self._last_state = None
-
-    def update_state(self, state: HandState):
-        c = self.canvas
-        c.delete("all")
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w < 10 or h < 10:
-            return
-
-        is_left = self.label == "LEFT"
-        lr = "L" if is_left else "R"
-
-        # Title
-        if state.connected:
-            c.create_text(w // 2, 14, text=f"{self.label}", fill=COLOR_ACCENT,
-                         font=("Consolas", 11, "bold"))
-        else:
-            c.create_text(w // 2, 14, text=f"{self.label} (disconnected)",
-                         fill=COLOR_FG_DIM, font=("Consolas", 10))
-            return
-
-        # Battery
-        bat = state.battery
-        bat_color = COLOR_GREEN if bat > 50 else COLOR_ORANGE if bat > 20 else COLOR_RED
-        c.create_text(w - 10, 14, text=f"{bat}%", fill=bat_color,
-                     font=("Consolas", 9), anchor=tk.E)
-
-        # Packet counter
-        c.create_text(10, 14, text=f"#{state.packet_count}", fill=COLOR_FG_DIM,
-                     font=("Consolas", 8), anchor=tk.W)
-
-        # ── Joystick visualization ──
-        joy_cx = w // 4 if is_left else 3 * w // 4
-        joy_cy = 80
-        joy_r = 35
-
-        c.create_oval(joy_cx - joy_r, joy_cy - joy_r,
-                     joy_cx + joy_r, joy_cy + joy_r,
-                     outline=COLOR_BG3, width=2, fill=COLOR_BG)
-
-        c.create_line(joy_cx - joy_r, joy_cy, joy_cx + joy_r, joy_cy,
-                     fill=COLOR_BG3, width=1)
-        c.create_line(joy_cx, joy_cy - joy_r, joy_cx, joy_cy + joy_r,
-                     fill=COLOR_BG3, width=1)
-
-        jx = state.joy_x_float * (joy_r - 6)
-        jy = state.joy_y_float * (joy_r - 6)
-        dot_r = 6
-        c.create_oval(joy_cx + jx - dot_r, joy_cy + jy - dot_r,
-                     joy_cx + jx + dot_r, joy_cy + jy + dot_r,
-                     fill=COLOR_ACCENT, outline=COLOR_ACCENT2, width=1)
-
-        # ── Button indicators ──
-        btn_x = 3 * w // 4 if is_left else w // 4
-        btn_y_start = 30
-        btn_spacing = 17
-        btn_names_bits = [
-            ("TRIG", BTN_TRIGGER),
-            ("GRIP", BTN_GRIP),
-            ("C",    BTN_C),
-            ("D",    BTN_D),
-            ("E",    BTN_E),
-            ("MENU", BTN_MENU),
-            ("JCLK", BTN_JCLICK),
-            ("ST/SE",BTN_STSEL),
-        ]
-
-        for i, (name, bit) in enumerate(btn_names_bits):
-            by = btn_y_start + i * btn_spacing
-            pressed = bool(state.buttons & bit)
-            fill = COLOR_ACCENT if pressed else COLOR_BG
-            outline = COLOR_ACCENT if pressed else COLOR_BG3
-            c.create_oval(btn_x - 7, by - 7, btn_x + 7, by + 7,
-                         fill=fill, outline=outline, width=2)
-            c.create_text(btn_x + 14, by, text=name, fill=COLOR_FG if pressed else COLOR_FG_DIM,
-                         font=("Consolas", 8), anchor=tk.W)
-
-        # ── Trigger bar ──
-        trig_x = w // 2
-        trig_y = 168
-        trig_w = w - 40
-        trig_h = 10
-        trig_val = state.trigger_float
-
-        c.create_rectangle(trig_x - trig_w // 2, trig_y,
-                          trig_x + trig_w // 2, trig_y + trig_h,
-                          fill=COLOR_BG, outline=COLOR_BG3)
-        if trig_val > 0.01:
-            fill_w = int(trig_val * trig_w)
-            c.create_rectangle(trig_x - trig_w // 2, trig_y,
-                              trig_x - trig_w // 2 + fill_w, trig_y + trig_h,
-                              fill=COLOR_ACCENT, outline="")
-        c.create_text(trig_x, trig_y - 6, text=f"Trigger: {int(trig_val * 100)}%",
-                     fill=COLOR_FG_DIM, font=("Consolas", 8))
-
-        # ── IMU orientation ──
-        self._draw_imu(c, w, h, state)
-
-    def _draw_imu(self, c, w, h, state):
-        """Draw a 3D triad per populated IMU slot, or a placeholder if there are none."""
-        c.create_line(20, 192, w - 20, 192, fill=COLOR_BG3, width=1)
-
-        imus = state.active_imus()
-        if not imus:
-            c.create_text(w // 2, 258, text="no IMU installed",
-                         fill=COLOR_FG_DIM, font=("Consolas", 9))
-            return
-
-        # Share the panel width between however many slots are live, shrinking
-        # the triads rather than letting them collide.
-        col_w = w / len(imus)
-        scale = max(18.0, min(46.0, col_w * 0.30))
-        cy = 262
-
-        for i, (label, quat) in enumerate(imus):
-            cx = col_w * (i + 0.5)
-            c.create_text(cx, 206, text=label, fill=COLOR_FG_DIM,
-                         font=("Consolas", 8, "bold"))
-            self._draw_triad(c, cx, cy, scale, quat)
-
-            roll, pitch, yaw = quat_to_euler_deg(quat)
-            if len(imus) == 1:
-                readout = f"R{roll:+6.1f}  P{pitch:+6.1f}  Y{yaw:+6.1f}"
-            else:
-                readout = f"{roll:+.0f} {pitch:+.0f} {yaw:+.0f}"
-            c.create_text(cx, 322, text=readout,
-                         fill=COLOR_FG_DIM, font=("Consolas", 8))
-
-    def _draw_triad(self, c, cx, cy, scale, quat):
-        """Render one orientation as an XYZ axis triad against a horizon ring."""
-        m = quat_to_matrix(quat)
-
-        # Reference ground ring so rotation reads against a fixed horizon.
-        ring = []
-        for i in range(32):
-            a = 2.0 * math.pi * i / 32
-            px, py, _ = project((math.cos(a), 0.0, math.sin(a)), cx, cy, scale)
-            ring.extend((px, py))
-        c.create_polygon(ring, outline=COLOR_BG3, fill="", width=1)
-
-        axes = [
-            ((1.0, 0.0, 0.0), COLOR_RED,   "X"),
-            ((0.0, 1.0, 0.0), COLOR_GREEN, "Y"),
-            ((0.0, 0.0, 1.0), COLOR_BLUE,  "Z"),
-        ]
-
-        # Paint far-to-near so nearer arms overlap correctly.
-        drawn = []
-        for vec, color, name in axes:
-            px, py, depth = project(rotate_vec(m, vec), cx, cy, scale)
-            drawn.append((depth, px, py, color, name))
-        drawn.sort(key=lambda t: t[0])
-
-        ox, oy, _ = project((0.0, 0.0, 0.0), cx, cy, scale)
-        for depth, px, py, color, name in drawn:
-            # Nearer arms draw thicker — a cheap depth cue without shading.
-            width = 3 if depth >= 0 else 2
-            c.create_line(ox, oy, px, py, fill=color, width=width)
-            c.create_oval(px - 3, py - 3, px + 3, py + 3, fill=color, outline="")
-            c.create_text(px + 9, py - 7, text=name, fill=color,
-                         font=("Consolas", 8, "bold"))
-
-    def set_disconnected(self):
-        c = self.canvas
-        c.delete("all")
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w > 10:
-            c.create_text(w // 2, h // 2, text=f"{self.label}\n(disconnected)",
-                         fill=COLOR_FG_DIM, font=("Consolas", 10), justify=tk.CENTER)
-
-
-class SkeletonPanel:
-    """Canvas rendering of the runtime-tracked hand skeleton for one hand."""
-
-    def __init__(self, parent, label, side):
-        self.label = label
-        self.frame = ttk.Frame(parent)
-        self.frame.pack(side=side, fill=tk.BOTH, expand=True,
-                        padx=(0, 4) if side == tk.LEFT else (4, 0))
-        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0,
-                                height=150)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-        # Projection axes, chosen from the first tracked frame and then kept
-        # fixed — re-deriving per frame makes the view twitch between axes
-        # whenever the hand tilts past 45°.
-        self._axes = None
-        # Dome trail: recent (time, head-local unit direction) samples for
-        # this panel's own hand, redrawn with fading color each frame.
-        self._trail = []
-
-    def _pick_axes(self, joints):
-        """Choose the two model-space axes to project onto: the widest-spread
-        axis is drawn vertically (finger direction), the runner-up across.
-        Sign puts fingertips at the top of the canvas."""
-        pts = joints[1:26]  # skip root and aux bones
-        ext = []
-        for a in range(3):
-            vals = [p[a] for p in pts]
-            ext.append((max(vals) - min(vals), a))
-        ext.sort(reverse=True)
-        v_axis, h_axis = ext[0][1], ext[1][1]
-        tips = [joints[t][v_axis] for t in SKELETON_TIPS]
-        v_sign = -1.0 if (sum(tips) / len(tips)) >= joints[1][v_axis] else 1.0
-        self._axes = (h_axis, v_axis, v_sign)
-
-    def draw(self, joints, status, pose=None, other_pose=None):
-        """pose/other_pose: (rot_3x3, head_local_pos, dist) from pose_info."""
-        c = self.canvas
-        c.delete("all")
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w < 10 or h < 10:
-            return
-
-        if not joints or len(joints) < 26:
-            self._axes = None
-            c.create_text(w // 2, h // 2,
-                          text=f"{self.label} skeleton\n({status})",
-                          fill=COLOR_FG_DIM, font=("Consolas", 9),
-                          justify=tk.CENTER)
-        else:
-            c.create_text(w // 2, 12, text=f"{self.label} SKELETON",
-                          fill=COLOR_BLUE, font=("Consolas", 8, "bold"))
-            if pose is not None:
-                self._draw_bones(c, w, h,
-                                 self._orient_to_px(joints, pose[0], w, h,
-                                                    dist=pose[2]))
-            else:
-                self._draw_bones(c, w, h, self._autofit_to_px(joints, w, h))
-
-        if pose is not None:
-            self._draw_dome(c, w, h, pose, other_pose)
-
-    # ── skeleton projections ──
-
-    def _orient_to_px(self, joints, rot, w, h, dist=None):
-        """World-oriented view: wrist-relative joints rotated by the hand
-        device's world rotation, then through the same fixed three-quarter
-        camera the IMU triads use. Base scale is physical (no zooming as the
-        hand turns); on top of that, distance from the head scales the whole
-        render like the dome dot — closer hand draws bigger."""
-        scale = min(w - 24, h - 36) / 0.28  # px per metre, hand span ~0.25 m
-        if dist is not None:
-            scale *= max(0.6, min(1.5, 0.55 / max(dist, 0.2)))
-        wx, wy, wz = joints[1]
-        # Straight-on camera, unlike the IMU triads' three-quarter view: its
-        # 35° yaw reads as "the hand is rotated wrong", not as perspective.
-        # A touch of pitch keeps some depth without skewing the heading.
-        cy_, sy_ = 1.0, 0.0
-        cp_, sp_ = math.cos(_VIEW_PITCH), math.sin(_VIEW_PITCH)
-
-        def to_px(j):
-            lx, ly, lz = joints[j]
-            lx, ly, lz = lx - wx, ly - wy, lz - wz
-            x = rot[0][0] * lx + rot[0][1] * ly + rot[0][2] * lz
-            y = rot[1][0] * lx + rot[1][1] * ly + rot[1][2] * lz
-            z = rot[2][0] * lx + rot[2][1] * ly + rot[2][2] * lz
-            # 180° about vertical: without it the render is left/right
-            # mirrored relative to the user's own view of their hand.
-            x, z = -x, -z
-            x1 = x * cy_ + z * sy_
-            z1 = -x * sy_ + z * cy_
-            y1 = y * cp_ - z1 * sp_
-            return w / 2 + x1 * scale, h / 2 + 6 - y1 * scale
-
-        return to_px
-
-    def _autofit_to_px(self, joints, w, h):
-        """Fallback when no device pose is available: original auto-fit."""
-        if self._axes is None:
-            self._pick_axes(joints)
-        h_axis, v_axis, v_sign = self._axes
-
-        pts = joints[1:26]
-        hs = [p[h_axis] for p in pts]
-        vs = [p[v_axis] * v_sign for p in pts]
-        cx_m = (max(hs) + min(hs)) / 2.0
-        cy_m = (max(vs) + min(vs)) / 2.0
-        span_h = max(max(hs) - min(hs), 0.05)
-        span_v = max(max(vs) - min(vs), 0.05)
-        scale = min((w - 24) / span_h, (h - 32) / span_v)
-
-        def to_px(j):
-            p = joints[j]
-            return (w / 2 + (p[h_axis] - cx_m) * scale,
-                    h / 2 + 4 + (p[v_axis] * v_sign - cy_m) * scale)
-
-        return to_px
-
-    @staticmethod
-    def _draw_bones(c, w, h, to_px):
-        for chain in SKELETON_CHAINS:
-            px = [to_px(j) for j in chain]
-            for (x0, y0), (x1, y1) in zip(px, px[1:]):
-                c.create_line(x0, y0, x1, y1, fill=COLOR_FG_DIM, width=2)
-
-        for chain in SKELETON_CHAINS:
-            for j in chain[1:]:
-                x, y = to_px(j)
-                if j in SKELETON_TIPS:
-                    c.create_oval(x - 3, y - 3, x + 3, y + 3,
-                                  fill=COLOR_ACCENT, outline="")
-                else:
-                    c.create_oval(x - 2, y - 2, x + 2, y + 2,
-                                  fill=COLOR_BLUE, outline="")
-
-        wx, wy = to_px(1)
-        c.create_rectangle(wx - 3, wy - 3, wx + 3, wy + 3,
-                           fill=COLOR_GREEN, outline="")
-
-    # ── position inset: 180° dome as seen from the head ──
-
-    def _draw_dome(self, c, w, h, pose, other_pose):
-        """Azimuthal-equidistant projection of the front hemisphere: centre is
-        straight ahead of the gaze, rings at 30°/60°/90° off-forward, the rim
-        is beside/behind the head. Dot size encodes distance."""
-        r = max(24, min(44, h // 3))
-        margin = 8
-        cx = (margin + r) if self.label == "LEFT" else (w - margin - r)
-        cy = h - margin - r
-
-        for k in (1 / 3, 2 / 3, 1.0):
-            rr = r * k
-            c.create_oval(cx - rr, cy - rr, cx + rr, cy + rr,
-                          outline=COLOR_BG3, width=1)
-        for deg in range(0, 360, 45):
-            a = math.radians(deg)
-            c.create_line(cx + (r / 3) * math.cos(a), cy + (r / 3) * math.sin(a),
-                          cx + r * math.cos(a), cy + r * math.sin(a),
-                          fill=COLOR_BG3, width=1)
-        c.create_line(cx - 3, cy, cx + 3, cy, fill=COLOR_FG_DIM)
-        c.create_line(cx, cy - 3, cx, cy + 3, fill=COLOR_FG_DIM)
-
-        # Fading trail of the own hand's last second of motion.
-        now = time.time()
-        self._trail.append((now, pose[1]))
-        while self._trail and self._trail[0][0] < now - 1.0:
-            self._trail.pop(0)
-        pts = [self._dome_project(cx, cy, r, p)[:2] for _, p in self._trail]
-        for i in range(1, len(pts)):
-            age = (now - self._trail[i][0])  # 0 = fresh, 1 = oldest
-            c.create_line(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1],
-                          fill=_blend(COLOR_ACCENT, COLOR_BG2, age), width=1)
-
-        if other_pose is not None:
-            self._dome_dot(c, cx, cy, r, other_pose, COLOR_FG_DIM)
-        self._dome_dot(c, cx, cy, r, pose, COLOR_ACCENT)
-
-        c.create_text(cx, cy - r - 7, text=f"{pose[2]:.2f}m",
-                      fill=COLOR_FG_DIM, font=("Consolas", 7))
-
-    @staticmethod
-    def _dome_project(cx, cy, r, local):
-        """Head-local point → dome pixel position (+ whether behind 90°)."""
-        x, y, z = local
-        n = math.sqrt(x * x + y * y + z * z)
-        if n < 1e-6:
-            return cx, cy, False
-        ux, uy, uz = x / n, y / n, z / n
-        # Head frame: +x right, +y up, -z forward. Angle off forward-gaze:
-        theta = math.acos(max(-1.0, min(1.0, -uz)))
-        rr = min(theta / (math.pi / 2), 1.0) * r
-        phi = math.atan2(uy, ux)
-        return (cx + rr * math.cos(phi), cy - rr * math.sin(phi),
-                theta > math.pi / 2)
-
-    def _dome_dot(self, c, cx, cy, r, pose, color):
-        _, local, dist, vel = pose
-        px, py, behind = self._dome_project(cx, cy, r, local)
-
-        # Velocity whisker: where the hand will be in 0.15 s, projected the
-        # same way, so the whisker curves with the dome rather than lying.
-        speed = math.sqrt(sum(v * v for v in vel))
-        if speed > 0.05:
-            ahead = tuple(local[i] + vel[i] * 0.15 for i in range(3))
-            qx, qy, _ = self._dome_project(cx, cy, r, ahead)
-            c.create_line(px, py, qx, qy, fill=color, width=1)
-
-        size = max(2.5, 7.0 - dist * 6.0)  # closer → bigger
-        if behind:
-            c.create_oval(px - size, py - size, px + size, py + size,
-                          outline=color, width=1)
-        else:
-            c.create_oval(px - size, py - size, px + size, py + size,
-                          fill=color, outline="")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────

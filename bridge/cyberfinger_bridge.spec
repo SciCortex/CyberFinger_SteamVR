@@ -45,17 +45,20 @@ for m in winrt_explicit:
 
 a = Analysis(
     ['cyberfinger_gui.py'],
-    pathex=[],
+    # Repo root, so the shared bridge_common package (protocol, SlimeVR,
+    # skeleton, panels, driver stream) is importable at build time.
+    pathex=['..'],
     binaries=vgamepad_binaries,
     datas=[
         ('assets/icon_32x32.png', 'assets'),
         ('assets/icon_32x32_bw.png', 'assets'),
         ('assets/icon.png', 'assets'),
-        # OpenVR action manifest + default bindings — resolved at runtime via
-        # resource_path(); without them the hand skeleton silently never binds.
-        ('assets/cyberfinger_actions.json', 'assets'),
-        ('assets/cyberfinger_bindings_knuckles.json', 'assets'),
-        ('assets/cyberfinger_bindings_oculus_touch.json', 'assets'),
+        # OpenVR action manifest + default bindings — shared with the Linux
+        # bridge, resolved at runtime via bridge_common.platform.shared_asset().
+        # Without them the hand skeleton silently never binds.
+        ('../bridge_common/assets/cyberfinger_actions.json', 'assets'),
+        ('../bridge_common/assets/cyberfinger_bindings_knuckles.json', 'assets'),
+        ('../bridge_common/assets/cyberfinger_bindings_oculus_touch.json', 'assets'),
     ] + vgamepad_datas,
     hiddenimports=[
         'vgamepad',
@@ -63,6 +66,14 @@ a = Analysis(
         'PIL',
         'PIL.Image',
         'PIL.ImageDraw',
+        'bridge_common',
+        'bridge_common.graphics',
+        'bridge_common.panels',
+        'bridge_common.platform',
+        'bridge_common.protocol',
+        'bridge_common.skeleton',
+        'bridge_common.slimevr',
+        'bridge_common.vr_controller',
     ] + vgamepad_hiddenimports + pystray_submodules + winrt_hiddenimports,
     hookspath=[],
     hooksconfig={},

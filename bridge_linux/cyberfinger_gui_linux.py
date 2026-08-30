@@ -3,14 +3,27 @@
 # SPDX-License-Identifier: GPL-3.0-only
 
 """
-CyberFinger Bridge GUI — Linux version
+CyberFinger Bridge GUI — Linux
 
-Uses bleak (cross-platform BLE) and python-evdev/uinput for virtual gamepad.
-Combines VR (BLE→UDP) and Gamepad (BLE→uinput Xbox 360) bridge modes.
+Linux counterpart of bridge/cyberfinger_gui.py. Only the platform layers live
+here — BLE over bleak/BlueZ, the uinput virtual gamepad, tray icon loading and
+the app shell. The protocol, SlimeVR emulation, OpenVR skeleton client, driver
+stream and visualisation panels are shared with the Windows bridge in
+bridge_common/, so the two stay in step by construction.
+
+Modes:
+    VR Mode      — controller buttons + hand skeleton + 6DOF → CyberFinger
+                   SteamVR driver (HTSK/CFGP over UDP)
+    Gamepad      — virtual Xbox 360 pad via uinput, Resonite mapping
+    Gamepad VRC  — virtual Xbox 360 pad via uinput + OSC, VRChat mapping
+
+Independently of the mode it can emulate SlimeVR trackers from the controller
+IMUs, and it visualises hand state, IMU orientation and the tracked skeleton.
 
 Prerequisites:
     pip install bleak pystray pillow
     pip install evdev          # for gamepad mode
+    pip install openvr         # optional, hand skeleton + 6DOF in VR mode
     pip install pynput         # optional, F12 screenshot in VRChat mode
     pip install python-osc     # optional, VRChat OSC (UseLeft, Grab, Voice)
     sudo modprobe uinput       # load uinput kernel module
@@ -31,14 +44,35 @@ import asyncio
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext
-import struct
-import socket
 import time
 import sys
 import os
 import queue
 import json
 import subprocess
+
+# bridge_common lives beside this package in the repo checkout. APPENDED, never
+# inserted: the repo root also holds the OpenVR SDK's `openvr/` directory, and
+# ahead of site-packages that empty dir imports as a namespace package that
+# shadows pyopenvr — satisfying `import openvr` with a module that has no API.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
+
+from bridge_common.graphics import (COLOR_ACCENT, COLOR_ACCENT2, COLOR_BG,
+                                    COLOR_BG2, COLOR_BG3, COLOR_FG,
+                                    COLOR_FG_DIM, COLOR_GREEN, COLOR_ORANGE,
+                                    COLOR_RED, FONT)
+from bridge_common.panels import HandPanel, SkeletonPanel
+from bridge_common.platform import config_dir
+from bridge_common.protocol import (BTN_C, BTN_D, BTN_E, BTN_GRIP, BTN_JCLICK,
+                                    BTN_MENU, BTN_STSEL, BTN_TRIGGER,
+                                    HandState, describe_imus, fmt_buttons,
+                                    parse_report)
+from bridge_common.skeleton import HAS_OPENVR, create_skeleton_source
+from bridge_common.slimevr import (SLIME_DEFAULT_HOST, SLIME_DEFAULT_PORT,
+                                   SlimeVRForwarder)
+from bridge_common.vr_controller import FusedVRMode
 
 try:
     from bleak import BleakScanner, BleakClient
@@ -53,27 +87,25 @@ try:
     import gi
 except ImportError:
     try:
-        import subprocess, sys as _sys
         _gi_path = subprocess.run(
             ["python3", "-c",
              "import gi, os; print(os.path.dirname(os.path.dirname(gi.__file__)))"],
             capture_output=True, text=True
         ).stdout.strip()
-        if _gi_path and _gi_path not in _sys.path:
-            _sys.path.insert(0, _gi_path)
+        if _gi_path and _gi_path not in sys.path:
+            sys.path.insert(0, _gi_path)
         import gi  # noqa: F811
     except Exception:
         pass
 
 try:
     import pystray
-    from PIL import Image, ImageDraw
+    from PIL import Image
     HAS_TRAY = True
 except ImportError:
     HAS_TRAY = False
 
 try:
-    import evdev
     from evdev import UInput, ecodes, AbsInfo
     HAS_EVDEV = True
 except ImportError:
@@ -86,57 +118,9 @@ try:
 except ImportError:
     HAS_PYNPUT = False
 
-# ── BLE protocol (matches ESP32 firmware) ────────────────────────────────
-
-VR_SERVICE_UUID = "0000cf00-0000-1000-8000-00805f9b34fb"
-VR_INPUT_UUID   = "0000cf01-0000-1000-8000-00805f9b34fb"
-VR_CTRL_UUID    = "0000cf02-0000-1000-8000-00805f9b34fb"
-
-GAMEPAD_MAGIC    = 0x50474643
-GAMEPAD_PACK_FMT = "<IBBhhBB"
-INPUT_REPORT_FMT = "<BBhhBBI"
-INPUT_REPORT_SIZE = struct.calcsize(INPUT_REPORT_FMT)
-
-BTN_TRIGGER = 0x01  # bit0
-BTN_GRIP    = 0x02  # bit1
-BTN_C       = 0x04  # bit2
-BTN_D       = 0x08  # bit3
-BTN_E       = 0x10  # bit4
-BTN_MENU    = 0x20  # bit5
-BTN_JCLICK  = 0x40  # bit6
-BTN_STSEL   = 0x80  # bit7
-
-BUTTON_NAMES = {
-    BTN_TRIGGER: "TRIG",
-    BTN_GRIP:    "GRIP",
-    BTN_C:       "C",
-    BTN_D:       "D",
-    BTN_E:       "E",
-    BTN_MENU:    "MENU",
-    BTN_JCLICK:  "JCLK",
-    BTN_STSEL:   "ST/SE",
-}
-
-# Brand colors
-COLOR_BG       = "#1a1a1a"
-COLOR_BG2      = "#242424"
-COLOR_BG3      = "#2e2e2e"
-COLOR_FG       = "#e0e0e0"
-COLOR_FG_DIM   = "#888888"
-COLOR_ACCENT   = "#e6007e"
-COLOR_ACCENT2  = "#ff2d9b"
-COLOR_GREEN    = "#00e676"
-COLOR_RED      = "#ff1744"
-COLOR_ORANGE   = "#ff9100"
-COLOR_BLUE     = "#448aff"
-
-
-def fmt_buttons(btn):
-    parts = [name for bit, name in BUTTON_NAMES.items() if btn & bit]
-    return "+".join(parts) if parts else "none"
-
 
 def resource_path(relative):
+    """Get path to a bridge_linux/ resource (icons)."""
     if hasattr(sys, '_MEIPASS'):
         return os.path.join(sys._MEIPASS, relative)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), relative)
@@ -170,44 +154,13 @@ def _load_tray_icon_idle():
 
 
 def _generate_fallback_icon(color):
-    img = Image.new("RGB", (32, 32), color)
-    return img
+    return Image.new("RGB", (32, 32), color)
 
 
-# ── Hand state ───────────────────────────────────────────────────────────
-
-class HandState:
-    def __init__(self):
-        self.buttons = 0
-        self.joy_x = 0
-        self.joy_y = 0
-        self.trigger = 0
-        self.battery = 100
-        self.packet_count = 0
-        self.timestamp = 0.0
-        self.connected = False
-        self.name = ""
-        self.address = ""
-
-    @property
-    def joy_x_float(self):
-        return max(-1.0, min(1.0, self.joy_x / 32767.0))
-
-    @property
-    def joy_y_float(self):
-        return max(-1.0, min(1.0, self.joy_y / 32767.0))
-
-    @property
-    def trigger_float(self):
-        if self.trigger > 10:
-            return self.trigger / 255.0
-        return 1.0 if (self.buttons & BTN_TRIGGER) else 0.0
-
-
-# ── BLE Manager (bleak-based, runs in asyncio thread) ────────────────────
+# ── BLE Manager (bleak/BlueZ, runs in asyncio thread) ────────────────────
 
 class BLEManager:
-    """Manages BLE connections using bleak (cross-platform)."""
+    """Manages BLE connections using bleak over BlueZ D-Bus."""
 
     def __init__(self, app):
         self.app = app
@@ -216,7 +169,9 @@ class BLEManager:
         self._thread = None
         self._loop = None
         self._running = False
+        self._task = None
         self._clients = []  # (label, BleakClient, char_uuid)
+        self._warned_report_len = False  # one-shot report-length mismatch warning
 
     def start(self):
         self._running = True
@@ -266,7 +221,7 @@ class BLEManager:
             self.right.connected = False
 
     def _get_paired_cyberfinger_devices(self):
-        """Return list of objects with .address/.name for paired CyberFinger devices."""
+        """Return objects with .address/.name for paired CyberFinger devices."""
         try:
             result = subprocess.run(
                 ["bluetoothctl", "devices", "Paired"],
@@ -312,7 +267,6 @@ class BLEManager:
 
         self.app.log(f"Found {len(cf_devices)} CyberFinger device(s)")
 
-
         left_dev = right_dev = None
         for dev in cf_devices:
             name = (dev.name or "").lower()
@@ -329,7 +283,8 @@ class BLEManager:
             return
 
         self._clients = []
-        for label, dev, state in [("LEFT", left_dev, self.left), ("RIGHT", right_dev, self.right)]:
+        for label, dev, state in [("LEFT", left_dev, self.left),
+                                  ("RIGHT", right_dev, self.right)]:
             if dev is None:
                 continue
             try:
@@ -392,6 +347,9 @@ class BLEManager:
         state.connected = True
         state.name = dev.name or dev.address
         state.address = dev.address
+        # Capability flags are per-link: a unit reconnecting with a different
+        # IMU set must not inherit the previous session's slots.
+        state.reset_link()
 
         cf01_char = None
         for service in client.services:
@@ -419,49 +377,44 @@ class BLEManager:
             self.app.log(f"{label}: Notify subscribe failed: {e}")
 
     def _handle_data(self, data, hand_override, state):
-        if len(data) < INPUT_REPORT_SIZE:
+        report = parse_report(data)
+        if report is None:
             return
 
-        hand, buttons, joy_x, joy_y, trigger, battery, seq = \
-            struct.unpack(INPUT_REPORT_FMT, data[:INPUT_REPORT_SIZE])
-
+        # Unlike the Windows bridge, the hand comes from which paired device
+        # this notification arrived on rather than the report's hand byte: each
+        # BleakClient is already bound to one unit, assigned by device name at
+        # connect time.
         h = hand_override
+        hn = "L" if h == 0 else "R"
 
-        old_buttons = state.buttons
-        state.buttons = buttons
-        state.joy_x = joy_x
-        state.joy_y = joy_y
-        state.trigger = trigger
-        state.battery = battery
-        state.timestamp = time.time()
-        state.packet_count += 1
+        if not report.length_ok and not self._warned_report_len:
+            self._warned_report_len = True
+            self.app.log(f"IMU report length {report.raw_len} != expected "
+                         f"{report.expected_len} for "
+                         f"present=0x{report.imu_present:02X}")
 
-        if buttons != old_buttons:
-            hn = "L" if h == 0 else "R"
-            self.app.log(f"{hn} BTN: {fmt_buttons(buttons)}")
+        buttons_changed, imu_changed = state.apply(report)
+
+        if imu_changed:
+            # Byte count and raw bitmask included so a slot going missing can be
+            # blamed on the wire or on the parser without a sniffer: the length
+            # is what actually arrived, before any truncation fallback ran.
+            self.app.log(f"{hn} IMU: {describe_imus(report.imu_present)}"
+                         f"  ({report.raw_len}B, "
+                         f"present=0x{report.imu_present:02X})")
+        if buttons_changed:
+            self.app.log(f"{hn} BTN: {fmt_buttons(report.buttons)}")
 
         self.app.on_input(h, state)
 
 
-# ── VR Mode (UDP forwarding) ─────────────────────────────────────────────
-
-class VRMode:
-    def __init__(self, port=27015):
-        self.port = port
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.target = ("127.0.0.1", port)
-
-    def on_input(self, hand, state):
-        pkt = struct.pack(GAMEPAD_PACK_FMT,
-                          GAMEPAD_MAGIC, hand, state.buttons,
-                          state.joy_x, state.joy_y, state.trigger, state.battery)
-        try:
-            self.sock.sendto(pkt, self.target)
-        except Exception:
-            pass
-
-    def stop(self):
-        self.sock.close()
+# ── VR Mode ──────────────────────────────────────────────────────────────
+#
+# Lives in bridge_common/vr_controller.py (FusedVRMode): fuses the runtime hand
+# skeleton, device 6DOF and controller buttons into driver_cyberfinger's
+# emulated controllers. The old CFGP-only VRMode is subsumed by it — with no
+# skeleton source available, FusedVRMode degrades to exactly that behavior.
 
 
 # ── uinput device factory ────────────────────────────────────────────────
@@ -742,7 +695,8 @@ class GamepadModeVRChat:
             except Exception:
                 pass
             self.device = None
-        for addr in ("/input/UseLeft", "/input/GrabRight", "/input/GrabLeft", "/input/Voice"):
+        for addr in ("/input/UseLeft", "/input/GrabRight", "/input/GrabLeft",
+                     "/input/Voice"):
             self._osc_send(addr, 0)
 
 
@@ -753,8 +707,8 @@ class CyberFingerApp:
         self.root = tk.Tk()
         self.root.title("CyberFinger Bridge")
         self.root.configure(bg=COLOR_BG)
-        self.root.geometry("680x620")
-        self.root.minsize(600, 540)
+        self.root.geometry("680x790")
+        self.root.minsize(600, 660)
 
         menubar = tk.Menu(self.root, tearoff=0)
         app_menu = tk.Menu(menubar, tearoff=0)
@@ -775,18 +729,28 @@ class CyberFingerApp:
         self._current_status = "Idle"
         self._window_visible = True
 
-        config_home = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-        self._config_dir = os.path.join(config_home, "cyberfinger-bridge")
+        self._config_dir = config_dir()
         self._config_path = os.path.join(self._config_dir, "settings.json")
         self._config = self._load_config()
 
         self.ble = BLEManager(self)
-        self.vr_mode = VRMode()
+        self.vr_mode = None              # created lazily on start (FusedVRMode)
         self.gamepad_mode = None         # created lazily on start
         self.vrchat_gamepad_mode = None  # created lazily on start
         self.active_mode = None
+        self.slimevr = None              # created lazily while forwarding is on
+        # Config gate ("skeleton_enabled": false in settings.json) exists so
+        # the OpenVR client can be ruled in/out when debugging runtime-side
+        # trouble without touching code.
+        self.skeleton = (create_skeleton_source(
+                             self.log, self._config.get("skeleton_bisect", False),
+                             self._config.get("skeleton_backend", "auto"))
+                         if self._config.get("skeleton_enabled", True) else None)
 
         self._build_ui()
+
+        if self.skeleton:
+            self.skeleton.start()
 
         self._tray_icon = None
         if HAS_TRAY:
@@ -887,11 +851,16 @@ class CyberFingerApp:
     def _quit_app(self):
         self._config["mode"] = self.mode_var.get()
         self._config["autostart"] = self.autostart_var.get()
+        self._config["slimevr_enabled"] = self.slimevr_var.get()
+        self._config["slimevr_body_imu"] = self.slimevr_body_var.get()
         self._save_config()
 
         self.ble.stop()
         if self.active_mode:
             self.active_mode.stop()
+        self._stop_slimevr()
+        if self.skeleton:
+            self.skeleton.stop()
 
         if self._tray_icon:
             try:
@@ -908,45 +877,58 @@ class CyberFingerApp:
         style.theme_use('clam')
         style.configure(".", background=COLOR_BG, foreground=COLOR_FG)
         style.configure("TFrame", background=COLOR_BG)
-        style.configure("TLabel", background=COLOR_BG, foreground=COLOR_FG, font=("monospace", 10))
+        style.configure("TLabel", background=COLOR_BG, foreground=COLOR_FG, font=(FONT, 10))
         style.configure("Title.TLabel", background=COLOR_BG, foreground=COLOR_ACCENT,
-                        font=("monospace", 14, "bold"))
+                        font=(FONT, 14, "bold"))
         style.configure("Status.TLabel", background=COLOR_BG, foreground=COLOR_FG_DIM,
-                        font=("monospace", 9))
+                        font=(FONT, 9))
+        style.configure("Hand.TLabel", background=COLOR_BG2, foreground=COLOR_FG,
+                        font=(FONT, 10))
         style.configure("TRadiobutton", background=COLOR_BG, foreground=COLOR_FG,
-                        font=("monospace", 10), focuscolor=COLOR_BG)
+                        font=(FONT, 10), focuscolor=COLOR_BG)
         style.map("TRadiobutton",
                   background=[("active", COLOR_BG)],
                   foreground=[("active", COLOR_ACCENT)])
+        style.configure("Small.TRadiobutton", background=COLOR_BG, foreground=COLOR_FG,
+                        font=(FONT, 9), focuscolor=COLOR_BG)
+        style.map("Small.TRadiobutton",
+                  background=[("active", COLOR_BG)],
+                  foreground=[("active", COLOR_ACCENT)])
         style.configure("TCheckbutton", background=COLOR_BG, foreground=COLOR_FG,
-                        font=("monospace", 9), focuscolor=COLOR_BG)
+                        font=(FONT, 9), focuscolor=COLOR_BG)
         style.map("TCheckbutton",
                   background=[("active", COLOR_BG)],
                   foreground=[("active", COLOR_ACCENT)])
         style.configure("Accent.TButton", background=COLOR_ACCENT, foreground="white",
-                        font=("monospace", 11, "bold"), padding=(20, 8))
+                        font=(FONT, 11, "bold"), padding=(20, 8))
         style.map("Accent.TButton",
                   background=[("active", COLOR_ACCENT2), ("disabled", COLOR_BG3)])
         style.configure("Stop.TButton", background=COLOR_RED, foreground="white",
-                        font=("monospace", 11, "bold"), padding=(20, 8))
+                        font=(FONT, 11, "bold"), padding=(20, 8))
         style.map("Stop.TButton",
                   background=[("active", "#ff4444"), ("disabled", COLOR_BG3)])
+        style.configure("Console.TButton", background=COLOR_BG3, foreground=COLOR_FG,
+                        font=(FONT, 9), padding=(10, 2))
+        style.map("Console.TButton",
+                  background=[("active", COLOR_BG2)],
+                  foreground=[("active", COLOR_ACCENT)])
 
-        # Header
+        # ── Header ──
         header = ttk.Frame(self.root)
         header.pack(fill=tk.X, padx=16, pady=(12, 4))
-        ttk.Label(header, text="⬡ CyberFinger Bridge (Linux)", style="Title.TLabel").pack(side=tk.LEFT)
+        ttk.Label(header, text="⬡ CyberFinger Bridge (Linux)",
+                  style="Title.TLabel").pack(side=tk.LEFT)
         self.status_label = ttk.Label(header, text="Idle", style="Status.TLabel")
         self.status_label.pack(side=tk.RIGHT)
 
-        # Mode selection + Start/Stop
+        # ── Mode selection + Start/Stop ──
         ctrl_frame = ttk.Frame(self.root)
         ctrl_frame.pack(fill=tk.X, padx=16, pady=(4, 4))
 
         self.mode_var = tk.StringVar(value=self._config.get("mode", "vr"))
         radio_frame = ttk.Frame(ctrl_frame)
         radio_frame.pack(side=tk.LEFT)
-        ttk.Radiobutton(radio_frame, text="VR Mode (BLE→SteamVR)",
+        ttk.Radiobutton(radio_frame, text="VR Mode (controllers + hand tracking → SteamVR)",
                         variable=self.mode_var, value="vr").pack(anchor=tk.W)
         ttk.Radiobutton(radio_frame, text="Gamepad Mode (BLE→uinput Xbox 360, Resonite)",
                         variable=self.mode_var, value="gamepad").pack(anchor=tk.W)
@@ -960,7 +942,7 @@ class CyberFingerApp:
                                     command=self._start_bridge)
         self.start_btn.pack(side=tk.RIGHT)
 
-        # Options row
+        # ── Options row ──
         opts_frame = ttk.Frame(self.root)
         opts_frame.pack(fill=tk.X, padx=16, pady=(0, 8))
 
@@ -973,29 +955,140 @@ class CyberFingerApp:
             ttk.Label(opts_frame, text="(close button minimizes to tray)",
                      style="Status.TLabel").pack(side=tk.RIGHT)
 
-        # Hands visualization
+        # ── SlimeVR row ──
+        slime_frame = ttk.Frame(self.root)
+        slime_frame.pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        self.slimevr_var = tk.BooleanVar(value=self._config.get("slimevr_enabled", False))
+        ttk.Checkbutton(slime_frame, text="Forward IMU to SlimeVR",
+                        variable=self.slimevr_var,
+                        command=self._on_slimevr_changed).pack(side=tk.LEFT)
+
+        # Body 1 and Body 2 are redundant IMUs at the same location, so only one
+        # is forwarded — this picks which, falling back to the other if absent.
+        ttk.Label(slime_frame, text="  body IMU:",
+                  style="Status.TLabel").pack(side=tk.LEFT)
+        self.slimevr_body_var = tk.StringVar(
+            value=self._config.get("slimevr_body_imu", "body1"))
+        for label, value in (("1", "body1"), ("2", "body2")):
+            ttk.Radiobutton(slime_frame, text=label, style="Small.TRadiobutton",
+                            variable=self.slimevr_body_var, value=value,
+                            command=self._on_slimevr_changed).pack(side=tk.LEFT)
+
+        # ── Hands visualization ──
         hands_frame = ttk.Frame(self.root)
         hands_frame.pack(fill=tk.X, padx=16, pady=4)
 
         self.left_panel = HandPanel(hands_frame, "LEFT", side=tk.LEFT)
         self.right_panel = HandPanel(hands_frame, "RIGHT", side=tk.RIGHT)
 
-        # Log console
-        log_frame = ttk.Frame(self.root)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 12))
+        # ── Bottom bar: console toggle ──
+        # Packed before the skeleton row so pack gives it its slice at the
+        # bottom and the skeleton area expands into whatever is left.
+        bottom = ttk.Frame(self.root)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 8))
+        self.console_visible = self._config.get("console_visible", False)
+        self.console_btn = ttk.Button(
+            bottom, text="▼ Console" if self.console_visible else "▲ Console",
+            style="Console.TButton", command=self._toggle_console)
+        self.console_btn.pack(side=tk.RIGHT)
 
+        # ── Hand skeleton row (what the VR runtime is tracking) ──
+        self.skeleton_area = ttk.Frame(self.root)
+        self.skeleton_area.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 4))
+        self.left_skeleton = SkeletonPanel(self.skeleton_area, "LEFT", side=tk.LEFT)
+        self.right_skeleton = SkeletonPanel(self.skeleton_area, "RIGHT", side=tk.RIGHT)
+
+        # ── Log console — hidden by default, slides up over the skeletons ──
+        self.log_frame = ttk.Frame(self.root)
         self.log_text = scrolledtext.ScrolledText(
-            log_frame, height=8,
+            self.log_frame, height=8,
             bg=COLOR_BG2, fg=COLOR_FG, insertbackground=COLOR_FG,
-            font=("monospace", 9), relief=tk.FLAT, borderwidth=0,
+            font=(FONT, 9), relief=tk.FLAT, borderwidth=0,
             selectbackground=COLOR_ACCENT, selectforeground="white",
             state=tk.DISABLED, wrap=tk.WORD
         )
         self.log_text.pack(fill=tk.BOTH, expand=True)
 
+        self.log_text.tag_configure("accent", foreground=COLOR_ACCENT)
+        self.log_text.tag_configure("green", foreground=COLOR_GREEN)
+        self.log_text.tag_configure("red", foreground=COLOR_RED)
+
+        self._console_frac = 1.0 if self.console_visible else 0.0
+        self._console_anim = None
+        if self.console_visible:
+            self._place_console(1.0)
+
+    def _place_console(self, frac):
+        """Overlay the console over the bottom `frac` of the skeleton area."""
+        self.log_frame.place(in_=self.skeleton_area, relx=0.0, rely=1.0,
+                             anchor="sw", relwidth=1.0,
+                             relheight=max(0.02, frac))
+
+    def _toggle_console(self):
+        self.console_visible = not self.console_visible
+        self._config["console_visible"] = self.console_visible
+        self._save_config()
+        self.console_btn.configure(
+            text="▼ Console" if self.console_visible else "▲ Console")
+        if self._console_anim is not None:
+            self.root.after_cancel(self._console_anim)
+        self._animate_console()
+
+    def _animate_console(self):
+        self._console_anim = None
+        target = 1.0 if self.console_visible else 0.0
+        delta = target - self._console_frac
+        if abs(delta) < 0.02:
+            self._console_frac = target
+            if target > 0.0:
+                self._place_console(1.0)
+                self.log_text.see(tk.END)
+            else:
+                self.log_frame.place_forget()
+            return
+        self._console_frac += max(-0.2, min(0.2, delta))
+        self._place_console(self._console_frac)
+        self._console_anim = self.root.after(16, self._animate_console)
+
     def _on_autostart_changed(self):
         self._config["autostart"] = self.autostart_var.get()
         self._save_config()
+
+    def _on_slimevr_changed(self):
+        """Persist the SlimeVR options, applying them live if already running."""
+        self._config["slimevr_enabled"] = self.slimevr_var.get()
+        self._config["slimevr_body_imu"] = self.slimevr_body_var.get()
+        self._save_config()
+
+        if self.slimevr:
+            self.slimevr.set_body_slot(self.slimevr_body_var.get())
+
+        # Only churn the forwarder while the bridge is actually running;
+        # otherwise _start_bridge will pick the new setting up.
+        if not self.active_mode:
+            return
+        if self.slimevr_var.get():
+            self._start_slimevr()
+        else:
+            self._stop_slimevr()
+
+    def _start_slimevr(self):
+        if self.slimevr:
+            return
+        host = self._config.get("slimevr_host", SLIME_DEFAULT_HOST)
+        port = int(self._config.get("slimevr_port", SLIME_DEFAULT_PORT))
+        self.slimevr = SlimeVRForwarder(host, port,
+                                        self.slimevr_body_var.get(), self.log)
+        self.slimevr.start()
+        self.log(f"SlimeVR: announcing trackers to {host}:{port}")
+
+    def _stop_slimevr(self):
+        if not self.slimevr:
+            return
+        self.slimevr.stop()
+        self.slimevr = None
+        self.log("SlimeVR: forwarding stopped")
 
     def _start_bridge(self):
         if self.active_mode:
@@ -1024,16 +1117,23 @@ class CyberFingerApp:
             else:
                 self.vrchat_gamepad_mode = gp
                 self.active_mode = self.vrchat_gamepad_mode
-        else:
+        else:  # "vr" and fallback
+            self.vr_mode = FusedVRMode(self.skeleton, self.ble, self.log)
+            self.vr_mode.start()
             self.active_mode = self.vr_mode
 
         self._config["mode"] = mode
         self._config["autostart"] = self.autostart_var.get()
+        self._config["slimevr_enabled"] = self.slimevr_var.get()
+        self._config["slimevr_body_imu"] = self.slimevr_body_var.get()
         self._save_config()
 
         self.log(f"Starting {mode.upper()} mode...")
         if mode == "gamepad_vrc":
             self.log(">>> VRChat: enable OSC via Action Menu → OSC → Enabled")
+
+        if self.slimevr_var.get():
+            self._start_slimevr()
 
         self.start_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.NORMAL)
@@ -1049,8 +1149,7 @@ class CyberFingerApp:
         if self.active_mode:
             self.active_mode.stop()
         self.active_mode = None
-        self.gamepad_mode = None
-        self.vrchat_gamepad_mode = None
+        self._stop_slimevr()
 
         self.start_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.DISABLED)
@@ -1061,14 +1160,24 @@ class CyberFingerApp:
         self.log("Bridge stopped")
         self._set_tray_running(False)
 
+        # Recreate for next start
         self.ble = BLEManager(self)
+        self.vr_mode = None
+        self.gamepad_mode = None
+        self.vrchat_gamepad_mode = None
 
     def on_input(self, hand, state):
+        """Called from BLE thread on each input report."""
         if self.active_mode:
             if isinstance(self.active_mode, (GamepadMode, GamepadModeVRChat)):
                 self.active_mode.update_gamepad(self.ble.left, self.ble.right)
             else:
                 self.active_mode.on_input(hand, state)
+
+        # Runs alongside the active mode, not instead of it — SlimeVR takes the
+        # orientation none of the other modes forward.
+        if self.slimevr:
+            self.slimevr.on_input(hand, state)
 
     def log(self, msg):
         self.log_queue.put(msg)
@@ -1104,6 +1213,23 @@ class CyberFingerApp:
             self.left_panel.update_state(self.ble.left)
             self.right_panel.update_state(self.ble.right)
 
+        # Skip the skeleton redraw while the console fully covers it.
+        if self._console_frac < 1.0:
+            if self.skeleton:
+                poses = self.skeleton.pose_info
+                self.left_skeleton.draw(self.skeleton.hands[0],
+                                        self.skeleton.status,
+                                        poses[0], poses[1])
+                self.right_skeleton.draw(self.skeleton.hands[1],
+                                         self.skeleton.status,
+                                         poses[1], poses[0])
+            else:
+                why = ("disabled in settings"
+                       if not self._config.get("skeleton_enabled", True)
+                       else "pip install openvr")
+                self.left_skeleton.draw(None, why)
+                self.right_skeleton.draw(None, why)
+
         self.root.after(33, self._poll_queues)  # ~30fps
 
     def run(self):
@@ -1120,119 +1246,9 @@ class CyberFingerApp:
             self.log("System tray: not available (pip install pystray pillow)")
         if not HAS_PYNPUT:
             self.log("Keyboard (F12 screenshot): not available (pip install pynput)")
+        if not HAS_OPENVR:
+            self.log("Hand skeleton: not available (pip install openvr)")
         self.root.mainloop()
-
-
-# ── Hand visualization panel ─────────────────────────────────────────────
-
-class HandPanel:
-    def __init__(self, parent, label, side):
-        self.label = label
-        self.frame = ttk.Frame(parent)
-        self.frame.pack(side=side, fill=tk.BOTH, expand=True, padx=(0, 4) if side == tk.LEFT else (4, 0))
-
-        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, height=210)
-        self.canvas.pack(fill=tk.BOTH, expand=True)
-
-    def update_state(self, state: HandState):
-        c = self.canvas
-        c.delete("all")
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w < 10 or h < 10:
-            return
-
-        is_left = self.label == "LEFT"
-
-        if state.connected:
-            c.create_text(w // 2, 14, text=f"{self.label}", fill=COLOR_ACCENT,
-                         font=("monospace", 11, "bold"))
-        else:
-            c.create_text(w // 2, 14, text=f"{self.label} (disconnected)",
-                         fill=COLOR_FG_DIM, font=("monospace", 10))
-            return
-
-        # Battery
-        bat = state.battery
-        bat_color = COLOR_GREEN if bat > 50 else COLOR_ORANGE if bat > 20 else COLOR_RED
-        c.create_text(w - 10, 14, text=f"{bat}%", fill=bat_color,
-                     font=("monospace", 9), anchor=tk.E)
-
-        # Packet counter
-        c.create_text(10, 14, text=f"#{state.packet_count}", fill=COLOR_FG_DIM,
-                     font=("monospace", 8), anchor=tk.W)
-
-        # Joystick
-        joy_cx = w // 4 if is_left else 3 * w // 4
-        joy_cy = 80
-        joy_r = 35
-
-        c.create_oval(joy_cx - joy_r, joy_cy - joy_r,
-                     joy_cx + joy_r, joy_cy + joy_r,
-                     outline=COLOR_BG3, width=2, fill=COLOR_BG)
-        c.create_line(joy_cx - joy_r, joy_cy, joy_cx + joy_r, joy_cy,
-                     fill=COLOR_BG3, width=1)
-        c.create_line(joy_cx, joy_cy - joy_r, joy_cx, joy_cy + joy_r,
-                     fill=COLOR_BG3, width=1)
-
-        jx = state.joy_x_float * (joy_r - 6)
-        jy = state.joy_y_float * (joy_r - 6)
-        dot_r = 6
-        c.create_oval(joy_cx + jx - dot_r, joy_cy + jy - dot_r,
-                     joy_cx + jx + dot_r, joy_cy + jy + dot_r,
-                     fill=COLOR_ACCENT, outline=COLOR_ACCENT2, width=1)
-
-        # Buttons
-        btn_x = 3 * w // 4 if is_left else w // 4
-        btn_y_start = 30
-        btn_spacing = 17
-        btn_names_bits = [
-            ("TRIG",  BTN_TRIGGER),
-            ("GRIP",  BTN_GRIP),
-            ("C",     BTN_C),
-            ("D",     BTN_D),
-            ("E",     BTN_E),
-            ("MENU",  BTN_MENU),
-            ("JCLK",  BTN_JCLICK),
-            ("ST/SE", BTN_STSEL),
-        ]
-
-        for i, (name, bit) in enumerate(btn_names_bits):
-            by = btn_y_start + i * btn_spacing
-            pressed = bool(state.buttons & bit)
-            fill = COLOR_ACCENT if pressed else COLOR_BG
-            outline = COLOR_ACCENT if pressed else COLOR_BG3
-            c.create_oval(btn_x - 7, by - 7, btn_x + 7, by + 7,
-                         fill=fill, outline=outline, width=2)
-            c.create_text(btn_x + 14, by, text=name, fill=COLOR_FG if pressed else COLOR_FG_DIM,
-                         font=("monospace", 8), anchor=tk.W)
-
-        # Trigger bar
-        trig_x = w // 2
-        trig_y = 168
-        trig_w = w - 40
-        trig_h = 10
-        trig_val = state.trigger_float
-
-        c.create_rectangle(trig_x - trig_w // 2, trig_y,
-                          trig_x + trig_w // 2, trig_y + trig_h,
-                          fill=COLOR_BG, outline=COLOR_BG3)
-        if trig_val > 0.01:
-            fill_w = int(trig_val * trig_w)
-            c.create_rectangle(trig_x - trig_w // 2, trig_y,
-                              trig_x - trig_w // 2 + fill_w, trig_y + trig_h,
-                              fill=COLOR_ACCENT, outline="")
-        c.create_text(trig_x, trig_y - 6, text=f"Trigger: {int(trig_val * 100)}%",
-                     fill=COLOR_FG_DIM, font=("monospace", 8))
-
-    def set_disconnected(self):
-        c = self.canvas
-        c.delete("all")
-        w = c.winfo_width()
-        h = c.winfo_height()
-        if w > 10:
-            c.create_text(w // 2, h // 2, text=f"{self.label}\n(disconnected)",
-                         fill=COLOR_FG_DIM, font=("monospace", 10), justify=tk.CENTER)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────
