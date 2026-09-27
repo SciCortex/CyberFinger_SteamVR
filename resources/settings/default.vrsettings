@@ -30,6 +30,8 @@
         "pose_filter_gate_cm": 5.0,
         "pose_filter_types": "svl_hand_interaction_augmented",
 
+        "imu_fusion": true,
+
         "hide_other_hand_controllers": true,
         "yield_to_controllers": true,
 

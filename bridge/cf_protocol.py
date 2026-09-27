@@ -8,8 +8,8 @@
   CFHS  bridge → driver  fused hand state: /pose/raw + 31 bones               (pack_hand_state)
   CFOP  driver → bridge  HMD pose + headset hand tracking ("optical tap")     (unpack_context)
   CFHP  driver → bridge  haptic vibration request from an application         (unpack_haptic)
-  CFIM  bridge → driver  raw glove IMU slots, one per BLE report, while the driver captures
-                         (unpack_context(...)["capturing"])                     (pack_imu)
+  CFIM  bridge → driver  raw glove IMU slots, one per BLE report: the driver's IMU fusion
+                         and its captures                                       (pack_imu)
 
 Little-endian, packed; the driver listens on 127.0.0.1:27015 and sends CFOP to 127.0.0.1:27016.
 tests/ keep this module and the C++ header in sync:  python cf_protocol.py --write-vectors <file>

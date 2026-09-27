@@ -51,8 +51,19 @@ Items marked *check* are hypotheses to verify.
 - [ ] **Driver-side IMU fusion** until the Studio's full fusion (sEMG and more) arrives: body IMU (body 1/2) to
   steady the position, joint IMU for the orientation, and dead reckoning from the IMUs while the hands are out of
   view. The glove IMUs are ~3× quieter than the optical rotation and lead it by ~40 ms (capture 2026-09-26).
-  Needs the IMU stream in the driver outside captures (`CFIM` is capture-only today) and a mounting calibration.
-  Off switch: a bridge flag (e.g. in `CFHS`/`CFIM`) or a SteamVR setting: decide.
+  **Orientation done** (2026-09-27, `src/ImuFusion.h`, setting `imu_fusion`): the bridges stream `CFIM` always;
+  the driver solves the joint IMU's heading and mounting (Studio's `mount_calib` model) and the optical lag from
+  slow-turning, seen samples, then drives the orientation from the IMU with a slow optical correction. Offline
+  (`fusion_eval`): agrees with the headset to 0.6–1.9° at rest; through simulated occlusions 5–20° off vs 13–76°
+  for holding the last pose. No switch message needed: the Studio's fusion (FUSED mode) bypasses it.
+  Live (Steam Link, 2026-09-27): CyberFinger's rotation follows the IMU (+2 ms) while the headset's trails it by
+  ~90 ms; laser jitter left 11.3 → 5.0 mm still, 64.5 → 21.8 mm fast.
+  **Cold start** (2026-09-27): the mounting and lag are saved per hand and source
+  (`%LOCALAPPDATA%\CyberFinger\imu_calibration.txt`, averaged over sessions; built-in reference default) and
+  the fusion starts from them, fitting only the heading: running 0.5–0.8 s after the hand is seen (was 4–5 s
+  offline, 20–60 s live with still hands). Between sessions the solved mounting scatters 14–21°, mostly tilt,
+  not the heading ambiguity: the glove's fit, or the optical hand frame's posture bias. *Check live.*
+  *Next:* position from the body IMU's accelerometer (noise, dead reckoning while unseen).
 - [ ] **Skeleton simpler than OpenVR's.** Probably the same cause as the rigid hands seen later: in Touch mode
   without skeletons bound, Resonite draws canned Touch hands. *Check* now that the default binds them.
 - [ ] Dashboard laser: Steam Link draws its own stabilised pointer on the headset. Option: hand the roles back to

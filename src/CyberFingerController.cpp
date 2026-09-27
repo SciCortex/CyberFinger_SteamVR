@@ -150,24 +150,28 @@ Xform CyberFingerController::LinkToOurs() {
 // Republished as submitted, with the source's timing (poseTimeOffset) and velocities: apps see the
 // headset hand's own pose stream, not a per-frame resampling of it.
 void CyberFingerController::OnTapPose(const vr::DriverPose_t& pose) {
-    m_lastTapPose.store(NowSeconds(), std::memory_order_relaxed);
+    const double now = NowSeconds();
+    m_lastTapPose.store(now, std::memory_order_relaxed);
+    // Occlusion: the source resends its last skeleton unchanged (Steam Link) or stops sending it (Virtual
+    // Desktop), or dates the pose well in the past, while it extrapolates a hand it no longer sees.
+    const bool unseen = now - m_lastSkeletonChange.load(std::memory_order_relaxed) > kOcclusion ||
+                        pose.poseTimeOffset < -0.05;
+    if (m_imu) m_imu->Observe(now, FromHmdQuat(pose.qRotation), pose.poseIsValid && !unseen);
     if (!m_follow.load(std::memory_order_acquire)) return;
     const uint32_t id = m_objectId;
     if (id == vr::k_unTrackedDeviceIndexInvalid) return;
     vr::DriverPose_t src = pose;
+    double rotPrediction;
     {
         // Steam Link's velocities are noisy and its poses already predicted: filter the pose, publish our
         // own velocities for SteamVR's extrapolation, and date it now (both hands alike). Sources that don't
         // need it (Virtual Desktop) pass through untouched.
         std::lock_guard<std::mutex> g(m_filterLock);
+        rotPrediction = m_filterParams.rotPrediction;
         if (m_filterParams.enabled && m_sourceFiltered.load(std::memory_order_acquire) && pose.poseIsValid) {
             Vec3 pos = FromArray(pose.vecPosition), v, w;
             Quat q = FromHmdQuat(pose.qRotation);
-            // Occlusion: the source resends its last skeleton unchanged, or dates the pose well in the past,
-            // while it extrapolates a hand it no longer sees. Hold the last good pose, motionless, instead.
-            const double now = NowSeconds();
-            const bool unseen = now - m_lastSkeletonChange.load(std::memory_order_relaxed) > kOcclusion ||
-                                pose.poseTimeOffset < -0.05;
+            // While the hand is unseen, hold the last good pose, motionless.
             if (!(unseen && m_filter.Current(pos, q))) m_filter.Filter(pos, q, v, w, now, m_filterParams);
             ToArray(pos, src.vecPosition);
             src.qRotation = ToHmdQuat(q);
@@ -177,6 +181,15 @@ void CyberFingerController::OnTapPose(const vr::DriverPose_t& pose) {
             src.vecAngularAcceleration[0] = src.vecAngularAcceleration[1] = src.vecAngularAcceleration[2] = 0;
             src.poseTimeOffset = 0;
         }
+    }
+    // The orientation from the glove's joint IMU (the headset's absolute orientation, the IMU's motion and
+    // timing): also through occlusions, where the pose filter holds the position.
+    Quat qf;
+    Vec3 wf;
+    if (pose.poseIsValid && FusedOrientation(now, qf, wf)) {
+        src.qRotation = ToHmdQuat(qf);
+        ToArray(wf * rotPrediction, src.vecAngularVelocity);
+        src.vecAngularAcceleration[0] = src.vecAngularAcceleration[1] = src.vecAngularAcceleration[2] = 0;
     }
     vr::DriverPose_t p = OffsetDriverPose(src, LinkToOurs());
     p.shouldApplyHeadModel = false;
@@ -208,6 +221,12 @@ void CyberFingerController::OnTapSkeleton(vr::EVRSkeletalMotionRange range, cons
     ReRootBones(bones, linkWrist, m_synthWrist, out);
     SubmitSkeleton(out);
     m_eventSkeletons.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool CyberFingerController::FusedOrientation(double now, Quat& q, Vec3& w) {
+    const bool ok = m_imu && m_imuEnabled.load(std::memory_order_relaxed) && m_imu->Orientation(now, q, w);
+    m_imuFused.store(ok, std::memory_order_relaxed);
+    return ok;
 }
 
 void CyberFingerController::SetPoseFilter(const PoseFilter::Params& params) {
@@ -254,6 +273,19 @@ void CyberFingerController::PassthroughPose(const TapHandSnapshot& tap, const Gl
     raw = tap.rawPose * LinkToOurs();
     ang = tap.angVel;
     lin = tap.linVel + Cross(tap.angVel, raw.p - tap.rawPose.p);
+
+    // The IMU fusion, as in OnTapPose: fed here while the source's events don't arrive (e.g. Virtual Desktop
+    // keeping a lost hand's pose), and used whenever calibrated.
+    if (m_imu && now - m_lastTapPose.load(std::memory_order_relaxed) > kEventTimeout)
+        m_imu->Observe(now, tap.rawPose.q,
+                       tap.poseValid && now - m_lastSkeletonChange.load(std::memory_order_relaxed) < kOcclusion);
+    Quat qf;
+    Vec3 wf;
+    if (FusedOrientation(now, qf, wf)) {
+        raw = Xform{ qf, tap.rawPose.p } * LinkToOurs();
+        std::lock_guard<std::mutex> g(m_filterLock);
+        ang = wf * m_filterParams.rotPrediction;
+    }
 
     if (tapSkeleton) {
         ReRootBones(tap.bones, linkWrist, m_synthWrist, bones);

@@ -10,6 +10,7 @@
 
 #include <openvr_driver.h>
 #include <condition_variable>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -18,6 +19,7 @@
 #include <vector>
 #include "CyberFingerController.h"
 #include "OpticalTap.h"
+#include "ImuFusion.h"
 #include "StudioLink.h"
 
 namespace cf {
@@ -51,8 +53,24 @@ private:
     void SendContext(const vr::TrackedDevicePose_t* poses, const TapHandSnapshot tap[2], double now);
     void LogStatus(const TapHandSnapshot tap[2], double now);
     void OnHaptic(const vr::VREvent_HapticVibration_t& hv);
+    void LoadImuCalibration();
+    void UpdateImuCalibration(const TapHandSnapshot tap[2], double now);
+    void SaveImuCalibration();
 
     StudioLink m_link;
+    ImuFusion m_imuFusion[2];         // the glove's joint IMU + optical orientation, per hand (fed by m_link)
+    bool m_imuFusionEnabled = true;   // setting imu_fusion
+    bool m_imuFusionKnown = false;
+
+    // The IMU calibration carried across sessions (%LOCALAPPDATA%\CyberFinger\imu_calibration.txt), per hand and
+    // hand-tracking source (their hand frames may differ): the mounting and lag the fusion starts from.
+    std::map<std::string, ImuFusion::Calibration> m_imuSaved[2];   // by source controller type, lower case
+    ImuFusion::Calibration m_imuBase[2];          // this session's saved start, which new solves are averaged into
+    bool   m_imuHaveBase[2] = {};
+    std::string m_imuSource[2];                   // the source the fusion started for
+    size_t m_imuSavedSolves[2] = {};              // full solves already taken
+    bool   m_imuCalDirty = false;
+    double m_nextImuCalCheck = 0, m_nextImuCalSave = 0;
     std::unique_ptr<OpticalTap> m_tap;
     std::unique_ptr<CyberFingerController> m_controller[2];
     bool m_tapEnabled = true;

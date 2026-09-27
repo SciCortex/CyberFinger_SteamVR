@@ -82,7 +82,17 @@ vr::EVRInitError ServerProvider::Init(vr::IVRDriverContext* pDriverContext) {
     }
 
     // The glove IMUs, sent by the bridge while a capture runs, go into the capture with everything else.
-    m_link.SetImuSink([tap = m_tap.get()](const ImuPacket& p, double arrival) { tap->CaptureImu(p, arrival); });
+    // Captures record every packet; the fusion takes the joint IMU, stamped when the report reached the bridge
+    // over BLE (the bridge's clock is the driver's; if it ever isn't, the arrival here).
+    for (ImuFusion& f : m_imuFusion) f.Reset();
+    LoadImuCalibration();
+    m_link.SetImuSink([this, tap = m_tap.get()](const ImuPacket& p, double arrival) {
+        tap->CaptureImu(p, arrival);
+        if (!(p.present & kImuJoint)) return;
+        double t = (double(p.h.t_send_us) - double(p.h.age_us)) * 1e-6;
+        if (std::fabs(arrival - t) > 0.5) t = arrival;
+        m_imuFusion[p.h.hand & 1].AddImu(t, Quat{ p.quat[2][0], p.quat[2][1], p.quat[2][2], p.quat[2][3] });
+    });
     m_link.Start(SettingInt("handtracking_udp_port", 27015), SettingInt("context_udp_port", 27016),
                  SettingBool("bind_loopback_only", true), SettingBool("legacy_5bit_buttons", false));
 
@@ -109,6 +119,7 @@ vr::EVRInitError ServerProvider::Init(vr::IVRDriverContext* pDriverContext) {
         cfg.noSkeletonOffset = { QuatFromEulerXYZDeg(ax, ay * m, az * m), { ox * m, oy, oz } };
 
         m_controller[hand] = std::make_unique<CyberFingerController>(hand, cfg);
+        m_controller[hand]->SetImuFusion(&m_imuFusion[hand]);
         vr::VRServerDriverHost()->TrackedDeviceAdded(cfg.serial.c_str(), vr::TrackedDeviceClass_Controller,
                                                      m_controller[hand].get());
     }
@@ -142,6 +153,7 @@ void ServerProvider::Cleanup() {
     m_pubWake.notify_all();
     if (m_pubThread.joinable()) m_pubThread.join();
     RestoreHiddenControllers();
+    if (m_imuCalDirty) SaveImuCalibration();
     m_link.Stop();
     m_controller[0].reset();
     m_controller[1].reset();
@@ -173,9 +185,19 @@ void ServerProvider::RunFrame() {
         PollCaptureRequest();
         m_hideSetting = SettingBool("hide_other_hand_controllers", true);
         m_yieldSetting = SettingBool("yield_to_controllers", true);
+        const bool fuse = SettingBool("imu_fusion", true);
+        if (fuse != m_imuFusionEnabled || !m_imuFusionKnown) {
+            m_imuFusionEnabled = fuse;
+            m_imuFusionKnown = true;
+            for (auto& c : m_controller)
+                if (c) c->SetImuFusionEnabled(fuse);
+            DriverLog("IMU fusion %s\n", fuse ? "on: the glove's joint IMU drives the hand orientation once calibrated"
+                                              : "off: orientation from the headset alone");
+        }
     }
     if (m_tapEnabled) m_tap->PollCapture(now);
     TapHandSnapshot tap[2] = { m_tap->Get(0), m_tap->Get(1) };
+    UpdateImuCalibration(tap, now);
 
     // Other hand controllers: released to when the user picks them up, hidden from apps otherwise. A released
     // hand's controllers are shown before CyberFinger lets go of the hand (same frame, below).
@@ -452,6 +474,131 @@ void ServerProvider::PollCaptureRequest() {
     m_tap->StartCapture(seconds, path);
 }
 
+// ── IMU calibration across sessions ──
+// The joint IMU's mounting belongs to the glove and how it sits, the lag to the streamer: both carry over, so
+// the fusion starts from them and only fits the IMU's heading (new with every power-up) — within a second of
+// seeing the hand, instead of waiting for enough varied orientations for a full solve. Before anything is saved
+// it starts from the reference gloves' calibration. The file is plain text; deleting it starts afresh.
+namespace {
+
+std::string ImuCalibrationPath() {
+    const char* base = std::getenv("LOCALAPPDATA");
+    return base ? std::string(base) + "\\CyberFinger\\imu_calibration.txt" : std::string();
+}
+
+double QuatAngleDeg(const Quat& a, const Quat& b) {
+    const double d = std::fabs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);
+    return 2.0 * std::acos(std::min(1.0, d)) * 180.0 / kPi;
+}
+
+constexpr double kSaveMaxResidualDeg = 15.0;   // only a good full solve is saved (sessions fit to 4-8°)
+constexpr double kAverageWithinDeg = 25.0;      // a solve this close to the saved one is averaged with it
+
+} // namespace
+
+// Lines: <left|right> <source controller type> <mount w x y z> <lag ms> <fit deg>; '#' comments.
+void ServerProvider::LoadImuCalibration() {
+    const std::string path = ImuCalibrationPath();
+    std::FILE* f = path.empty() ? nullptr : std::fopen(path.c_str(), "r");
+    if (!f) return;
+    char line[512];
+    int n = 0;
+    while (std::fgets(line, sizeof(line), f)) {
+        if (line[0] == '#') continue;
+        std::istringstream ss(line);
+        std::string hand, source;
+        ImuFusion::Calibration c;
+        double lagMs = 0;
+        if (!(ss >> hand >> source >> c.mount.w >> c.mount.x >> c.mount.y >> c.mount.z >> lagMs >> c.residualDeg))
+            continue;
+        const double norm = std::sqrt(c.mount.w * c.mount.w + c.mount.x * c.mount.x + c.mount.y * c.mount.y +
+                                      c.mount.z * c.mount.z);
+        if ((hand != "left" && hand != "right") || norm < 0.5 || norm > 1.5) continue;
+        c.mount = Normalize(c.mount);
+        c.lag = std::max(0.0, lagMs * 1e-3);
+        m_imuSaved[hand == "right"][Lower(source)] = c;
+        ++n;
+    }
+    std::fclose(f);
+    DriverLog("IMU calibration: %d saved (%s)\n", n, path.c_str());
+}
+
+void ServerProvider::SaveImuCalibration() {
+    const std::string path = ImuCalibrationPath();
+    if (path.empty()) return;
+#ifdef _WIN32
+    CreateDirectoryA(path.substr(0, path.rfind('\\')).c_str(), nullptr);
+#endif
+    const std::string tmp = path + ".tmp";
+    std::FILE* f = std::fopen(tmp.c_str(), "w");
+    if (!f) {
+        DriverLog("IMU calibration: cannot write %s\n", tmp.c_str());
+        return;
+    }
+    std::fprintf(f, "# CyberFinger glove IMU calibration, kept by the driver: how the joint IMU sits on each hand, and\n"
+                    "# the hand-tracking source's lag, per hand and source. The IMU fusion starts from it; delete this\n"
+                    "# file to start afresh.\n"
+                    "# hand source mount_w mount_x mount_y mount_z lag_ms fit_deg\n");
+    for (int hand = 0; hand < 2; ++hand)
+        for (const auto& [source, c] : m_imuSaved[hand])
+            std::fprintf(f, "%s %s %.5f %.5f %.5f %.5f %.1f %.1f\n", hand ? "right" : "left", source.c_str(),
+                         c.mount.w, c.mount.x, c.mount.y, c.mount.z, c.lag * 1e3, c.residualDeg);
+    const bool ok = std::fclose(f) == 0;
+#ifdef _WIN32
+    if (ok && MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) m_imuCalDirty = false;
+#else
+    if (ok && std::rename(tmp.c_str(), path.c_str()) == 0) m_imuCalDirty = false;
+#endif
+    if (m_imuCalDirty) DriverLog("IMU calibration: cannot replace %s\n", path.c_str());
+}
+
+void ServerProvider::UpdateImuCalibration(const TapHandSnapshot tap[2], double now) {
+    if (now < m_nextImuCalCheck) return;
+    m_nextImuCalCheck = now + 0.5;
+    for (int hand = 0; hand < 2; ++hand) {
+        const char* name = hand ? "right" : "left";
+        // A hand-tracking source appeared (or another replaced it): start from its calibration.
+        const std::string source = Lower(tap[hand].controllerType);
+        if (!source.empty() && source != m_imuSource[hand]) {
+            if (!m_imuSource[hand].empty()) m_imuFusion[hand].Reset();
+            m_imuSource[hand] = source;
+            m_imuSavedSolves[hand] = 0;
+            const auto it = m_imuSaved[hand].find(source);
+            m_imuHaveBase[hand] = it != m_imuSaved[hand].end();
+            m_imuBase[hand] = m_imuHaveBase[hand] ? it->second : ImuFusion::DefaultCalibration(hand);
+            m_imuFusion[hand].SetPrior(m_imuBase[hand]);
+            DriverLog("[%s] IMU fusion starts from %s (lag %.0f ms)\n", name,
+                      m_imuHaveBase[hand] ? "the calibration saved for this source" : "the reference glove's calibration",
+                      m_imuBase[hand].lag * 1e3);
+        }
+        // A new good full solve: remember it. Sessions scatter by ~15° (how the glove sits, the postures seen),
+        // so a solve near the saved calibration is averaged with it rather than replacing it.
+        const ImuFusion::Status st = m_imuFusion[hand].GetStatus();
+        ImuFusion::Calibration c;
+        if (m_imuSource[hand].empty() || st.solves == m_imuSavedSolves[hand] || st.residualDeg > kSaveMaxResidualDeg ||
+            !m_imuFusion[hand].GetCalibration(c))
+            continue;
+        const bool first = m_imuSavedSolves[hand] == 0;
+        m_imuSavedSolves[hand] = st.solves;
+        const double moved = QuatAngleDeg(c.mount, m_imuBase[hand].mount);
+        const bool average = m_imuHaveBase[hand] && moved <= kAverageWithinDeg;
+        if (average) {
+            c.mount = Normalize(Slerp(m_imuBase[hand].mount, c.mount, 0.5));
+            if (m_imuBase[hand].lag > 0) c.lag = c.lag > 0 ? 0.5 * (c.lag + m_imuBase[hand].lag) : m_imuBase[hand].lag;
+        }
+        m_imuSaved[hand][m_imuSource[hand]] = c;
+        m_imuCalDirty = true;
+        if (first)
+            DriverLog("[%s] IMU calibrated (mount fit %.1f deg, %.1f deg from where it started, lag %.0f ms): %s\n",
+                      name, st.residualDeg, moved, st.lag * 1e3,
+                      average ? "averaged into the saved calibration" : "saved for the next session");
+    }
+    if (m_imuCalDirty && now >= m_nextImuCalSave) {
+        m_nextImuCalSave = now + 60.0;
+        SaveImuCalibration();
+    }
+}
+
 // An application asked one of our hands to vibrate: pass it to the bridge, which drives the glove.
 void ServerProvider::OnHaptic(const vr::VREvent_HapticVibration_t& hv) {
     for (int hand = 0; hand < 2; ++hand) {
@@ -522,14 +669,26 @@ void ServerProvider::LogStatus(const TapHandSnapshot tap[2], double now) {
                           noise.windows, noise.wrist * 1e3, noise.tips * 1e3, noise.fingers * 1e3);
         const GloveState g = m_link.Glove(hand);
         const HandStateSample f = m_link.HandState(hand);
+        const ImuFusion::Status is = m_imuFusion[hand].GetStatus();
+        char imu[128] = "off";
+        if (m_imuFusionEnabled && is.calibrated)
+            std::snprintf(imu, sizeof(imu), "lag %.0f ms, %s %.1f deg, %zu solves%s", is.lag * 1e3,
+                          is.fromPrior ? "starting mount fits" : "mount fit", is.residualDeg, is.solves,
+                          c->ImuFused() ? "" : ", IMU silent");
+        else if (m_imuFusionEnabled && is.priorResidualDeg >= 0)
+            std::snprintf(imu, sizeof(imu), "calibrating (%zu pairs; the starting mount is off by %.0f deg)", is.pairs,
+                          is.priorResidualDeg);
+        else if (m_imuFusionEnabled)
+            std::snprintf(imu, sizeof(imu), "calibrating (%zu pairs)", is.pairs);
         DriverLog("[%s] status: mode=%u%s tap(src=%s pose=%d skel=%d bones=%u age=%.2fs sys=%d) "
-                  "rates(src %.0f/%.0f Hz, new data %.0f/%.0f Hz, republished %.0f/%.0f Hz) noise(%s) glove=%s fused=%s\n",
+                  "rates(src %.0f/%.0f Hz, new data %.0f/%.0f Hz, republished %.0f/%.0f Hz) noise(%s) glove=%s fused=%s "
+                  "imu(%s)\n",
                   c->Serial().c_str(), unsigned(c->Mode()), c->Following() ? " (event)" : "",
                   tap[hand].serial.empty() ? "-" : tap[hand].serial.c_str(), int(tap[hand].poseValid),
                   int(tap[hand].skeletonValid), tap[hand].boneCount, std::min(tap[hand].skeletonAge, 999.0),
                   int(tap[hand].systemClick), src.pose, src.skeleton, src.poseNew, src.skeletonNew, ourPose, ourSkel, still,
                   g.valid ? (now - g.time < 0.5 ? "live" : "stale") : "none",
-                  f.valid ? (now - f.arrival < 0.5 ? "live" : "stale") : "none");
+                  f.valid ? (now - f.arrival < 0.5 ? "live" : "stale") : "none", imu);
     }
 }
 

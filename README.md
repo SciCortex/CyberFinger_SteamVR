@@ -141,6 +141,28 @@ holds the grab until the next press; a longer press grabs while held. `/input/gr
 Gesture values come from Steam Link's own hand-tracking gestures while it tracks the hand, and from the
 hand skeleton otherwise.
 
+## Glove IMU fusion
+
+With a bridge running and the glove connected, the driver fuses the glove's joint IMU (on the back of the hand)
+with the headset's hand orientation, until the Fusion Studio's own fusion takes over (the FUSED mode bypasses it).
+While the headset sees the hand and it turns slowly, the driver learns the IMU's heading and how it sits on the
+hand, and measures how far the headset's stream trails the IMU. The hand orientation then comes from the IMU,
+kept aligned with the headset's: less jitter, none of the headset stream's lag or overshoot, and it keeps turning
+with the hand while the headset has lost it (the position is held then). The status line shows
+`imu(lag … ms, mount fit … deg, … solves)`. Switch it off live with `imu_fusion`; `pose_rotation_prediction`
+also scales the IMU's angular velocity.
+
+How the IMU sits on the hand, and the streamer's lag, carry over between sessions: the driver keeps them in
+`%LOCALAPPDATA%\CyberFinger\imu_calibration.txt` (per hand and hand-tracking source, averaged over sessions)
+and starts from them, so only the IMU's heading, new with every power-up, is left to find. The fusion then runs
+within a second of the headset seeing the hand, even held still; the full calibration, which needs a few seconds
+of turning the hand in view, refines it after. Before anything is saved it starts from the reference gloves'
+calibration. A starting point more than 25° off (another glove, the sensor turned) is ignored, and the status
+line says so (`the starting mount is off by … deg`); delete the file to start afresh.
+
+Offline, `out\build\x64-Release\fusion_eval.exe <capture.csv> [prior=default|<other capture.csv>]` replays a
+capture (with the IMUs) through the same code, optionally starting from another session's calibration.
+
 ## Haptics
 
 When an app vibrates a CyberFinger hand, the driver sends the request (duration, frequency, amplitude) to
@@ -199,6 +221,7 @@ Settings live in `resources/settings/default.vrsettings` (section `driver_cyberf
 | `pose_prediction` | `0.5` | Scale of the linear velocity SteamVR extrapolates with: 0 = no prediction (live) |
 | `pose_rotation_prediction` | `0.0` | Likewise for the angular velocity; above 0 a pointing laser jitters (live) |
 | `pose_filter_gate_cm` | `5` | A pose this far beyond plausible hand motion is treated as a glitch (live) |
+| `imu_fusion` | `true` | In PASSTHROUGH, the hand orientation from the glove's joint IMU (calibrated against the headset's, which keeps it aligned), also while the hand is out of view; needs a bridge with the glove connected (live) |
 | `yield_to_controllers` | `true` | When a hand's headset hand tracking stops while a controller for that hand is tracked (you picked the Touch controllers up), release the hand to the controller (after ~0.5 s); take it back as soon as hand tracking is live again |
 | `hide_other_hand_controllers` | `true` | While CyberFinger holds the hands, mark other drivers' hand controllers (the Touch controllers Steam Link and Virtual Desktop emulate from hand tracking) *never tracked*, so apps skip them; undone when CyberFinger is switched off |
 | `debug_captures` | `false` | Record the hand data on request (`tools/analyze_tap_capture.py --capture N`); a debugging tool |
@@ -221,7 +244,7 @@ Little-endian, packed, localhost. The layouts are defined in [`src/Protocol.h`](
 | `CFHS` (1140 B) | Fusion Studio → driver | 27015 | Fused hand: `/pose/raw` + velocities in SteamVR raw space, curls/splay, 31 bones |
 | `CFOP` (2200 B) | driver → bridge | 27016 | HMD pose, driver mode per hand, Steam Link hand pose + skeleton + system button |
 | `CFHP` (36 B) | driver → bridge | 27016 | Haptic request: hand, duration, frequency, amplitude |
-| `CFIM` (96 B) | bridge → driver | 27015 | Raw glove IMU slots (quaternions, accel) per BLE report, sent only while the driver records a capture (`CFOP` header flag `0x1`) |
+| `CFIM` (96 B) | bridge → driver | 27015 | Raw glove IMU slots (quaternions, accel) per BLE report: the driver's IMU fusion and its captures (`CFOP` header flag `0x1` marks a capture) |
 | `CFGP` (12 B) | bridge → driver | 27015 | Legacy glove packet, still accepted (stick uncentred, +y down) |
 
 Firmware button bits: `0x01` trigger, `0x02` grip, `0x04` C, `0x08` D, `0x10` E, `0x20` MENU, `0x40` stick click,

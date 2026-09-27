@@ -839,15 +839,14 @@ class BLEManager:
 
 
 class VRMode:
-    """Glove → SteamVR driver: one CFG2 packet per BLE report (see cf_protocol.py), plus the raw IMU slots
-    (CFIM) while the driver records a capture (`capturing()`, from the driver link)."""
+    """Glove → SteamVR driver: per BLE report one CFG2 packet (see cf_protocol.py) and, when the glove has
+    IMUs, one CFIM packet with their raw slots (the driver's own IMU fusion, and its captures)."""
 
-    def __init__(self, port=cf_protocol.DRIVER_PORT, capturing=None):
+    def __init__(self, port=cf_protocol.DRIVER_PORT):
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.target = ("127.0.0.1", port)
         self.seq = [0, 0]
-        self.capturing = capturing or (lambda: False)
 
     def on_input(self, hand, state):
         # Stick: centred + radial deadzone here; the firmware's +y is down, CFG2's is up.
@@ -858,7 +857,7 @@ class VRMode:
                                      joy_x, joy_y, state.battery)
         try:
             self.sock.sendto(pkt, self.target)
-            if self.capturing():
+            if state.imu_present:
                 age_us = (time.perf_counter() - state.rx_perf) * 1e6 if state.rx_perf else 0
                 self.sock.sendto(cf_protocol.pack_imu(
                     hand, state.report_seq, state.imu_present, (state.quat, state.quat_body2, state.quat_joint),
@@ -2187,7 +2186,7 @@ class FusionStudioApp:
         self._config_path = os.path.join(self._config_dir, "settings.json")
         self._config = self._load_config()
         self.ble = BLEManager(self)
-        self.vr_mode = VRMode(capturing=self._driver_capturing)
+        self.vr_mode = VRMode()
         self.gamepad_mode = None         # created lazily on first use
         self.vrchat_gamepad_mode = None  # created lazily on first use
         self.active_mode = None
@@ -3713,7 +3712,7 @@ class FusionStudioApp:
 
         # Recreate for next start
         self.ble = BLEManager(self)
-        self.vr_mode = VRMode(capturing=self._driver_capturing)   # stop() closed its socket
+        self.vr_mode = VRMode()   # stop() closed its socket
         self.gamepad_mode = None         # recreated lazily on next start
         self.vrchat_gamepad_mode = None  # recreated lazily on next start
 
@@ -3727,10 +3726,6 @@ class FusionStudioApp:
             self.driver_link.stop()
             self.driver_link = None
 
-    def _driver_capturing(self):
-        """BLE thread: is the SteamVR driver recording a capture (tools/analyze_tap_capture.py --capture)?"""
-        link = self.driver_link
-        return link is not None and link.capturing
 
     def _on_haptic(self, h):
         """Driver-link thread: an app asked a hand to vibrate. The top bar shows it; this is also where the

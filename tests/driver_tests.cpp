@@ -24,6 +24,7 @@
 #include "BoneData.h"
 #include "MathUtil.h"
 #include "Protocol.h"
+#include "ImuFusion.h"
 #include "PoseFilter.h"
 #include "SkeletonSynth.h"
 #include "SpreadMeter.h"
@@ -379,6 +380,97 @@ static void TestTapHold() {
     CHECK(!off.Update(false, 0.05));
 }
 
+// IMU fusion on a synthetic hand: known heading, mounting and optical lag; the IMU at 100 Hz, the optical stream
+// at 90 Hz trailing it. The fusion must recover the heading, then follow the true hand, also through an occlusion.
+static void TestImuFusion() {
+    const double alpha = 40.0 * kPi / 180.0, lag = 0.03;
+    const Quat yaw{ std::cos(alpha / 2), 0, std::sin(alpha / 2), 0 };
+    const Quat toVr{ std::sqrt(0.5), -std::sqrt(0.5), 0, 0 };            // IMU z-up → SteamVR y-up
+    const Quat mount = QuatFromEulerXYZDeg(20, -30, 10);
+    auto hand = [](double t) {                                          // slow wandering plus quicker turns
+        return QuatFromEulerXYZDeg(30 * std::sin(2 * kPi * 0.13 * t) + 12 * std::sin(2 * kPi * 0.7 * t),
+                                   25 * std::sin(2 * kPi * 0.17 * t + 1.0),
+                                   35 * std::sin(2 * kPi * 0.11 * t + 2.0) + 10 * std::sin(2 * kPi * 0.9 * t));
+    };
+    auto angleDeg = [](const Quat& a, const Quat& b) {
+        const double d = std::fabs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);
+        return 2.0 * std::acos(std::min(1.0, d)) * 180.0 / kPi;
+    };
+    ImuFusion f;
+    f.Reset();
+    Quat q;
+    Vec3 w;
+    double tImu = 0, tOpt = 0, worstSeen = 0, worstHidden = 0;
+    bool earlyOutput = false;
+    for (double t = 0; t < 33.0; t += 0.001) {
+        while (tImu <= t) {
+            f.AddImu(tImu, Normalize(Conj(yaw * toVr) * hand(tImu) * Conj(mount)));
+            tImu += 0.01;
+        }
+        if (tOpt <= t) {
+            const bool seen = t < 30.0;                                 // the last 3 s: hand out of view
+            f.Observe(t, hand(t - lag), seen);
+            tOpt += 1.0 / 90;
+            const bool have = f.Orientation(t, q, w);
+            if (t < 2.0 && have) earlyOutput = true;
+            if (have && t > 20.0) (seen ? worstSeen : worstHidden) = std::fmax(seen ? worstSeen : worstHidden,
+                                                                                angleDeg(q, hand(t)));
+        }
+    }
+    const ImuFusion::Status st = f.GetStatus();
+    CHECK(!earlyOutput);                                                // nothing before a calibration
+    CHECK(st.calibrated);
+    CHECK_NEAR(st.alphaDeg, 40.0, 3.0);
+    CHECK_NEAR(st.lag, lag, 0.012);
+    CHECK(worstSeen < 2.0);                                             // follows the true hand, not the late optics
+    CHECK(worstHidden < 2.0);                                           // and carries it through the occlusion
+    std::printf("  IMU fusion: heading %.1f deg, lag %.1f ms, mount fit %.2f deg; error seen %.2f, hidden %.2f deg\n",
+                st.alphaDeg, st.lag * 1e3, st.residualDeg, worstSeen, worstHidden);
+}
+
+// A cold start from a saved mounting, the hand held still (no full solve possible): a near prior (12° off) starts
+// the fusion within a second, on the hand; a far one (the sensor turned 90°) is refused.
+static void TestImuFusionPrior() {
+    const double alpha = -70.0 * kPi / 180.0;
+    const Quat yaw{ std::cos(alpha / 2), 0, std::sin(alpha / 2), 0 };
+    const Quat toVr{ std::sqrt(0.5), -std::sqrt(0.5), 0, 0 };
+    const Quat mount = QuatFromEulerXYZDeg(20, -30, 10);
+    auto hand = [](double t) { return QuatFromEulerXYZDeg(-40 + 1.5 * std::sin(3 * t), 15, 5 * std::sin(2 * t)); };
+    auto run = [&](const Quat& priorMount, double& calibratedAt, double& errDeg) {
+        ImuFusion f;
+        f.Reset();
+        f.SetPrior({ priorMount, 0.03, 0 });
+        calibratedAt = -1;
+        errDeg = 0;
+        Quat q;
+        Vec3 w;
+        double tImu = 0, tOpt = 0;
+        for (double t = 0; t < 4.0; t += 0.001) {
+            while (tImu <= t) {
+                f.AddImu(tImu, Normalize(Conj(yaw * toVr) * hand(tImu) * Conj(mount)));
+                tImu += 0.01;
+            }
+            if (tOpt > t) continue;
+            f.Observe(t, hand(t - 0.03), true);
+            tOpt += 1.0 / 90;
+            if (!f.Orientation(t, q, w)) continue;
+            if (calibratedAt < 0) calibratedAt = t;
+            const double d = std::fabs(q.w * hand(t).w + q.x * hand(t).x + q.y * hand(t).y + q.z * hand(t).z);
+            errDeg = std::fmax(errDeg, 2.0 * std::acos(std::min(1.0, d)) * 180.0 / kPi);
+        }
+        return f.GetStatus();
+    };
+    double at, err;
+    ImuFusion::Status st = run(mount * QuatFromEulerXYZDeg(12, 0, 0), at, err);
+    CHECK(st.calibrated && st.fromPrior && st.solves == 0);
+    CHECK(at > 0 && at < 1.2);
+    CHECK(err < 3.0);                                                   // a still hand: q_corr takes up the rest
+    std::printf("  IMU fusion from a prior 12 deg off: running after %.2f s, fit %.1f deg, error %.2f deg\n", at,
+                st.residualDeg, err);
+    st = run(mount * QuatFromEulerXYZDeg(90, 0, 0), at, err);
+    CHECK(!st.calibrated && st.priorResidualDeg > 25.0);
+}
+
 // Setting lists such as pose_filter_types: "a|b", case and blanks ignored.
 static void TestSplitList() {
     const std::vector<std::string> l = SplitList(" svl_hand_interaction_augmented | VD_Hand_Controller || ");
@@ -397,6 +489,8 @@ int main(int argc, char** argv) {
     TestPoseFilter();
     TestTapHold();
     TestSplitList();
+    TestImuFusion();
+    TestImuFusionPrior();
     TestGestures();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

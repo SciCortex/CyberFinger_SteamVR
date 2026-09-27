@@ -112,15 +112,6 @@ class DriverLink:
             self._context_cache = (raw, cached)
         return cached
 
-    @property
-    def capturing(self):
-        """The driver is recording a capture (CFOP flag): meanwhile send it the glove IMU data (CFIM).
-        Reads only the header, so it's cheap enough to ask per BLE report."""
-        raw = self._context_raw
-        if raw is None or time.perf_counter() - self._context_time > 0.5:
-            return False
-        return bool(int.from_bytes(raw[6:8], "little") & cf_protocol.CTX_CAPTURING)
-
     def _run(self):
         while self._running:
             try:

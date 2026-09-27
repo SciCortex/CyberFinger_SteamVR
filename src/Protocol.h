@@ -14,8 +14,8 @@
 //   CFHS  bridge → driver  fused hand state (pose + 31 bones), per fusion tick
 //   CFOP  driver → bridge  HMD pose + optical tap (headset hand tracking)
 //   CFHP  driver → bridge  haptic vibration request from an application
-//   CFIM  bridge → driver  raw glove IMU slots, one per BLE report, while the
-//                          driver captures (CFOP flag kCtxCapturing)
+//   CFIM  bridge → driver  raw glove IMU slots, one per BLE report (the
+//                          driver's own IMU fusion, and its captures)
 //   CFGP  legacy glove packet (12 bytes, no header), still accepted
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -59,7 +59,7 @@ enum HandStateFlags : uint16_t {
 
 // CFOP flags
 enum ContextFlags : uint16_t {
-    kCtxCapturing = 0x0001,   // a capture is running: send CFIM
+    kCtxCapturing = 0x0001,   // a capture is running (informational)
 };
 
 // CFIM slot bits (the glove's own layout)

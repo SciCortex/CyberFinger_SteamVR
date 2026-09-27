@@ -26,6 +26,7 @@
 #include <string>
 #include "BoneData.h"
 #include "MathUtil.h"
+#include "ImuFusion.h"
 #include "OpticalTap.h"
 #include "PoseFilter.h"
 #include "Protocol.h"
@@ -77,6 +78,12 @@ public:
     // Whether the current source's poses need it (Steam Link's do; Virtual Desktop's are clean). Frame loop.
     void SetSourceFiltered(bool filtered, const std::string& sourceType);
 
+    // The glove's joint IMU fused with the headset's orientation (owned by ServerProvider); used in PASSTHROUGH
+    // once calibrated. The FUSED mode (the Studio's own fusion) never uses it.
+    void SetImuFusion(ImuFusion* fusion) { m_imu = fusion; }
+    void SetImuFusionEnabled(bool on) { m_imuEnabled.store(on, std::memory_order_relaxed); }
+    bool ImuFused() const { return m_imuFused.load(std::memory_order_relaxed); }
+
     const std::string& Serial() const { return m_cfg.serial; }
     uint32_t ObjectId() const { return m_objectId; }
     uint8_t Mode() const { return m_mode; }
@@ -119,6 +126,11 @@ private:
     PoseFilter::Params m_filterParams;
     std::atomic<bool>  m_sourceFiltered{ false };   // SetSourceFiltered; off until the source is known
     bool               m_sourceFilterKnown = false; // frame loop only
+
+    ImuFusion*         m_imu = nullptr;
+    std::atomic<bool>  m_imuEnabled{ true };
+    std::atomic<bool>  m_imuFused{ false };          // the last pose's orientation came from the IMU fusion
+    bool FusedOrientation(double now, Quat& q, Vec3& w);
     vr::VRBoneTransform_t m_prevSourceBones[eBone_Count]{};   // republish thread only
     std::atomic<double>   m_lastSkeletonChange{ -1e9 };
 
