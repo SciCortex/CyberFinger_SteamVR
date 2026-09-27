@@ -117,8 +117,10 @@ Items marked *check* are hypotheses to verify.
 - [x] **Second glove IMU missing** in both bridges: firmware v1.3 sends a variable-length report (absent IMU slots
   omitted), which the bridges took for the old one-quaternion report. `bridge/glove_report.py` decodes every
   revision; the Fusion Studio's wrist slot falls back to body 1 when body 2 isn't fitted.
-- [ ] Firmware: the body IMU (the QMI in the default build) lags the joint IMU by ~35 ms on both gloves (capture
-  2026-09-26, glove clock): check the QMI orientation filter.
+- [x] Firmware: the body IMU (the QMI, onboard; the ICM body is extra hardware) lagged the joint IMU by 31–38 ms.
+  Its LPF (widest mode, 13.37% of ODR) sat at ~15 Hz: now 448 Hz ODR (~60 Hz), every sample read from the FIFO
+  into VQF, Wire buffer 1024 (the FIFO read overran the 128-byte default: boot loop). Firmware 1.3.2-beta, both
+  gloves: 3–5 ms behind the joint IMU (capture 2026-09-27); rotation jitter at rest 0.03° → 0.04–0.06°.
 - [ ] Phase 1b, Studio side: §7.1 split compute from drawing, §7.3 `SteamVRContextSource`, §7.4 `SteamVROutput`.
 - [ ] Haptics to the glove over GATT (`_on_haptic` in both bridges).
 

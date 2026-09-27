@@ -120,7 +120,7 @@ Then:
 | Grab (grip) | `/input/grab` (tap to hold) | Grab: a quick tap holds until the next press, a longer press grabs while held | same |
 | Joystick (+ push) | `/input/thumbstick` | Move (L), turn (R) | Axis, secondary (push) |
 | MENU — context / rotary-dial button | `/input/b` (B/Y) | Menu: tap quick menu, hold action menu | Context menu |
-| Thumb-pinky pinch (hand tracking) | `/input/pinky_pinch` | same as MENU | same as MENU |
+| Thumb-pinky pinch (hand tracking) | `/input/pinky_pinch` | same as MENU | Left: dash; right: context menu |
 | Start/Select (black wrist button) | `/input/a` (A/X) | Mic (L), jump (R) | Dash |
 | C, D, E (if fitted) | `/input/c`, `/input/d`, `/input/e` | unbound | unbound |
 | Index / middle / ring pinch, grasp, index point | `/input/index_pinch` … `/input/index_point` | unbound | unbound |
@@ -158,8 +158,9 @@ the requests. Forwarding them to the glove over GATT will hook into `_on_haptic`
   Accurate* hands. VRChat comes second for now: the defaults are tuned for Resonite.
 - **Resonite** — native binding that emulates an Oculus Touch controller. Resonite picks its controller mode
   from the render model of the devices it registers as hands, and only its Touch mode has a dash button, so
-  CyberFinger shows itself to Resonite as a Touch controller: the black button (A) opens the dash, B is the
-  context menu, plus hand skeletons, trigger, grab and stick, on any streamer. Steam Link and Virtual Desktop
+  CyberFinger shows itself to Resonite as a Touch controller: the black button (A) and the left thumb-pinky pinch
+  open the dash, B and the right pinch the context menu, plus hand skeletons, trigger, grab and stick, on any
+  streamer. Steam Link and Virtual Desktop
   also emulate Touch controllers from hand tracking; while CyberFinger holds the hands the driver marks those
   *never tracked* (`hide_other_hand_controllers`), or Resonite would register them instead of CyberFinger or
   draw them as trackers on the hands. A custom binding needs the skeletons in the *OculusTouch* set: without

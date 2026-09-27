@@ -18,7 +18,8 @@ B = MENU (the context / rotary-dial button), A = Start/Select, and C/D/E. No tou
 Derived bindings therefore drop touch inputs, trackpad sources and VRChat's gesture activators.
 
 The driver also exposes the standard hand-tracking gestures (index/middle/ring/pinky pinch, grasp, index
-point). They stay unbound, except the thumb-pinky pinch, which every binding here maps like B (MENU).
+point). They stay unbound, except the thumb-pinky pinch, which every binding here maps like B (MENU); in
+Resonite the left one opens the dash instead.
 
 In the VRChat and Resonite defaults, grab comes from /input/grab: the grip with the driver's tap to hold
 (a press shorter than grab_tap_ms holds until the next press, a longer one grabs while held). Binding
@@ -194,7 +195,8 @@ def vrchat(steam):
 def resonite():
     b = header("steam.app.2519830", "CyberFinger defaults for Resonite",
                "Emulates an Oculus Touch controller: Resonite's Touch mode, the one with a dash button. Black "
-               "button (Start/Select): dash. MENU (and the thumb-pinky pinch): context menu. Grab: a quick tap "
+               "button (Start/Select) and the left thumb-pinky pinch: dash. MENU (and the right thumb-pinky "
+               "pinch): context menu. Grab: a quick tap "
                "of the grip holds until the next press, a longer press grabs while held. Precision grab is "
                "implemented in Resonite from the skeleton.",
                options={"simulated_controller_type": "oculus_touch", "simulate_rendermodel": "full"})
@@ -249,6 +251,10 @@ def resonite():
                     for h in HANDS],
     }
     mirror_menu_to_pinky(b["bindings"])
+    # In Touch mode the left thumb-pinky pinch opens the dash, like the black button; the right one stays MENU.
+    for src in b["bindings"]["/actions/oculustouch"]["sources"]:
+        if src["path"] == "/user/hand/left/input/pinky_pinch":
+            src["inputs"] = {"click": {"output": "/actions/oculustouch/in/button_xa"}}
     save(b, "bindings/steam.app.2519830_cyberfinger.json")
 
 

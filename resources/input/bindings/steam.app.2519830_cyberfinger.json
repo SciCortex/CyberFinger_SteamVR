@@ -256,7 +256,7 @@
           "mode": "button",
           "inputs": {
             "click": {
-              "output": "/actions/oculustouch/in/button_yb"
+              "output": "/actions/oculustouch/in/button_xa"
             }
           },
           "parameters": {
@@ -312,7 +312,7 @@
   },
   "category": "steamvr_input",
   "controller_type": "cyberfinger",
-  "description": "Emulates an Oculus Touch controller: Resonite's Touch mode, the one with a dash button. Black button (Start/Select): dash. MENU (and the thumb-pinky pinch): context menu. Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. Precision grab is implemented in Resonite from the skeleton.",
+  "description": "Emulates an Oculus Touch controller: Resonite's Touch mode, the one with a dash button. Black button (Start/Select) and the left thumb-pinky pinch: dash. MENU (and the right thumb-pinky pinch): context menu. Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. Precision grab is implemented in Resonite from the skeleton.",
   "interaction_profile": "",
   "name": "CyberFinger defaults for Resonite",
   "options": {

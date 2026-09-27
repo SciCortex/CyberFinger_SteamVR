@@ -222,6 +222,9 @@ def compare_imu(data, v, hand):
         for iname, _ in imus:
             L, r = best_lag(speeds[name], speeds[iname])
             print(f"    {name:11s} trails {iname:9s} by {L * 1e3:+4.0f} ms (rate correlation {r:.2f})")
+    if len(imus) == 2:                                  # the two glove IMUs against each other (firmware filters)
+        L, r = best_lag(speeds["IMU body"], speeds["IMU joint"])
+        print(f"    IMU body    trails IMU joint by {L * 1e3:+4.0f} ms (rate correlation {r:.2f}; same packets)")
     # Jitter at the same instants for all (the optical streams sampled at the IMU's report times), so a
     # different rate doesn't change the comparison.
     rows = [(name, q) for name, q in imus]
