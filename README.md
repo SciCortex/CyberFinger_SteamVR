@@ -160,8 +160,19 @@ of turning the hand in view, refines it after. Before anything is saved it start
 calibration. A starting point more than 25° off (another glove, the sensor turned) is ignored, and the status
 line says so (`the starting mount is off by … deg`); delete the file to start afresh.
 
+The headset's hand tracking isn't equally good everywhere, and the IMU is the referee. Measured against it, the
+headset's orientation goes wrong mostly when one hand is behind the other, when the hand is beside or behind the
+head or overhead, and very close to or far from the headset (`src/TrackingTrust.h` has the numbers, Quest 3 over
+Steam Link). The less a view is trusted, the slower it may correct the IMU, and only trusted views calibrate it.
+And a headset orientation more than 25° from the fused one (narrower in poor views) is refused outright: palm
+flips, phantom spins and edge-of-view errors no longer turn the hand. If the headset, in full view, is refused
+for 3 s on end, it's the IMU that's off (the glove slipped on the hand), and the hand follows the headset again.
+The status line counts the refused samples.
+
 Offline, `out\build\x64-Release\fusion_eval.exe <capture.csv> [prior=default|<other capture.csv>]` replays a
 capture (with the IMUs) through the same code, optionally starting from another session's calibration.
+`tools/handover_check.py <capture>` maps where the headset's tracking goes wrong (it needs a capture with the
+headset's pose, which captures record since 2026-09-27, along with SlimeVR's body trackers).
 
 ## Haptics
 

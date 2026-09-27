@@ -16,6 +16,9 @@
 // while seen (the fused orientation `lag` earlier, as the optical one trails), the rotation jitter at rest,
 // and simulated occlusions: the optical stream marked unseen for D seconds every 10 s, the fused orientation
 // compared with the (hidden) optical one, against holding the last optical orientation.
+// The lag: each measurement window's own shift and the estimate after it, the orientation disagreement while
+// turning per assumed lag, and the correction target's wobble while turning slowly with the estimated lag and
+// with fixed ones (what the lag is for, and no true lag needed).
 // prior: a cold start from a saved calibration, the built-in default or the one solved on another capture
 // (as the driver starts from the previous session's).
 // ═══════════════════════════════════════════════════════════════════════════
@@ -30,6 +33,7 @@
 #include <string>
 #include <vector>
 #include "ImuFusion.h"
+#include "TrackingTrust.h"
 
 using namespace cf;
 
@@ -37,27 +41,55 @@ struct Event { double t; int kind; bool changed; std::vector<double> v; };
 static int g_slot = 8;          // quaternion offset in the IMU record: 8 = joint, 0 = body 1
 static bool g_havePrior = false;
 static ImuFusion::Calibration g_prior[2];
+// Tracking trust (TrackingTrust.h), as the driver computes it: from the headset's pose (kind 7) and the other
+// hand's position. Off, or without the headset in the capture: 1.
+static bool g_useTrust = true;
+static std::vector<std::pair<double, Xform>> g_head;              // time-sorted
+static std::vector<std::pair<double, Vec3>> g_handPos[2];         // valid poses, time-sorted
+
+template <class T> static const T* Nearest(const std::vector<std::pair<double, T>>& v, double t, double within) {
+    auto it = std::lower_bound(v.begin(), v.end(), t, [](const std::pair<double, T>& a, double x) { return a.first < x; });
+    const std::pair<double, T>* best = nullptr;
+    if (it != v.end()) best = &*it;
+    if (it != v.begin() && (!best || t - (it - 1)->first < best->first - t)) best = &*(it - 1);
+    return best && std::fabs(best->first - t) <= within ? &best->second : nullptr;
+}
+
+static double TrustAt(int hand, double t, const Vec3& p) {       // the model's view, used or not
+    const Xform* head = Nearest(g_head, t, 0.05);
+    if (!head) return 1.0;
+    return TrackingTrust(hand, *head, p, Nearest(g_handPos[1 - hand], t, 0.05));
+}
 
 static double AngleDeg(const Quat& a, const Quat& b) {
     const double d = std::fabs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);
     return 2.0 * std::acos(std::min(1.0, d)) * 180.0 / kPi;
 }
 
-struct Sample { double t; Quat opt, fused, ahead; bool seen, haveFused, blank; };   // ahead: fused + 40 ms of w
+struct Sample { double t; Quat opt, fused, ahead; bool seen, haveFused, blank; double trust = 1; };   // ahead: +40 ms
+struct LagStep { double t, raw, corr, lag; };           // one lag measurement: the window's shift, the estimate after
 
 // Replay one hand. blank(t): the optical stream is hidden (unseen) at time t.
 template <class Blank>
 static std::vector<Sample> Replay(const std::vector<Event>& ev, const ImuFusion::Params& prm, Blank blank,
                                   ImuFusion::Status& st, double& calibratedAt, int hand,
-                                  ImuFusion::Calibration* cal = nullptr) {
+                                  ImuFusion::Calibration* cal = nullptr, std::vector<LagStep>* lags = nullptr) {
     ImuFusion f;
     f.SetParams(prm);
     f.Reset();
     if (g_havePrior) f.SetPrior(g_prior[hand]);
     std::vector<Sample> out;
     double lastChange = -1e9;
+    size_t lagWindows = 0;
     calibratedAt = -1;
     for (const Event& e : ev) {
+        if (lags && e.kind == 0) {
+            const ImuFusion::Status s = f.GetStatus();
+            if (s.lagWindows != lagWindows) {
+                lagWindows = s.lagWindows;
+                lags->push_back({ e.t, s.lagRaw, s.lagCorrelation, s.lag });
+            }
+        }
         if (e.kind == 6) {
             f.AddImu(e.t - e.v[21], Normalize(Quat{ e.v[g_slot], e.v[g_slot + 1], e.v[g_slot + 2], e.v[g_slot + 3] }));
         } else if (e.kind == 1) {
@@ -66,8 +98,9 @@ static std::vector<Sample> Replay(const std::vector<Event>& ev, const ImuFusion:
             const Quat q = Normalize(Quat{ e.v[4], e.v[5], e.v[6], e.v[7] });
             const bool hidden = blank(e.t);
             const bool seen = !hidden && e.v[17] > 0.5 && e.t - lastChange < 0.08;
-            f.Observe(e.t, q, seen);
-            Sample s{ e.t, q, {}, {}, seen, false, hidden };
+            const double trust = TrustAt(hand, e.t, Vec3{ e.v[1], e.v[2], e.v[3] });
+            f.Observe(e.t, q, seen, g_useTrust ? trust : 1.0);
+            Sample s{ e.t, q, {}, {}, seen, false, hidden, trust };
             Vec3 w;
             s.haveFused = f.Orientation(e.t, s.fused, w);
             if (s.haveFused) {                              // as SteamVR would extrapolate it 40 ms ahead
@@ -84,7 +117,7 @@ static std::vector<Sample> Replay(const std::vector<Event>& ev, const ImuFusion:
     return out;
 }
 
-static bool Load(const char* path, std::vector<Event> hands[2]) {
+static bool Load(const char* path, std::vector<Event> hands[2], bool tracks = true) {
     std::ifstream in(path);
     if (!in) return false;
     std::string line;
@@ -96,10 +129,19 @@ static bool Load(const char* path, std::vector<Event> hands[2]) {
         while (std::getline(ss, cell, ',')) c.push_back(std::atof(cell.c_str()));
         if (c.size() < 26) continue;
         const int kind = int(c[2]);
+        if (kind == 7) {                                         // the headset, for the tracking trust
+            if (tracks && c[4 + 17] > 0.5)
+                g_head.push_back({ c[0], Xform{ Normalize(Quat{ c[8], c[9], c[10], c[11] }), Vec3{ c[5], c[6], c[7] } } });
+            continue;
+        }
         if (kind != 0 && kind != 1 && kind != 6) continue;
         if (kind == 6 && !(int(c[3]) & (g_slot == 8 ? 0x4 : 0x1))) continue;   // that IMU isn't in this report
+        if (tracks && kind == 0 && c[4 + 17] > 0.5) g_handPos[int(c[1]) & 1].push_back({ c[0], Vec3{ c[5], c[6], c[7] } });
         hands[int(c[1]) & 1].push_back({ c[0], kind, c[3] != 0, std::vector<double>(c.begin() + 4, c.end()) });
     }
+    auto byTime = [](const auto& a, const auto& b) { return a.first < b.first; };
+    std::sort(g_head.begin(), g_head.end(), byTime);
+    for (auto& p : g_handPos) std::sort(p.begin(), p.end(), byTime);
     return true;
 }
 
@@ -117,13 +159,13 @@ static bool FusedAt(const std::vector<Sample>& s, double t, Quat& q) {
     return true;
 }
 
-// Per sample: angle (deg) from the centred 100 ms mean orientation.
-static std::vector<double> Jitter(const std::vector<double>& t, const std::vector<Quat>& q) {
+// Per sample: angle (deg) from the centred mean orientation (over ±half seconds; 100 ms by default).
+static std::vector<double> Jitter(const std::vector<double>& t, const std::vector<Quat>& q, double half = 0.05) {
     std::vector<double> out(t.size(), 0);
     size_t j0 = 0, j1 = 0;
     for (size_t i = 0; i < t.size(); ++i) {
-        while (j1 < t.size() && t[j1] <= t[i] + 0.05) ++j1;
-        while (t[j0] < t[i] - 0.05) ++j0;
+        while (j1 < t.size() && t[j1] <= t[i] + half) ++j1;
+        while (t[j0] < t[i] - half) ++j0;
         Quat m{ 0, 0, 0, 0 };
         for (size_t j = j0; j < j1; ++j) {
             const double s = (q[j].w * q[i].w + q[j].x * q[i].x + q[j].y * q[i].y + q[j].z * q[i].z) < 0 ? -1 : 1;
@@ -163,6 +205,13 @@ int main(int argc, char** argv) {
         else if (name == "defaultLag") prm.defaultLag = v;
         else if (name == "maxPriorResidualDeg") prm.maxPriorResidualDeg = v;
         else if (name == "priorPairs") prm.priorPairs = size_t(v);
+        else if (name == "minLagCorrelation") prm.minLagCorrelation = v;
+        else if (name == "lagMemory") prm.lagMemory = v;
+        else if (name == "lagMinWindows") prm.lagMinWindows = v;
+        else if (name == "maxLag") prm.maxLag = v;
+        else if (name == "gateDeg") prm.gateDeg = v;
+        else if (name == "escapeTime") prm.escapeTime = v;
+        else if (name == "trust") g_useTrust = v != 0;
         else if (name == "imu") g_slot = (std::string(eq + 1) == "body") ? 0 : 8;
         else if (name == "prior") prior = eq + 1;
         else { std::printf("unknown parameter %s\n", argv[i]); return 2; }
@@ -175,7 +224,7 @@ int main(int argc, char** argv) {
         g_havePrior = true;
     } else if (!prior.empty()) {                            // solved on another capture, as a previous session
         std::vector<Event> other[2];
-        if (!Load(prior.c_str(), other)) { std::printf("cannot read %s\n", prior.c_str()); return 1; }
+        if (!Load(prior.c_str(), other, false)) { std::printf("cannot read %s\n", prior.c_str()); return 1; }
         for (int h = 0; h < 2; ++h) {
             ImuFusion::Status st;
             double at;
@@ -196,15 +245,52 @@ int main(int argc, char** argv) {
         ImuFusion::Status st;
         ImuFusion::Calibration cal;
         double calAt;
-        const auto s = Replay(ev, prm, [](double) { return false; }, st, calAt, h, &cal);
+        std::vector<LagStep> lags;
+        const auto s = Replay(ev, prm, [](double) { return false; }, st, calAt, h, &cal, &lags);
         const double t0 = s.front().t;
         std::printf("%s hand: %zu optical, %zu IMU samples, %.0f s\n", h ? "right" : "left", s.size(), nImu,
                     s.back().t - t0);
+        {   // the lag estimate over time: each window's own shift and the estimate after it, and how steady it is
+            std::printf("  lag windows (ms, window -> estimate):");
+            double lo = 1e9, hi = -1e9;
+            for (const LagStep& l : lags) {
+                std::printf(" %.0f->%.0f", l.raw * 1e3, l.lag * 1e3);
+                if (l.t - t0 > 5.0) { lo = std::min(lo, l.lag); hi = std::max(hi, l.lag); }
+            }
+            if (hi >= lo) std::printf("\n    estimate after 5 s spans %.0f-%.0f ms", lo * 1e3, hi * 1e3);
+            std::printf("\n");
+        }
         if (!st.calibrated) { std::printf("  not calibrated (pairs %zu)\n", st.pairs); continue; }
         std::printf("  calibrated after %.1f s; lag %.1f ms (correlation %.2f), heading %.1f deg, mounting spread "
                     "%.1f deg rms over %zu pairs, %zu solves%s\n", calAt - t0, st.lag * 1e3, st.lagCorrelation,
                     st.alphaDeg, st.residualDeg, st.pairs, st.solves, st.fromPrior ? " (still on the prior)" : "");
         if (g_havePrior) std::printf("  prior fit %.1f deg at its last try\n", st.priorResidualDeg);
+        {   // the gate and the trust: what the headset was allowed to do to the output
+            size_t seenN = 0, lowTrust = 0;
+            std::vector<double> tr;
+            for (const Sample& x : s)
+                if (x.seen) { ++seenN; tr.push_back(x.trust); lowTrust += x.trust < 0.5; }
+            const double minutes = (s.back().t - s.front().t) / 60.0;
+            std::printf("  gate: %zu optical samples refused (%.1f %% of the seen), %zu escapes; the corrections turned "
+                        "the output %.0f deg/min; trust median %.2f, below 0.5 %.0f %% of the seen\n", st.rejected,
+                        100.0 * st.rejected / std::max<size_t>(1, seenN), st.escapes, st.corrTravelDeg / minutes,
+                        tr.empty() ? 1.0 : Pct(tr, 0.5), 100.0 * lowTrust / std::max<size_t>(1, seenN));
+            // where the headset is at its best (trusted, the hand nearly still): does the output still agree?
+            std::vector<double> good;
+            for (size_t i = 0; i < s.size(); ++i) {
+                const Sample& x = s[i];
+                if (!x.haveFused || !x.seen || x.trust < 0.9) continue;
+                size_t lo = i, hi = i;
+                while (lo > 0 && s[lo].t > x.t - 0.05) --lo;
+                while (hi + 1 < s.size() && s[hi].t < x.t + 0.05) ++hi;
+                if (AngleDeg(s[lo].opt, s[hi].opt) * kPi / 180.0 / std::max(1e-3, s[hi].t - s[lo].t) > 0.3) continue;
+                Quat q;
+                if (FusedAt(s, x.t - st.lag, q)) good.push_back(AngleDeg(q, x.opt));
+            }
+            if (!good.empty())
+                std::printf("        agreement where the headset is at its best (trusted, still): median %.1f, p75 %.1f, "
+                            "p90 %.1f deg (%zu samples)\n", Pct(good, 0.5), Pct(good, 0.75), Pct(good, 0.9), good.size());
+        }
         if (st.solves) {
             std::printf("  mount (%.4f, %.4f, %.4f, %.4f)", cal.mount.w, cal.mount.x, cal.mount.y, cal.mount.z);
             if (g_havePrior) std::printf(", %.1f deg from the prior", AngleDeg(cal.mount, g_prior[h].mount));
@@ -256,7 +342,9 @@ int main(int argc, char** argv) {
                         Rms(still), still.size(), Rms(slow), slow.size(), Rms(fast), fast.size());
             // Would another alignment do better? Disagreement while turning (> 0.3 rad/s) per assumed lag.
             std::printf("        moving, per assumed lag:");
-            for (int ms = 0; ms <= 100; ms += 10) {
+            double bestE = 1e9;
+            int bestMs = 0;
+            for (int ms = 0; ms <= 150; ms += 5) {
                 std::vector<double> e;
                 for (size_t i = 0; i < s.size(); ++i) {
                     const Sample& x = s[i];
@@ -269,8 +357,9 @@ int main(int argc, char** argv) {
                     if (FusedAt(s, x.t - ms * 1e-3, q)) e.push_back(AngleDeg(q, x.opt));
                 }
                 std::printf(" %d:%.1f", ms, Rms(e));
+                if (!e.empty() && Rms(e) < bestE) { bestE = Rms(e); bestMs = ms; }
             }
-            std::printf("\n");
+            std::printf("  (best %d ms)\n", bestMs);
         }
         // Jitter at rest: samples whose 100 ms neighbourhood barely turns (optical rate < 0.3 rad/s).
         // The raw IMU at the same instants (interpolated between its reports), for comparison.
@@ -291,6 +380,57 @@ int main(int argc, char** argv) {
             const size_t k = std::min<size_t>(std::max<size_t>(1, it - ti.begin()), ti.size() - 1);
             const double u = std::min(1.0, std::max(0.0, (t - ti[k - 1]) / std::max(1e-9, ti[k] - ti[k - 1])));
             qi.push_back(Normalize(Slerp(qiRaw[k - 1], qiRaw[k], u)));
+        }
+        // What the lag is for: while the hand turns slowly (0.3-1 rad/s: where the fusion corrects), the offset
+        // between the optical orientation and the calibrated IMU `lag` earlier, the correction target, should hold
+        // still; a wrong lag swings it by the turn rate × the error. Its wobble (from its 1 s mean) with the lag as
+        // estimated over time, and with fixed lags: no true lag needed, and a drifting one shows.
+        if (st.solves) {
+            const double a = st.alphaDeg * kPi / 180.0;
+            const Quat pre = Quat{ std::cos(a / 2), 0, std::sin(a / 2), 0 } * Quat{ std::sqrt(0.5), -std::sqrt(0.5), 0, 0 };
+            auto imuAt = [&](double t, Quat& q) {
+                auto it = std::lower_bound(ti.begin(), ti.end(), t);
+                if (it == ti.begin() || it == ti.end()) return false;
+                const size_t k = size_t(it - ti.begin());
+                q = Normalize(Slerp(qiRaw[k - 1], qiRaw[k], (t - ti[k - 1]) / std::max(1e-9, ti[k] - ti[k - 1])));
+                return true;
+            };
+            const double lag0 = g_havePrior && g_prior[h].lag > 0 ? g_prior[h].lag : prm.defaultLag;
+            auto wobble = [&](auto lagAt) {
+                std::vector<double> tt;
+                std::vector<Quat> qq;
+                for (size_t i = 0; i < s.size(); ++i) {
+                    const Sample& x = s[i];
+                    if (!x.haveFused || !x.seen) continue;
+                    size_t lo = i, hi = i;
+                    while (lo > 0 && s[lo].t > x.t - 0.05) --lo;
+                    while (hi + 1 < s.size() && s[hi].t < x.t + 0.05) ++hi;
+                    const double rate = AngleDeg(s[lo].opt, s[hi].opt) * kPi / 180.0 / std::max(1e-3, s[hi].t - s[lo].t);
+                    Quat qm;
+                    if (rate < 0.3 || rate > 1.0 || !imuAt(x.t - lagAt(x.t), qm)) continue;
+                    Quat target = Normalize(x.opt * Conj(pre * qm * cal.mount));
+                    if (!qq.empty() && target.w * qq.back().w + target.x * qq.back().x + target.y * qq.back().y +
+                                       target.z * qq.back().z < 0)
+                        target = { -target.w, -target.x, -target.y, -target.z };
+                    tt.push_back(x.t);
+                    qq.push_back(target);
+                }
+                return Rms(Jitter(tt, qq, 0.5));
+            };
+            const double est = wobble([&](double t) {
+                double l = lag0;
+                for (const LagStep& step : lags) if (step.t <= t) l = step.lag;
+                return l;
+            });
+            std::printf("  correction wobble while turning slowly: %.2f deg with the lag as estimated; fixed:", est);
+            double bestW = 1e9;
+            int bestMs = 0;
+            for (int ms = 0; ms <= 150; ms += 10) {
+                const double w = wobble([&](double) { return ms * 1e-3; });
+                std::printf(" %d:%.2f", ms, w);
+                if (w < bestW) { bestW = w; bestMs = ms; }
+            }
+            std::printf("  (best %d ms)\n", bestMs);
         }
         const auto jf = Jitter(tf, qf), jo = Jitter(to, qo), ji = Jitter(tf, qi), ja = Jitter(tf, qa);
         std::vector<double> sf, so, si, sa;

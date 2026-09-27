@@ -19,8 +19,8 @@
 // on the hand. While the headset sees the hand, α and M are solved from a window
 // of (IMU, optical) pairs — a grid over α, the mean mounting for each — with the
 // IMU sample taken `lag` earlier: the optical stream trails the IMU (Steam Link
-// 5–45 ms), and the lag is measured continuously by correlating the two rotation
-// rates. The output is
+// 10–90 ms, drifting), and the lag is measured continuously by correlating the two
+// streams' angular velocities (their rates, until calibrated). The output is
 //
 //     q_out = q_corr · Y(α) · C · q_imu(newest) · M
 //
@@ -51,7 +51,12 @@ public:
     struct Params {
         double tauCorrection = 0.5;    // s: how fast the output settles on the optical orientation
         double defaultLag = 0.03;      // s: optical behind the IMU, until measured
-        double maxLag = 0.12;          // s
+        double maxLag = 0.15;          // s (Steam Link sessions measured 10-90 ms)
+        double lagMemory = 15.0;       // s: the lag measurements averaged over about this long (Steam Link's lag
+                                       // drifts within a session: 90 → 25 ms over 10 s, capture 2026-09-27 01:12)
+        double lagMinWindows = 1.5;    // measurements (decaying count: 2 in a row) before the lag replaces the
+                                       // prior's, or the default
+        double minLagCorrelation = 0.5; // a window whose rotation rates correlate less at any shift is skipped
         double imuTimeout = 0.1;       // s without IMU data: no fused output
         double pairInterval = 0.1;     // s between calibration pairs
         double pairWindow = 60.0;      // s of pairs kept
@@ -65,6 +70,17 @@ public:
         double maxPriorResidualDeg = 25.0; // a prior mounting that fits worse is ignored (another glove, sensor turned).
                                            // Sessions of the same glove scatter by 8-23° (how it sits, the postures
                                            // seen), and even that start beats waiting for a full solve.
+        // Once calibrated, an optical orientation this far from the fused one is a tracking error (a flipped palm, a
+        // hand at the edge of the cameras' view), not a correction; the gate narrows to half as the view's trust
+        // falls. After a loss it widens by what the IMU may have drifted meanwhile. 25°: on a 2-minute capture
+        // (2026-09-27 02:21) the corrections turn the output 55 % less than ungated while the output agrees with
+        // the headset's best views as well; at 15° the output can lock in a wrong state (p90 16 → 19°).
+        double gateDeg = 25.0;
+        double gapGateDegPerS = 3.0;   // wider after a loss, per second lost …
+        double maxGapGateDeg = 30.0;   // … up to this much
+        double escapeTime = 3.0;       // s of refusing every trusted view: then it's the output that's off
+        double escapeTau = 0.15;       // s: how fast the output then settles
+        double minPairTrust = 0.8;     // calibration pairs only from views trusted this much (HeadsetViewTrust)
     };
 
     struct Status {
@@ -72,11 +88,16 @@ public:
         bool   fromPrior = false;      // running on the prior mounting (no full solve yet)
         double lag = 0;                // s, optical behind the IMU
         double lagCorrelation = 0;     // of the last lag measurement
+        double lagRaw = 0;             // s: the last window's own best shift
+        size_t lagWindows = 0;         // windows measured
         double alphaDeg = 0;
         double residualDeg = 0;        // rms spread of the mounting over the pairs at the last solve (or prior fit)
         size_t pairs = 0;
         size_t solves = 0;             // full solves
         double priorResidualDeg = -1;  // the prior mounting's fit at the last try (-1: not tried)
+        size_t rejected = 0;           // optical samples the gate refused
+        size_t escapes = 0;            // steady disagreements followed after all
+        double corrTravelDeg = 0;      // how far the optical corrections turned the output, in all
     };
 
     // What carries over to the next session: the mounting (hand-fixed frame of the optical source) and the lag.
@@ -103,7 +124,14 @@ public:
         m_st = Status{};
         m_st.lag = m_p.defaultLag;
         m_haveCorr = m_haveLag = m_havePrior = m_solved = false;
+        m_lagSum.clear();
+        m_lagW.clear();
+        m_lagEff = 0;
+        m_lagVector = false;
         m_nextPair = m_nextSolve = m_nextLag = m_lastObserve = m_nextPriorFit = 0;
+        m_everSeen = m_inGap = m_escaping = false;
+        m_extraGate = 0;
+        m_refusedSince = -1;
     }
 
     // Start from an earlier session's calibration: until the first full solve, the heading alone is fitted.
@@ -136,12 +164,14 @@ public:
             if (Dot4(q, m_imu.back().q) < 0) q = Neg(q);
         }
         m_imu.push_back({ t, q, true });
-        while (!m_imu.empty() && m_imu.front().t < t - 3.0) m_imu.pop_front();
+        while (!m_imu.empty() && m_imu.front().t < t - 5.0) m_imu.pop_front();   // a lag window reaches 4.15 s back
     }
 
     // An optical observation of the hand's orientation (driver space, any hand-fixed frame). seen: the headset
-    // tracks the hand now (not extrapolating a lost one). Any thread.
-    void Observe(double t, Quat q, bool seen) {
+    // tracks the hand now (not extrapolating a lost one). trust: how far the headset's tracking is trusted where
+    // the hand is (HeadsetViewTrust; 1 = fully), which slows its corrections and keeps it out of the calibration.
+    // Any thread.
+    void Observe(double t, Quat q, bool seen, double trust = 1.0) {
         std::lock_guard<std::mutex> g(m_lock);
         q = Normalize(q);
         if (!m_opt.empty()) {
@@ -152,7 +182,16 @@ public:
         while (!m_opt.empty() && m_opt.front().t < t - 5.0) m_opt.pop_front();
         const double dt = std::min(0.1, std::max(0.0, t - m_lastObserve));
         m_lastObserve = t;
-        if (!seen) return;
+        if (!seen) {
+            if (m_everSeen && !m_inGap) { m_inGap = true; m_gapStart = t; }
+            m_refusedSince = -1;                                // a loss isn't time spent refusing
+            return;
+        }
+        m_everSeen = true;
+        if (m_inGap) {                                          // back after a loss: the IMU may have drifted
+            m_inGap = false;
+            m_extraGate = std::min(m_p.maxGapGateDeg, std::max(m_extraGate, m_p.gapGateDegPerS * (t - m_gapStart)));
+        }
 
         if (t >= m_nextLag) { m_nextLag = t + 1.0; MeasureLag(t); }
 
@@ -163,7 +202,28 @@ public:
         if (!RateAt(m_opt, t - 0.025, rate) || rate > m_p.maxCorrectionRate) return;
 
         Quat qi;
-        if (t >= m_nextPair && ImuAt(t - m_st.lag, qi)) {
+        const bool haveImu = ImuAt(t - m_st.lag, qi);
+        // The gate, once calibrated: the optical orientation against the fused one (lag-aligned). Refusing every
+        // trusted view for escapeTime means the output is what's off (the IMU's heading drifted over a long loss,
+        // the glove slipped on the hand): followed after all, quickly. The headset's own errors come and go (a
+        // flipped palm, a glitch), and those at the edges of the view never count.
+        bool escaping = false;
+        if (m_st.calibrated && m_haveCorr && haveImu) {
+            const Quat target = Normalize(q * Conj(Model(qi)));
+            if (AngleDeg(target, m_corr) > (m_p.gateDeg + m_extraGate) * (0.5 + 0.5 * std::min(1.0, trust))) {
+                ++m_st.rejected;
+                if (trust < 0.9) return;
+                if (m_refusedSince < 0) { m_refusedSince = t; m_refusedCount = 0; }
+                if (++m_refusedCount < 30 || t - m_refusedSince < m_p.escapeTime) { m_escaping = false; return; }
+                escaping = true;
+                if (!m_escaping) ++m_st.escapes;
+            } else if (trust >= 0.9) {
+                m_refusedSince = -1;
+            }
+        }
+        m_escaping = escaping;
+
+        if (trust >= m_p.minPairTrust && t >= m_nextPair && haveImu) {
             m_nextPair = t + m_p.pairInterval;
             m_pairs.push_back({ t, qi, q });
             while (!m_pairs.empty() && m_pairs.front().t < t - m_p.pairWindow) m_pairs.pop_front();
@@ -175,7 +235,8 @@ public:
         }
         if (t >= m_nextSolve && m_pairs.size() >= m_p.minPairs) { m_nextSolve = t + m_p.solveEvery; Solve(); }
 
-        // Settle slowly on the optical orientation, comparing like with like: the IMU `lag` earlier.
+        // Settle slowly on the optical orientation, comparing like with like: the IMU `lag` earlier. The less the
+        // view is trusted, the slower.
         if (m_st.calibrated && ImuAt(t - m_st.lag, qi)) {
             Quat target = Normalize(q * Conj(Model(qi)));
             if (!m_haveCorr) {
@@ -183,8 +244,12 @@ public:
                 m_haveCorr = true;
             } else {
                 if (Dot4(target, m_corr) < 0) target = Neg(target);
-                m_corr = Normalize(Slerp(m_corr, target, 1.0 - std::exp(-dt / std::max(1e-3, m_p.tauCorrection))));
+                const double tau = escaping ? m_p.escapeTau : m_p.tauCorrection / std::max(0.05, trust);
+                const Quat before = m_corr;
+                m_corr = Normalize(Slerp(m_corr, target, 1.0 - std::exp(-dt / std::max(1e-3, tau))));
+                m_st.corrTravelDeg += AngleDeg(before, m_corr);
             }
+            m_extraGate *= std::exp(-dt);                       // the post-loss widening fades as corrections come in
         }
     }
 
@@ -260,8 +325,22 @@ private:
         return true;
     }
 
-    // The optical stream's lag behind the IMU: the shift that best correlates their rotation rates over the last
-    // 4 s (only when the hand was seen throughout, and moved).
+    // Angular velocity (rad/s) of a stream around time t, over 40 ms, taken to driver space by `pre` (the IMU's
+    // heading and axes; the mounting cancels out of a rotation between two samples).
+    static bool OmegaAt(const std::deque<Stamped>& s, double t, const Quat& pre, Vec3& w) {
+        Quat a, b;
+        if (!At(s, t - 0.02, a) || !At(s, t + 0.02, b)) return false;
+        w = RotationVector(Normalize(pre * b * Conj(pre * a))) * (1.0 / 0.04);
+        return true;
+    }
+
+    // The optical stream's lag behind the IMU: the shift that best matches their rotations. Once calibrated,
+    // the angular velocity vectors are compared in driver space (cosine similarity); before, only the rotation
+    // rates can be (Pearson correlation), which time the envelope of each movement rather than the movement: they
+    // read 10-25 ms later than the lag that best aligns the orientations, the one the fusion needs. Each window
+    // (the last 4 s, the hand seen throughout and moving) gives a curve over the shifts; the curves are averaged
+    // over about lagMemory, and the average's peak is the lag. A single window's own peak is unreliable (now and
+    // then it lands on 0 or the largest shift); the average's is steady.
     void MeasureLag(double t) {
         const double t0 = t - 4.0, t1 = t - 0.1;
         size_t seen = 0, total = 0;
@@ -270,48 +349,90 @@ private:
         if (total == 0 || seen < total * 9 / 10) return;
         const double step = 0.005;
         const int n = int((t1 - t0) / step);
-        std::vector<double> opt(n);
+        std::vector<Vec3> opt(n);
         for (int i = 0; i < n; ++i)
-            if (!RateAt(m_opt, t0 + i * step, opt[i])) return;
+            if (!OmegaAt(m_opt, t0 + i * step, Quat{}, opt[i])) return;
         double mean = 0, var = 0;
-        for (double v : opt) mean += v;
+        for (const Vec3& v : opt) mean += Length(v);
         mean /= n;
-        for (double v : opt) var += (v - mean) * (v - mean);
+        for (const Vec3& v : opt) var += (Length(v) - mean) * (Length(v) - mean);
         if (var / n < 0.3 * 0.3) return;                    // too little motion to time anything
+        const bool vec = m_st.calibrated;
+        const Quat pre = (vec && m_haveCorr ? m_corr : Quat{}) * YawQ(m_alpha) * ImuToVr();
         const int maxShift = int(m_p.maxLag / step);
-        // IMU rates once, on the grid extended back by the largest shift: imu[j] is at t0 + (j - maxShift) * step.
-        std::vector<double> imuRate(n + maxShift, 0.0);
+        // The IMU once, on the grid extended back by the largest shift: imu[j] is at t0 + (j - maxShift) * step.
+        std::vector<Vec3> imu(n + maxShift);
         std::vector<char> imuOk(n + maxShift, 0);
         for (int j = 0; j < n + maxShift; ++j)
-            imuOk[j] = RateAt(m_imu, t0 + (j - maxShift) * step, imuRate[j]);
-        std::vector<double> corr(maxShift + 1, -1.0);
+            imuOk[j] = OmegaAt(m_imu, t0 + (j - maxShift) * step, pre, imu[j]);
+        std::vector<double> corr(maxShift + 1, kNoCorr);
         for (int k = 0; k <= maxShift; ++k) {
             double sa = 0, sb = 0, sab = 0, saa = 0, sbb = 0;
             int m = 0;
             for (int i = 0; i < n; ++i) {
                 const int j = i - k + maxShift;                 // the IMU at t0 + (i - k) * step
                 if (!imuOk[j]) continue;
-                const double a = opt[i], b = imuRate[j];
-                sa += a; sb += b; sab += a * b; saa += a * a; sbb += b * b;
+                if (vec) {
+                    sab += Dot(opt[i], imu[j]); saa += Dot(opt[i], opt[i]); sbb += Dot(imu[j], imu[j]);
+                } else {
+                    const double a = Length(opt[i]), b = Length(imu[j]);
+                    sa += a; sb += b; sab += a * b; saa += a * a; sbb += b * b;
+                }
                 ++m;
             }
             if (m < n / 2) continue;
-            const double cov = sab / m - (sa / m) * (sb / m);
-            const double va = saa / m - (sa / m) * (sa / m), vb = sbb / m - (sb / m) * (sb / m);
-            if (va > 0 && vb > 0) corr[k] = cov / std::sqrt(va * vb);
+            if (vec) {
+                if (saa > 0 && sbb > 0) corr[k] = sab / std::sqrt(saa * sbb);
+            } else {
+                const double cov = sab / m - (sa / m) * (sb / m);
+                const double va = saa / m - (sa / m) * (sa / m), vb = sbb / m - (sb / m) * (sb / m);
+                if (va > 0 && vb > 0) corr[k] = cov / std::sqrt(va * vb);
+            }
         }
-        const int best = int(std::max_element(corr.begin(), corr.end()) - corr.begin());
-        if (corr[best] < 0.7) return;
-        double shift = best;
-        if (best > 0 && best < maxShift) {                  // parabolic refinement between grid points
-            const double c0 = corr[best - 1], c1 = corr[best], c2 = corr[best + 1];
-            const double den = c0 - 2 * c1 + c2;
-            if (den < 0) shift += 0.5 * (c0 - c2) / den;
+        const int own = int(std::max_element(corr.begin(), corr.end()) - corr.begin());
+        if (corr[own] < m_p.minLagCorrelation) return;     // the streams don't match here: times nothing
+        m_st.lagRaw = PeakShift(corr, own) * step;
+        ++m_st.lagWindows;
+
+        // Rates and vectors read differently: once the vectors can be compared, the rates' average is dropped.
+        if (vec != m_lagVector) {
+            m_lagSum.clear();
+            m_lagVector = vec;
         }
-        const double lag = shift * step;
-        m_st.lag = m_haveLag ? m_st.lag + 0.3 * (lag - m_st.lag) : lag;
+        if (m_lagSum.size() != corr.size()) {               // first window (or maxLag changed)
+            m_lagSum.assign(corr.size(), 0.0);
+            m_lagW.assign(corr.size(), 0.0);
+            m_lagEff = 0;
+            m_lagCurveT = t;
+        }
+        const double decay = std::exp(-(t - m_lagCurveT) / std::max(1.0, m_p.lagMemory));
+        m_lagCurveT = t;
+        m_lagEff = m_lagEff * decay + 1.0;
+        for (size_t k = 0; k < corr.size(); ++k) {
+            m_lagSum[k] *= decay;
+            m_lagW[k] *= decay;
+            if (corr[k] > kNoCorr) { m_lagSum[k] += corr[k]; m_lagW[k] += 1.0; }
+        }
+        if (m_lagEff < m_p.lagMinWindows) return;           // until then the prior's lag (or the default)
+        std::vector<double> avg(corr.size(), kNoCorr);
+        for (size_t k = 0; k < corr.size(); ++k)
+            if (m_lagW[k] > 0.5 * m_lagEff) avg[k] = m_lagSum[k] / m_lagW[k];
+        const int best = int(std::max_element(avg.begin(), avg.end()) - avg.begin());
+        m_st.lag = PeakShift(avg, best) * step;
+        m_st.lagCorrelation = avg[best];
         m_haveLag = true;
-        m_st.lagCorrelation = corr[best];
+    }
+
+    static constexpr double kNoCorr = -2.0;                 // a shift without enough overlapping samples
+
+    // The peak of a correlation curve, refined between grid points by a parabola (in grid steps).
+    static double PeakShift(const std::vector<double>& c, int best) {
+        double shift = best;
+        if (best > 0 && best + 1 < int(c.size()) && c[best - 1] > kNoCorr && c[best + 1] > kNoCorr) {
+            const double den = c[best - 1] - 2 * c[best] + c[best + 1];
+            if (den < 0) shift += 0.5 * (c[best - 1] - c[best + 1]) / den;
+        }
+        return shift;
     }
 
     // α and M from the pairs: for each heading on a grid, the mean mounting; the heading whose mountings agree
@@ -429,7 +550,17 @@ private:
     bool   m_haveLag = false;
     bool   m_havePrior = false;
     bool   m_solved = false;           // a full solve happened: m_mount is this session's
+    std::vector<double> m_lagSum, m_lagW;   // per shift: decaying sums of the windows' correlations, and their weights
+    double m_lagEff = 0;               // decaying count of the windows
+    bool   m_lagVector = false;        // the sums are of angular velocity vectors (else of rates)
+    double m_lagCurveT = 0;            // time of the last window
     double m_nextPair = 0, m_nextSolve = 0, m_nextLag = 0, m_lastObserve = 0, m_nextPriorFit = 0;
+    // the gate
+    bool   m_everSeen = false, m_inGap = false, m_escaping = false;
+    double m_gapStart = 0;
+    double m_extraGate = 0;            // deg: the gate's widening after a loss
+    double m_refusedSince = -1;        // every trusted view refused since then (-1: one was accepted since) …
+    size_t m_refusedCount = 0;         // … this many of them
 };
 
 } // namespace cf

@@ -8,6 +8,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "ServerProvider.h"
+#include "TrackingTrust.h"
 #include "Utils.h"
 #include <algorithm>
 #include <cctype>
@@ -51,6 +52,19 @@ vr::EVRSkeletalTrackingLevel ParseTrackingLevel(std::string s) {
     if (s == "partial") return vr::VRSkeletalTracking_Partial;
     if (s == "estimated") return vr::VRSkeletalTracking_Estimated;
     return vr::VRSkeletalTracking_Full;
+}
+
+// SlimeVR's body trackers by the role in their controller type (slimevr_tracker_<role>): the code a capture
+// records them with (kind 8), -1 for anything else. The arm model needs the elbows (and the chest, if worn).
+int BodyTrackerCode(const std::string& type) {
+    static const char* const kRoles[] = { "left_elbow", "right_elbow", "chest", "waist", "left_knee", "right_knee",
+                                          "left_foot", "right_foot", "left_hand", "right_hand", "left_shoulder",
+                                          "right_shoulder", "left_upper_arm", "right_upper_arm" };
+    static const std::string kPrefix = "slimevr_tracker_";
+    if (type.compare(0, kPrefix.size(), kPrefix) != 0) return -1;
+    for (int i = 0; i < int(sizeof(kRoles) / sizeof(kRoles[0])); ++i)
+        if (type.compare(kPrefix.size(), std::string::npos, kRoles[i]) == 0) return i;
+    return -1;
 }
 
 void ToFloats(const Xform& x, float pos[3], float rot[4]) {
@@ -196,6 +210,10 @@ void ServerProvider::RunFrame() {
         }
     }
     if (m_tapEnabled) m_tap->PollCapture(now);
+    if (m_tapEnabled && m_tap->Capturing()) {       // the headset and SlimeVR's body trackers, for the arm model
+        m_tap->CaptureDevicePose(7, 0, poses[vr::k_unTrackedDeviceIndex_Hmd], now);
+        for (const auto& [index, code] : m_bodyTrackers) m_tap->CaptureDevicePose(8, code, poses[index], now);
+    }
     TapHandSnapshot tap[2] = { m_tap->Get(0), m_tap->Get(1) };
     UpdateImuCalibration(tap, now);
 
@@ -205,6 +223,21 @@ void ServerProvider::RunFrame() {
     UpdateHandoff(poses, tap, now);
     const bool hide[2] = { m_active && m_hideSetting && !m_yield[0], m_active && m_hideSetting && !m_yield[1] };
     UpdateHiddenControllers(hide);
+
+    // How far the headset's tracking of each hand is trusted: where the hand is seen from, the other hand in front
+    // of it (TrackingTrust.h). The other hand counts while its tracking is live, not while a streamer holds it.
+    const vr::TrackedDevicePose_t& hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
+    for (int hand = 0; hand < 2; ++hand) {
+        if (!m_controller[hand]) continue;
+        double trust = 1.0;
+        if (hmd.bPoseIsValid && tap[hand].poseValid) {
+            const TapHandSnapshot& o = tap[1 - hand];
+            const bool otherLive = o.poseValid && o.skeletonAge < 0.3;
+            trust = TrackingTrust(hand, XformFromMatrix(hmd.mDeviceToAbsoluteTracking), tap[hand].rawPose.p,
+                                  otherLive ? &o.rawPose.p : nullptr);
+        }
+        m_controller[hand]->SetTrackingTrust(trust);
+    }
 
     for (int hand = 0; hand < 2; ++hand)
         if (m_controller[hand]) {
@@ -342,9 +375,15 @@ void ServerProvider::ScanOtherControllers(double now) {
         if (m_controller[h] && m_controller[h]->ObjectId() != vr::k_unTrackedDeviceIndexInvalid)
             ours[h] = props->TrackedDeviceToPropertyContainer(m_controller[h]->ObjectId());
     m_others.clear();
+    m_bodyTrackers.clear();
     for (uint32_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {           // 0 is the headset
         const vr::PropertyContainerHandle_t c = props->TrackedDeviceToPropertyContainer(i);
         if (c == vr::k_ulInvalidPropertyContainer || c == ours[0] || c == ours[1]) continue;
+        const std::string type = Lower(props->GetStringProperty(c, vr::Prop_ControllerType_String));
+        if (const int body = BodyTrackerCode(type); body >= 0) {
+            m_bodyTrackers.push_back({ i, uint8_t(body) });
+            continue;
+        }
         vr::ETrackedPropertyError err = vr::TrackedProp_Success;
         if (props->GetInt32Property(c, vr::Prop_DeviceClass_Int32, &err) != vr::TrackedDeviceClass_Controller ||
             err != vr::TrackedProp_Success)
@@ -353,7 +392,6 @@ void ServerProvider::ScanOtherControllers(double now) {
         if (err != vr::TrackedProp_Success ||
             (role != vr::TrackedControllerRole_LeftHand && role != vr::TrackedControllerRole_RightHand))
             continue;
-        const std::string type = Lower(props->GetStringProperty(c, vr::Prop_ControllerType_String));
         if (type == "cyberfinger" ||                                            // ours, or a hand-tracking source
             std::find(m_handSourceTypes.begin(), m_handSourceTypes.end(), type) != m_handSourceTypes.end())
             continue;
@@ -672,9 +710,9 @@ void ServerProvider::LogStatus(const TapHandSnapshot tap[2], double now) {
         const ImuFusion::Status is = m_imuFusion[hand].GetStatus();
         char imu[128] = "off";
         if (m_imuFusionEnabled && is.calibrated)
-            std::snprintf(imu, sizeof(imu), "lag %.0f ms, %s %.1f deg, %zu solves%s", is.lag * 1e3,
-                          is.fromPrior ? "starting mount fits" : "mount fit", is.residualDeg, is.solves,
-                          c->ImuFused() ? "" : ", IMU silent");
+            std::snprintf(imu, sizeof(imu), "lag %.0f ms, %s %.1f deg, %zu solves, %zu optical samples refused%s",
+                          is.lag * 1e3, is.fromPrior ? "starting mount fits" : "mount fit", is.residualDeg, is.solves,
+                          is.rejected, c->ImuFused() ? "" : ", IMU silent");
         else if (m_imuFusionEnabled && is.priorResidualDeg >= 0)
             std::snprintf(imu, sizeof(imu), "calibrating (%zu pairs; the starting mount is off by %.0f deg)", is.pairs,
                           is.priorResidualDeg);

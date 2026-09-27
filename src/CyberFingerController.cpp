@@ -156,7 +156,8 @@ void CyberFingerController::OnTapPose(const vr::DriverPose_t& pose) {
     // Desktop), or dates the pose well in the past, while it extrapolates a hand it no longer sees.
     const bool unseen = now - m_lastSkeletonChange.load(std::memory_order_relaxed) > kOcclusion ||
                         pose.poseTimeOffset < -0.05;
-    if (m_imu) m_imu->Observe(now, FromHmdQuat(pose.qRotation), pose.poseIsValid && !unseen);
+    if (m_imu) m_imu->Observe(now, FromHmdQuat(pose.qRotation), pose.poseIsValid && !unseen,
+                              m_trust.load(std::memory_order_relaxed));
     if (!m_follow.load(std::memory_order_acquire)) return;
     const uint32_t id = m_objectId;
     if (id == vr::k_unTrackedDeviceIndexInvalid) return;
@@ -278,7 +279,8 @@ void CyberFingerController::PassthroughPose(const TapHandSnapshot& tap, const Gl
     // keeping a lost hand's pose), and used whenever calibrated.
     if (m_imu && now - m_lastTapPose.load(std::memory_order_relaxed) > kEventTimeout)
         m_imu->Observe(now, tap.rawPose.q,
-                       tap.poseValid && now - m_lastSkeletonChange.load(std::memory_order_relaxed) < kOcclusion);
+                       tap.poseValid && now - m_lastSkeletonChange.load(std::memory_order_relaxed) < kOcclusion,
+                       m_trust.load(std::memory_order_relaxed));
     Quat qf;
     Vec3 wf;
     if (FusedOrientation(now, qf, wf)) {

@@ -37,7 +37,8 @@ import time
 import numpy as np
 
 CAP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "CyberFinger")
-KIND = {0: "pose", 1: "skeleton WithoutController", 2: "skeleton WithController",
+KIND = {7: "headset", 8: "body tracker (SlimeVR)",
+        0: "pose", 1: "skeleton WithoutController", 2: "skeleton WithController",
         3: "CyberFinger pose", 4: "CyberFinger skel. Without", 5: "CyberFinger skel. With", 6: "glove IMU"}
 IMU_SLOTS = ((0x1, "body 1"), (0x2, "body 2"), (0x4, "joint"))
 LASER = 2.0                     # m: laser target distance along the index finger
@@ -56,7 +57,10 @@ def request_capture(seconds):
         new = set(glob.glob(os.path.join(CAP_DIR, "captures", "tap_*.csv"))) - before
         if new:
             path = max(new, key=os.path.getmtime)
-            time.sleep(1.0)                                   # let the writer finish
+            size = -1                                         # let the writer finish: a long capture takes seconds
+            while os.path.getsize(path) != size:
+                size = os.path.getsize(path)
+                time.sleep(1.5)
             return path
     sys.exit("no capture appeared: is SteamVR running with the CyberFinger driver, and 'Debug captures' on in "
              "SteamVR's settings for CyberFinger (advanced; setting debug_captures)?")
@@ -317,10 +321,38 @@ def compare(data, v, hand):
                   f" {o[5]:6.1f} / {o[6]:5.0f}")
 
 
+BODY = ["left elbow", "right elbow", "chest", "waist", "left knee", "right knee", "left foot", "right foot",
+        "left hand", "right hand", "left shoulder", "right shoulder", "left upper arm", "right upper arm"]
+
+
+def body_summary(data, v):
+    """The headset (kind 7) and SlimeVR's body trackers (kind 8, by role code) in the capture: rates, validity, and
+    for an elbow its distance to the same side's headset-tracked hand (roughly the forearm: ~25-30 cm)."""
+    for kind, code, name in [(7, 0, "headset")] + [(8, c, n) for c, n in enumerate(BODY)]:
+        sel = (data["kind"] == kind) & (data["hand"] == code)
+        if sel.sum() < 5:
+            continue
+        t, vv = data["t"][sel], v[sel]
+        line = f"  {name:15s} {len(t) / (t[-1] - t[0]):5.0f} poses/s, valid {vv[:, 17].mean() * 100:3.0f} %"
+        if kind == 8 and code in (0, 1):
+            h = (data["kind"] == 0) & (data["hand"] == code) & (v[:, 17] > 0.5)
+            if h.sum() > 10:
+                th, ph = data["t"][h], v[h][:, 1:4]
+                ok = (t >= th[0]) & (t <= th[-1]) & (vv[:, 17] > 0.5)
+                hand = np.stack([np.interp(t[ok], th, ph[:, i]) for i in range(3)], 1)
+                d = np.linalg.norm(vv[ok][:, 1:4] - hand, axis=1) * 100
+                if len(d):
+                    line += (f"; to the tracked {name.split()[0]} hand {np.median(d):.1f} cm median "
+                             f"({np.percentile(d, 10):.1f}-{np.percentile(d, 90):.1f})")
+        print(line)
+    print()
+
+
 def analyse(path):
     data = np.genfromtxt(path, delimiter=",", names=True)
     print(f"{os.path.basename(path)}: {len(data)} calls over {data['t'][-1] - data['t'][0]:.1f} s\n")
     v = np.stack([data[f"v{i}"] for i in range(22)], axis=1)
+    body_summary(data, v)
     for hand in (0, 1):
         print(f"══ {'left' if hand == 0 else 'right'} hand ══")
         for kind in (0, 1, 2, 3, 4, 5):

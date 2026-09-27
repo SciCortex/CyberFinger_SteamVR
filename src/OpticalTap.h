@@ -131,6 +131,9 @@ public:
     bool Capturing() const { return m_capturing.load(std::memory_order_relaxed); }
     // A glove IMU packet (CFIM) that arrived at `arrival`: captured alongside, while capturing. Any thread.
     void CaptureImu(const ImuPacket& p, double arrival);
+    // Another device's pose this frame (kind 7 = the headset, 8 = a body tracker, `id` its role code), captured
+    // alongside while capturing, in the columns of a hand pose (kind 0). Frame loop.
+    void CaptureDevicePose(uint8_t kind, uint8_t id, const vr::TrackedDevicePose_t& pose, double now);
 
     // ── called from the hook detours (any thread) ──────────────────────────
     void OnCreateInput(vr::PropertyContainerHandle_t c, const char* name, vr::VRInputComponentHandle_t h);
@@ -224,7 +227,8 @@ private:
     } m_lastPose[2];
 
     // Capture (StartCapture): kind 0 = pose, 1 = skeleton WithoutController, 2 = skeleton WithController of the
-    // source hand; 3, 4, 5 = the same of our device; 6 = glove IMU (CaptureImu).
+    // source hand; 3, 4, 5 = the same of our device; 6 = glove IMU (CaptureImu); 7 = the headset, 8 = a body
+    // tracker (CaptureDevicePose).
     struct CaptureRecord {
         double  t;
         uint8_t hand, kind, changed;

@@ -471,6 +471,60 @@ static void TestImuFusionPrior() {
     CHECK(!st.calibrated && st.priorResidualDeg > 25.0);
 }
 
+// The gate. A hand turning slowly, calibrated from an exact prior; then the headset flips the palm (180°) for 1.5 s:
+// the output stays on the hand. Then the glove slips on the hand by 35°: the headset, in full view, is refused
+// until the escape (3 s), then followed. The same slip seen only from the edge of the view (trust 0.3): never.
+static void TestImuFusionGate() {
+    const double alpha = 25.0 * kPi / 180.0;
+    const Quat yaw{ std::cos(alpha / 2), 0, std::sin(alpha / 2), 0 };
+    const Quat toVr{ std::sqrt(0.5), -std::sqrt(0.5), 0, 0 };
+    const Quat mount = QuatFromEulerXYZDeg(20, -30, 10);
+    const Quat slip = QuatFromEulerXYZDeg(35, 0, 0);
+    auto hand = [](double t) {
+        return QuatFromEulerXYZDeg(-40 + 8 * std::sin(0.5 * t), 15 + 5 * std::sin(0.7 * t), 4 * std::sin(0.3 * t));
+    };
+    auto angle = [](const Quat& a, const Quat& b) {
+        const double d = std::fabs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);
+        return 2.0 * std::acos(std::min(1.0, d)) * 180.0 / kPi;
+    };
+    auto run = [&](double trustAfterSlip, double& flipErr, double& slipErrAt2, double& slipErrEnd) {
+        ImuFusion f;
+        f.Reset();
+        f.SetPrior({ mount, 0.03, 0 });
+        flipErr = slipErrAt2 = slipErrEnd = 0;
+        Quat q;
+        Vec3 w;
+        double tImu = 0, tOpt = 0;
+        for (double t = 0; t < 16.0; t += 0.001) {
+            const bool slipped = t >= 6.0;
+            while (tImu <= t) {
+                f.AddImu(tImu, Normalize(Conj(yaw * toVr) * hand(tImu) * Conj(slipped ? mount * slip : mount)));
+                tImu += 0.01;
+            }
+            if (tOpt > t) continue;
+            tOpt += 1.0 / 90;
+            const bool flipped = t >= 3.0 && t < 4.5;
+            const Quat opt = flipped ? hand(t - 0.03) * QuatFromEulerXYZDeg(180, 0, 0) : hand(t - 0.03);
+            f.Observe(t, opt, true, slipped ? trustAfterSlip : 1.0);
+            if (!f.Orientation(t, q, w)) continue;
+            const double e = angle(q, hand(t));
+            if (t >= 3.0 && t < 4.6) flipErr = std::fmax(flipErr, e);
+            if (t >= 7.9 && t < 8.0) slipErrAt2 = e;                    // 2 s after the slip: still refused
+            if (t >= 15.9) slipErrEnd = e;
+        }
+        return f.GetStatus();
+    };
+    double flipErr, at2, end;
+    ImuFusion::Status st = run(1.0, flipErr, at2, end);
+    CHECK(flipErr < 3.0);
+    CHECK(at2 > 25.0);
+    CHECK(end < 5.0 && st.escapes >= 1);
+    std::printf("  IMU fusion gate: palm flip -> error %.1f deg; glove slip 35 deg: %.0f deg after 2 s, %.1f deg after 10 s "
+                "(%zu escape)\n", flipErr, at2, end, st.escapes);
+    st = run(0.3, flipErr, at2, end);
+    CHECK(end > 25.0 && st.escapes == 0);
+}
+
 // Setting lists such as pose_filter_types: "a|b", case and blanks ignored.
 static void TestSplitList() {
     const std::vector<std::string> l = SplitList(" svl_hand_interaction_augmented | VD_Hand_Controller || ");
@@ -491,6 +545,7 @@ int main(int argc, char** argv) {
     TestSplitList();
     TestImuFusion();
     TestImuFusionPrior();
+    TestImuFusionGate();
     TestGestures();
     if (g_failures) {
         std::printf("%d check(s) failed\n", g_failures);

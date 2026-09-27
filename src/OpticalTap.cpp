@@ -521,6 +521,22 @@ void OpticalTap::CaptureImu(const ImuPacket& p, double arrival) {
     Capture(r);
 }
 
+void OpticalTap::CaptureDevicePose(uint8_t kind, uint8_t id, const vr::TrackedDevicePose_t& pose, double now) {
+    if (!m_capturing.load(std::memory_order_relaxed)) return;
+    CaptureRecord r{};
+    r.t = now;
+    r.hand = id;
+    r.kind = kind;
+    r.changed = pose.bPoseIsValid ? 1 : 0;
+    const Xform x = XformFromMatrix(pose.mDeviceToAbsoluteTracking);
+    const double v[18] = { 0.0, x.p.x, x.p.y, x.p.z, x.q.w, x.q.x, x.q.y, x.q.z,        // as a hand pose (kind 0)
+                           pose.vVelocity.v[0], pose.vVelocity.v[1], pose.vVelocity.v[2],
+                           pose.vAngularVelocity.v[0], pose.vAngularVelocity.v[1], pose.vAngularVelocity.v[2],
+                           0.0, 0.0, 0.0, pose.bPoseIsValid ? 1.0 : 0.0 };
+    for (int i = 0; i < 18; ++i) r.v[i] = float(v[i]);
+    Capture(r);
+}
+
 // Wrist in model space (root · wrist: the pose → wrist transform), then the five fingertips relative to the wrist.
 void OpticalTap::CaptureSkeleton(int hand, uint8_t kind, bool changed, const vr::VRBoneTransform_t* bones) {
     CaptureRecord r{};

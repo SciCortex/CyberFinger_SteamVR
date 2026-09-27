@@ -82,6 +82,8 @@ public:
     // once calibrated. The FUSED mode (the Studio's own fusion) never uses it.
     void SetImuFusion(ImuFusion* fusion) { m_imu = fusion; }
     void SetImuFusionEnabled(bool on) { m_imuEnabled.store(on, std::memory_order_relaxed); }
+    // How far the headset's tracking of this hand is trusted now (TrackingTrust.h), set every frame.
+    void SetTrackingTrust(double trust) { m_trust.store(trust, std::memory_order_relaxed); }
     bool ImuFused() const { return m_imuFused.load(std::memory_order_relaxed); }
 
     const std::string& Serial() const { return m_cfg.serial; }
@@ -130,6 +132,7 @@ private:
     ImuFusion*         m_imu = nullptr;
     std::atomic<bool>  m_imuEnabled{ true };
     std::atomic<bool>  m_imuFused{ false };          // the last pose's orientation came from the IMU fusion
+    std::atomic<double> m_trust{ 1.0 };              // SetTrackingTrust
     bool FusedOrientation(double now, Quat& q, Vec3& w);
     vr::VRBoneTransform_t m_prevSourceBones[eBone_Count]{};   // republish thread only
     std::atomic<double>   m_lastSkeletonChange{ -1e9 };

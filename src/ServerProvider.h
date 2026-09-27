@@ -98,6 +98,9 @@ private:
     uint32_t m_deviceCount = 0;                   // a change means a device was just added…
     double m_fastScanUntil = 0;                   // … so scan every frame until then
     std::vector<std::string> m_handSourceTypes;   // tap_controller_types: hand-tracking sources, never others
+    // SlimeVR's body trackers (elbows, chest …): device index and role code (BodyTrackerCode), rescanned with the
+    // others; captured (kind 8) for the arm model.
+    std::vector<std::pair<uint32_t, uint8_t>> m_bodyTrackers;
 
     // Marked Prop_NeverTracked while CyberFinger holds their hand.
     std::set<vr::PropertyContainerHandle_t> m_hidden;

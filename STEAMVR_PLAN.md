@@ -63,7 +63,26 @@ Items marked *check* are hypotheses to verify.
   the fusion starts from them, fitting only the heading: running 0.5–0.8 s after the hand is seen (was 4–5 s
   offline, 20–60 s live with still hands). Between sessions the solved mounting scatters 14–21°, mostly tilt,
   not the heading ambiguity: the glove's fit, or the optical hand frame's posture bias. *Check live.*
-  *Next:* position from the body IMU's accelerometer (noise, dead reckoning while unseen).
+  **Lag estimate** (2026-09-27): live it swung 30–97 ms (single windows landing on 0 or the largest shift,
+  averaged in). Now the windows' correlation curves are averaged (15 s memory) and, once calibrated, the angular
+  velocity vectors are compared instead of the rates (which read 10–25 ms late). Offline its correction wobble
+  matches the best fixed lag in hindsight on all captures. Steam Link's lag differs by session (10–100 ms) and
+  drifts within one (90 → 25 ms over 10 s). *Check live.*
+  **Trust and gate** (2026-09-27, `src/TrackingTrust.h`): a 2-minute capture with exits showed Steam Link rarely
+  loses the hands (losses 0.2 s median, 1 s max; it tracks them down at the sides) but tracks them badly in places:
+  more than 20° off the IMU 68 % of the time with the hand 10–20° behind the other, 17–43 % beside/behind the
+  head, lost overhead. Trust (view direction × other hand in front × distance) slows the corrections and keeps poor views
+  out of the calibration; a 25° gate refuses flips and glitches, with an escape after 3 s of refusing every trusted
+  view (glove slipped). On that capture the corrections turn the output 50–64 % less, worst cases improve (p90
+  15.9 → 11.0°); older captures unchanged. *Check live.*
+  - [ ] Trust maps for other headsets (Quest 2, Quest Pro, Quest 3S, Steam Frame, …): a 2-minute capture each,
+    `tools/handover_check.py`; then a per-headset table chosen by the headset's model.
+  - [ ] The hand's own orientation to the cameras: oblique views 2–3× worse in the first capture, not consistent
+    across axes yet. More data.
+  - [ ] **Position through gaps and bad views: the arm chain** (`tools/arm_chain_check.py`). SlimeVR elbow tracker
+    (upper-arm Slime) + forearm (glove body IMU) + hand (joint IMU): over 5–8 s gaps 12–16 cm median off against
+    39–42 cm for holding the position (without the Slime, elbow held to the headset: 23–30 cm). The accelerometer
+    only helps for ≤ 0.5 s. Next: fit the chain online, hand over position by the same trust and gate.
 - [ ] **Skeleton simpler than OpenVR's.** Probably the same cause as the rigid hands seen later: in Touch mode
   without skeletons bound, Resonite draws canned Touch hands. *Check* now that the default binds them.
 - [ ] Dashboard laser: Steam Link draws its own stabilised pointer on the headset. Option: hand the roles back to
