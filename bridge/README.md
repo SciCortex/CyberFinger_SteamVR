@@ -40,13 +40,16 @@ This will:
 2. Run PyInstaller to create `dist/CyberFingerBridge.exe`
 3. Prepare the distribution files
 
-To create the Windows installer:
+The Windows installer also carries the CyberFinger SteamVR driver, so the driver must be built first.
+From the repository root, `tools\build_installer.cmd` does all of it (driver, `build.bat`, Inno Setup);
+or build the driver with `tools\build_driver.cmd`, then:
 ```
 cd installer
 iscc setup.iss
 ```
 
-The installer will be created at `dist/installer/CyberFingerBridge_Setup_1.0.0.exe`.
+The installer will be created at `dist/installer/CyberFingerBridge_Setup_<version>.exe`. It installs the
+bridge and registers the SteamVR driver; its uninstaller unregisters it.
 
 ## Project Structure
 

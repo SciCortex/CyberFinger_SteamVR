@@ -4,75 +4,533 @@
  * SPDX-License-Identifier: GPL-3.0-only
  */
 // ═══════════════════════════════════════════════════════════════════════════
-// ServerProvider.cpp — Main SteamVR driver provider
+// ServerProvider.cpp — driver setup and the per-frame loop
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "ServerProvider.h"
 #include "Utils.h"
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <sstream>
+#ifdef _WIN32
+#  include <windows.h>
+#endif
 
-namespace merged_ctrl {
+namespace cf {
+
+namespace {
+
+// "MENU", "STSEL", "C|D", "NONE" … → GloveButton mask.
+uint8_t ParseButtons(const std::string& spec) {
+    uint8_t mask = 0;
+    std::string token;
+    std::stringstream ss(spec);
+    while (std::getline(ss, token, '|')) {
+        std::string t;
+        for (char ch : token)
+            if (!std::isspace(uint8_t(ch))) t += char(std::toupper(uint8_t(ch)));
+        if (t == "TRIGGER" || t == "TRIG") mask |= kBtnTrigger;
+        else if (t == "GRIP") mask |= kBtnGrip;
+        else if (t == "C") mask |= kBtnC;
+        else if (t == "D") mask |= kBtnD;
+        else if (t == "E") mask |= kBtnE;
+        else if (t == "MENU") mask |= kBtnMenu;
+        else if (t == "STICK" || t == "JCLK" || t == "STICKCLICK") mask |= kBtnStickClick;
+        else if (t == "STSEL" || t == "STARTSELECT" || t == "START") mask |= kBtnStartSelect;
+        else if (!t.empty() && t != "NONE") DriverLog("Settings: unknown button name '%s'\n", t.c_str());
+    }
+    return mask;
+}
+
+vr::EVRSkeletalTrackingLevel ParseTrackingLevel(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    if (s == "partial") return vr::VRSkeletalTracking_Partial;
+    if (s == "estimated") return vr::VRSkeletalTracking_Estimated;
+    return vr::VRSkeletalTracking_Full;
+}
+
+void ToFloats(const Xform& x, float pos[3], float rot[4]) {
+    pos[0] = float(x.p.x); pos[1] = float(x.p.y); pos[2] = float(x.p.z);
+    rot[0] = float(x.q.w); rot[1] = float(x.q.x); rot[2] = float(x.q.y); rot[3] = float(x.q.z);
+}
+
+} // namespace
 
 vr::EVRInitError ServerProvider::Init(vr::IVRDriverContext* pDriverContext) {
     VR_INIT_SERVER_DRIVER_CONTEXT(pDriverContext);
-
     SetDriverLog(vr::VRDriverLog());
-    DriverLog("═══ CyberFinger Driver v1.0 ═══\n");
-    DriverLog("Initializing...\n");
+    DriverLog("═══ CyberFinger driver 2.0 ═══\n");
 
-    // ── Read settings ──────────────────────────────────────────────────
-    const char* section = "driver_cyberfinger";
+    const std::string serialL = SettingString("serialNumber_left", "CYBERFINGER_L");
+    const std::string serialR = SettingString("serialNumber_right", "CYBERFINGER_R");
 
-    std::string serialL = GetDriverSettingString(section, "serialNumber_left", "CYBERFINGER_L");
-    std::string serialR = GetDriverSettingString(section, "serialNumber_right", "CYBERFINGER_R");
+    // ── optical tap: must be hooked before any other driver adds its devices ──
+    m_tapEnabled = SettingBool("optical_tap", true);
+    m_tap = std::make_unique<OpticalTap>();
+    const std::string handTypes =
+        SettingString("tap_controller_types", "svl_hand_interaction_augmented|vd_hand_controller");
+    m_handSourceTypes = SplitList(handTypes);
+    m_tap->Configure(SettingString("tap_serial_left", "Hand_Left"), SettingString("tap_serial_right", "Hand_Right"),
+                     handTypes, serialL, serialR, SettingInt("hand_selection_priority", 1000));
+    if (m_tapEnabled && SettingBool("optical_tap_hook", true)) {
+        if (!m_tap->InstallHooks(pDriverContext))
+            DriverLog("Optical tap: skeleton hook unavailable; using headset hand poses only\n");
+    }
 
-    int udpPort  = GetDriverSettingInt(section, "handtracking_udp_port", 27015);
+    // The glove IMUs, sent by the bridge while a capture runs, go into the capture with everything else.
+    m_link.SetImuSink([tap = m_tap.get()](const ImuPacket& p, double arrival) { tap->CaptureImu(p, arrival); });
+    m_link.Start(SettingInt("handtracking_udp_port", 27015), SettingInt("context_udp_port", 27016),
+                 SettingBool("bind_loopback_only", true), SettingBool("legacy_5bit_buttons", false));
 
-    DriverLog("  Left  serial: %s\n", serialL.c_str());
-    DriverLog("  Right serial: %s\n", serialR.c_str());
-    DriverLog("  UDP port: %d\n", udpPort);
+    for (int hand = 0; hand < 2; ++hand) {
+        CyberFingerController::Config cfg;
+        cfg.serial = hand ? serialR : serialL;
+        cfg.trackingLevel = ParseTrackingLevel(SettingString("skeletal_tracking_level", "full"));
+        cfg.handPriority = SettingInt("hand_selection_priority", 1000);
+        cfg.grabTapTime = std::max(0, SettingInt("grab_tap_ms", 200)) / 1000.0;
+        cfg.maskA = ParseButtons(SettingString("button_a", "STSEL"));
+        cfg.maskB = ParseButtons(SettingString("button_b", "MENU"));
+        cfg.maskSystem = ParseButtons(SettingString("button_system", "NONE"));
+        cfg.forwardTapSystem = SettingBool("forward_tap_system_button", true);
+        cfg.fusedTimeout = std::max(0.02, SettingInt("fused_timeout_ms", 150) / 1000.0);
+        cfg.disconnectAfter = std::max(0, SettingInt("disconnect_after_ms", 0)) / 1000.0;
 
-    // ── Start subsystems ───────────────────────────────────────────────
-    m_handTrackingReceiver = std::make_unique<HandTrackingReceiver>();
-    m_handTrackingReceiver->Start(udpPort);
+        // Only used before any headset skeleton has been seen (e.g. hook disabled):
+        // the legacy grip_angle_* / pose_offset_* correction, mirrored for the left hand.
+        const double ax = SettingFloat("grip_angle_x", -60.f), ay = SettingFloat("grip_angle_y", 35.f),
+                     az = SettingFloat("grip_angle_z", 0.f);
+        const double ox = SettingFloat("pose_offset_x", 0.f), oy = SettingFloat("pose_offset_y", -0.10f),
+                     oz = SettingFloat("pose_offset_z", 0.f);
+        const double m = hand ? 1.0 : -1.0;
+        cfg.noSkeletonOffset = { QuatFromEulerXYZDeg(ax, ay * m, az * m), { ox * m, oy, oz } };
 
-    // ── Create controller devices ──────────────────────────────────────
-    m_leftController = std::make_unique<MergedController>(
-        0, serialL, m_handTrackingReceiver.get());
-    m_rightController = std::make_unique<MergedController>(
-        1, serialR, m_handTrackingReceiver.get());
+        m_controller[hand] = std::make_unique<CyberFingerController>(hand, cfg);
+        vr::VRServerDriverHost()->TrackedDeviceAdded(cfg.serial.c_str(), vr::TrackedDeviceClass_Controller,
+                                                     m_controller[hand].get());
+    }
+    // Republish the headset hands' updates as they arrive (off: once per frame).
+    if (m_tapEnabled && SettingBool("passthrough_events", true)) {
+        {
+            std::lock_guard<std::mutex> g(m_pubLock);
+            m_pubRun = true;
+        }
+        m_pubThread = std::thread(&ServerProvider::RepublishThread, this);
+        m_tap->SetListener(this);
+    }
+    m_lastStatus = NowSeconds();
 
-    // Register with SteamVR
-    vr::VRServerDriverHost()->TrackedDeviceAdded(
-        serialL.c_str(), vr::TrackedDeviceClass_Controller, m_leftController.get());
-    vr::VRServerDriverHost()->TrackedDeviceAdded(
-        serialR.c_str(), vr::TrackedDeviceClass_Controller, m_rightController.get());
-
-    DriverLog("Merged Controller Driver initialized OK\n");
+    DriverLog("CyberFinger driver initialized (optical tap %s, skeleton hook %s, pose hook %s)\n",
+              m_tapEnabled ? "on" : "off", m_tap->HooksActive() ? "active" : "off",
+              m_tap->PoseHookActive() ? "active" : "off");
     return vr::VRInitError_None;
 }
 
 void ServerProvider::Cleanup() {
-    DriverLog("Merged Controller Driver shutting down\n");
-
-    m_leftController.reset();
-    m_rightController.reset();
-    m_handTrackingReceiver.reset();
-
+    DriverLog("CyberFinger driver shutting down\n");
+    if (m_tap) {
+        m_tap->SetListener(nullptr);
+        m_tap->RemoveHooks();   // waits for detours in flight, so no callback outlives the controllers
+    }
+    {
+        std::lock_guard<std::mutex> g(m_pubLock);
+        m_pubRun = false;
+    }
+    m_pubWake.notify_all();
+    if (m_pubThread.joinable()) m_pubThread.join();
+    RestoreHiddenControllers();
+    m_link.Stop();
+    m_controller[0].reset();
+    m_controller[1].reset();
+    m_tap.reset();
     VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 
-const char* const* ServerProvider::GetInterfaceVersions() {
-    return vr::k_InterfaceVersions;
-}
-
 void ServerProvider::RunFrame() {
-    if (m_leftController)  m_leftController->Update();
-    if (m_rightController) m_rightController->Update();
+    vr::VREvent_t ev;
+    while (vr::VRServerDriverHost()->PollNextEvent(&ev, sizeof(ev))) {
+        if (ev.eventType == vr::VREvent_Input_HapticVibration) OnHaptic(ev.data.hapticVibration);
+    }
+
+    vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+    vr::VRServerDriverHost()->GetRawTrackedDevicePoses(0.f, poses, vr::k_unMaxTrackedDeviceCount);
+    if (m_tapEnabled) m_tap->Update(poses, vr::k_unMaxTrackedDeviceCount);
+
+    const double now = NowSeconds();
+    if (now >= m_nextSettingsPoll) {
+        // Live on/off from SteamVR's settings page; off hands the roles back to the headset's hands.
+        m_nextSettingsPoll = now + 0.5;
+        const bool active = SettingBool("active", true);
+        if (active != m_active) {
+            m_active = active;
+            DriverLog("CyberFinger controllers %s\n",
+                      active ? "active" : "switched off: the headset's own hand tracking takes the hand roles");
+        }
+        PollPoseFilter();
+        PollCaptureRequest();
+        m_hideSetting = SettingBool("hide_other_hand_controllers", true);
+        m_yieldSetting = SettingBool("yield_to_controllers", true);
+    }
+    if (m_tapEnabled) m_tap->PollCapture(now);
+    TapHandSnapshot tap[2] = { m_tap->Get(0), m_tap->Get(1) };
+
+    // Other hand controllers: released to when the user picks them up, hidden from apps otherwise. A released
+    // hand's controllers are shown before CyberFinger lets go of the hand (same frame, below).
+    ScanOtherControllers(now);
+    UpdateHandoff(poses, tap, now);
+    const bool hide[2] = { m_active && m_hideSetting && !m_yield[0], m_active && m_hideSetting && !m_yield[1] };
+    UpdateHiddenControllers(hide);
+
+    for (int hand = 0; hand < 2; ++hand)
+        if (m_controller[hand]) {
+            m_tap->SetOwnDevice(hand, m_controller[hand]->ObjectId());
+            m_controller[hand]->SetSourceFiltered(FilteredSource(tap[hand].controllerType), tap[hand].controllerType);
+            m_controller[hand]->Update(m_link.Glove(hand), m_link.HandState(hand), tap[hand], now,
+                                       m_active && !m_yield[hand]);
+        }
+
+    if (now >= m_nextContext) {
+        m_nextContext = now + 1.0 / 120.0;
+        SendContext(poses, tap, now);
+    }
+    if (now >= m_nextStatus) {
+        m_nextStatus = now + 10.0;
+        LogStatus(tap, now);
+    }
 }
 
-bool ServerProvider::ShouldBlockStandbyMode() { return false; }
-void ServerProvider::EnterStandby() {}
-void ServerProvider::LeaveStandby() {}
+namespace {
+// Set while RepublishThread submits: updates that other drivers' hooks send back to us in response are
+// echoes of our own submissions, not new data.
+thread_local bool t_republishing = false;
+} // namespace
 
-} // namespace merged_ctrl
+void ServerProvider::OnTapPose(int hand, const vr::DriverPose_t& pose) {
+    if (t_republishing) return;
+    {
+        std::lock_guard<std::mutex> g(m_pubLock);
+        Pending& p = m_pending[hand & 1];
+        p.pose = pose;
+        p.poseArrival = NowSeconds();
+        p.hasPose = true;
+    }
+    m_pubWake.notify_one();
+}
 
+void ServerProvider::OnTapSkeleton(int hand, vr::EVRSkeletalMotionRange range, const vr::VRBoneTransform_t* bones,
+                                   uint32_t count) {
+    // Only WithoutController is republished (both of our ranges follow it).
+    if (t_republishing || range != vr::VRSkeletalMotionRange_WithoutController || !bones ||
+        count < uint32_t(eBone_Count))
+        return;
+    {
+        std::lock_guard<std::mutex> g(m_pubLock);
+        Pending& p = m_pending[hand & 1];
+        std::copy(bones, bones + eBone_Count, p.bones);
+        p.hasSkeleton = true;
+    }
+    m_pubWake.notify_one();
+}
+
+void ServerProvider::RepublishThread() {
+    t_republishing = true;
+    std::unique_lock<std::mutex> lock(m_pubLock);
+    for (;;) {
+        m_pubWake.wait(lock, [this] {
+            return !m_pubRun || m_pending[0].hasPose || m_pending[0].hasSkeleton || m_pending[1].hasPose ||
+                   m_pending[1].hasSkeleton;
+        });
+        if (!m_pubRun) return;
+        Pending work[2];
+        for (int hand = 0; hand < 2; ++hand) {
+            work[hand] = m_pending[hand];
+            m_pending[hand].hasPose = m_pending[hand].hasSkeleton = false;
+        }
+        lock.unlock();
+        for (int hand = 0; hand < 2; ++hand) {
+            CyberFingerController* c = m_controller[hand].get();
+            if (!c) continue;
+            // Skeleton first: it carries the wrist the pose is re-rooted with.
+            if (work[hand].hasSkeleton)
+                c->OnTapSkeleton(vr::VRSkeletalMotionRange_WithoutController, work[hand].bones, eBone_Count);
+            if (work[hand].hasPose) {
+                vr::DriverPose_t pose = work[hand].pose;
+                pose.poseTimeOffset -= NowSeconds() - work[hand].poseArrival;   // the same instant, submitted later
+                c->OnTapPose(pose);
+            }
+        }
+        lock.lock();
+    }
+}
+
+// The PASSTHROUGH pose filter's settings, read live so it can be compared on and off in the headset.
+void ServerProvider::PollPoseFilter() {
+    PoseFilter::Params p;
+    p.enabled = SettingBool("pose_filter", true);
+    p.minCutoff = std::max(0.05f, SettingFloat("pose_filter_min_cutoff", 1.0f));
+    p.beta = std::max(0.f, SettingFloat("pose_filter_beta", 15.f));
+    p.rotMinCutoff = p.minCutoff;
+    p.prediction = std::clamp(SettingFloat("pose_prediction", 0.5f), 0.f, 2.f);
+    p.rotPrediction = std::clamp(SettingFloat("pose_rotation_prediction", 0.f), 0.f, 2.f);
+    p.gate = std::max(0.005f, SettingFloat("pose_filter_gate_cm", 5.f) / 100.f);
+    // Only these sources need it: Steam Link streams predicted, noisy poses; Virtual Desktop's are clean.
+    const std::string types = SettingString("pose_filter_types", "svl_hand_interaction_augmented");
+    const bool changed = !m_filterKnown || p.enabled != m_filter.enabled || p.minCutoff != m_filter.minCutoff ||
+                         p.beta != m_filter.beta || p.prediction != m_filter.prediction ||
+                         p.rotPrediction != m_filter.rotPrediction || p.gate != m_filter.gate ||
+                         types != m_filterTypesSetting;
+    if (!changed) return;
+    m_filter = p;
+    m_filterKnown = true;
+    m_filterTypesSetting = types;
+    m_filterTypes = SplitList(types);
+    for (auto& c : m_controller)
+        if (c) c->SetPoseFilter(p);
+    DriverLog("Pose filter %s for %s (min cutoff %.2f Hz, beta %.1f, prediction %.2f, rotation %.2f, gate %.1f cm)\n",
+              p.enabled ? "on" : "off", types.c_str(), p.minCutoff, p.beta, p.prediction, p.rotPrediction,
+              p.gate * 100);
+}
+
+bool ServerProvider::FilteredSource(const std::string& controllerType) const {
+    const std::string t = Lower(controllerType);
+    return std::find(m_filterTypes.begin(), m_filterTypes.end(), t) != m_filterTypes.end();
+}
+
+// Other drivers' hand controllers: the Touch controllers Steam Link and Virtual Desktop emulate from hand
+// tracking, or the real ones when the user picks them up. Every second, and every frame for a second after a
+// device is added: Steam Link adds its controllers when they're first picked up, and apps look at a device as
+// soon as it's activated (Resonite makes a role-less controller a tracker for good), so it must be hidden at
+// once; its properties arrive during its activation, hence the repeated scans. Frame loop.
+void ServerProvider::ScanOtherControllers(double now) {
+    vr::CVRPropertyHelpers* props = vr::VRProperties();
+    uint32_t devices = 0;
+    for (uint32_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i)
+        if (props->TrackedDeviceToPropertyContainer(i) != vr::k_ulInvalidPropertyContainer) ++devices;
+    if (devices != m_deviceCount) {
+        m_deviceCount = devices;
+        m_fastScanUntil = now + 1.0;
+    }
+    if (now < m_nextScan && now >= m_fastScanUntil) return;
+    m_nextScan = now + 1.0;
+    vr::PropertyContainerHandle_t ours[2] = { vr::k_ulInvalidPropertyContainer, vr::k_ulInvalidPropertyContainer };
+    for (int h = 0; h < 2; ++h)
+        if (m_controller[h] && m_controller[h]->ObjectId() != vr::k_unTrackedDeviceIndexInvalid)
+            ours[h] = props->TrackedDeviceToPropertyContainer(m_controller[h]->ObjectId());
+    m_others.clear();
+    for (uint32_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {           // 0 is the headset
+        const vr::PropertyContainerHandle_t c = props->TrackedDeviceToPropertyContainer(i);
+        if (c == vr::k_ulInvalidPropertyContainer || c == ours[0] || c == ours[1]) continue;
+        vr::ETrackedPropertyError err = vr::TrackedProp_Success;
+        if (props->GetInt32Property(c, vr::Prop_DeviceClass_Int32, &err) != vr::TrackedDeviceClass_Controller ||
+            err != vr::TrackedProp_Success)
+            continue;
+        const int32_t role = props->GetInt32Property(c, vr::Prop_ControllerRoleHint_Int32, &err);
+        if (err != vr::TrackedProp_Success ||
+            (role != vr::TrackedControllerRole_LeftHand && role != vr::TrackedControllerRole_RightHand))
+            continue;
+        const std::string type = Lower(props->GetStringProperty(c, vr::Prop_ControllerType_String));
+        if (type == "cyberfinger" ||                                            // ours, or a hand-tracking source
+            std::find(m_handSourceTypes.begin(), m_handSourceTypes.end(), type) != m_handSourceTypes.end())
+            continue;
+        m_others.push_back({ c, i, role == vr::TrackedControllerRole_LeftHand ? 0 : 1 });
+    }
+}
+
+// The Quest tracks either the hands or the controllers. When a hand's tracking has stopped while a controller
+// for that hand is tracked, the user picked the controllers up: release the hand to the controller. Take it back
+// as soon as hand tracking is live again (the controllers can't tell: Virtual Desktop's emulated ones track the
+// hands then). Frame loop.
+//
+// The skeleton is the signal: both streamers stop it at once when the user switches to the controllers, but keep
+// the lost hand's pose valid (frozen) for seconds. It can't be mistaken for a hand out of view: Virtual Desktop
+// then disconnects that hand's emulated Touch controller at the same moment (so no controller is tracked), and
+// Steam Link keeps sending the frozen skeleton (so it doesn't stop); Steam Link's controllers only exist and track
+// while real controllers are in use. Hand over after 0.3 s without a skeleton, confirmed for 0.2 s.
+void ServerProvider::UpdateHandoff(const vr::TrackedDevicePose_t* poses, const TapHandSnapshot tap[2], double now) {
+    for (int h = 0; h < 2; ++h) {
+        if (!m_controller[h]) continue;
+        const char* serial = m_controller[h]->Serial().c_str();
+        if (!m_yieldSetting || !m_active) {
+            if (m_yield[h]) DriverLog("[%s] taking the hand back (yield_to_controllers or active changed)\n", serial);
+            m_yield[h] = false;
+            m_yieldSince[h] = m_returnSince[h] = -1;
+            continue;
+        }
+        if (!m_yield[h]) {
+            bool controllerTracked = false;
+            for (const OtherController& o : m_others) {
+                const vr::TrackedDevicePose_t& p = poses[o.index];
+                if (o.hand == h && p.bDeviceIsConnected && p.bPoseIsValid &&
+                    p.eTrackingResult == vr::TrackingResult_Running_OK)
+                    controllerTracked = true;
+            }
+            const bool handLost = tap[h].skeletonAge > 0.3;
+            if (!(handLost && controllerTracked)) m_yieldSince[h] = -1;
+            else if (m_yieldSince[h] < 0) m_yieldSince[h] = now;
+            if (m_yieldSince[h] >= 0 && now - m_yieldSince[h] >= 0.2) {
+                m_yield[h] = true;
+                m_returnSince[h] = -1;
+                DriverLog("[%s] hand tracking stopped and a controller is tracked: releasing the hand to it\n",
+                          serial);
+            }
+        } else {
+            const bool handLive = tap[h].poseValid && tap[h].skeletonAge < 0.25;
+            if (!handLive) m_returnSince[h] = -1;
+            else if (m_returnSince[h] < 0) m_returnSince[h] = now;
+            if (m_returnSince[h] >= 0 && now - m_returnSince[h] >= 0.3) {
+                m_yield[h] = false;
+                m_yieldSince[h] = -1;
+                DriverLog("[%s] hand tracking is back: taking the hand again\n", serial);
+            }
+        }
+    }
+}
+
+// While CyberFinger holds a hand, the other controllers for it are left without a role, and apps show them
+// anyway: Resonite maps role-less controllers as trackers and draws them on the hands, or registers them as its
+// hands instead. Marked Prop_NeverTracked, they are skipped (Resonite checks it when a device connects). Shown
+// again when CyberFinger lets go of the hand. Frame loop, after ScanOtherControllers.
+void ServerProvider::UpdateHiddenControllers(const bool hide[2]) {
+    vr::CVRPropertyHelpers* props = vr::VRProperties();
+    std::set<vr::PropertyContainerHandle_t> want;
+    for (const OtherController& o : m_others)
+        if (hide[o.hand]) want.insert(o.container);
+    for (const vr::PropertyContainerHandle_t c : want) {
+        if (m_hidden.count(c) || m_hideRefused.count(c)) continue;
+        const vr::ETrackedPropertyError err = props->SetBoolProperty(c, vr::Prop_NeverTracked_Bool, true);
+        const std::string serial = props->GetStringProperty(c, vr::Prop_SerialNumber_String);
+        const std::string type = props->GetStringProperty(c, vr::Prop_ControllerType_String);
+        if (err == vr::TrackedProp_Success) {
+            m_hidden.insert(c);
+            DriverLog("Hiding %s (%s) from apps while CyberFinger holds its hand (never tracked)\n", serial.c_str(),
+                      type.c_str());
+        } else {
+            m_hideRefused.insert(c);
+            DriverLog("Could not hide %s (%s): property error %d\n", serial.c_str(), type.c_str(), int(err));
+        }
+    }
+    for (auto it = m_hidden.begin(); it != m_hidden.end();) {
+        if (want.count(*it)) { ++it; continue; }
+        props->EraseProperty(*it, vr::Prop_NeverTracked_Bool);
+        DriverLog("Showing %s to apps again\n", props->GetStringProperty(*it, vr::Prop_SerialNumber_String).c_str());
+        it = m_hidden.erase(it);
+    }
+}
+
+void ServerProvider::RestoreHiddenControllers() {
+    for (const vr::PropertyContainerHandle_t c : m_hidden) vr::VRProperties()->EraseProperty(c, vr::Prop_NeverTracked_Bool);
+    m_hidden.clear();
+}
+
+// %LOCALAPPDATA%\CyberFinger\capture_request.txt (content: seconds) starts a capture of the headset hands'
+// raw updates into %LOCALAPPDATA%\CyberFinger\captures\ (tools/analyze_tap_capture.py writes the request).
+// A debugging tool: only with the setting debug_captures on.
+void ServerProvider::PollCaptureRequest() {
+    const char* base = std::getenv("LOCALAPPDATA");
+    if (!m_tapEnabled || !base) return;
+    const std::string dir = std::string(base) + "\\CyberFinger";
+    const std::string request = dir + "\\capture_request.txt";
+    std::FILE* f = std::fopen(request.c_str(), "r");
+    if (!f) return;
+    double seconds = 10;
+    if (std::fscanf(f, "%lf", &seconds) != 1 || seconds <= 0 || seconds > 120) seconds = 10;
+    std::fclose(f);
+    std::remove(request.c_str());
+    if (!SettingBool("debug_captures", false)) {
+        DriverLog("Capture request ignored: turn on 'Debug captures' (debug_captures) in the CyberFinger settings\n");
+        return;
+    }
+    const std::time_t now = std::time(nullptr);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", std::localtime(&now));
+    std::string path = dir + "\\captures";
+    CreateDirectoryA(path.c_str(), nullptr);
+    path += std::string("\\tap_") + stamp + ".csv";
+    m_tap->StartCapture(seconds, path);
+}
+
+// An application asked one of our hands to vibrate: pass it to the bridge, which drives the glove.
+void ServerProvider::OnHaptic(const vr::VREvent_HapticVibration_t& hv) {
+    for (int hand = 0; hand < 2; ++hand) {
+        if (!m_controller[hand] || m_controller[hand]->HapticHandle() != hv.componentHandle) continue;
+        m_link.SendHaptic(hand, hv.fDurationSeconds, hv.fFrequency, hv.fAmplitude);
+        if (!m_loggedHaptic[hand]) {
+            m_loggedHaptic[hand] = true;
+            DriverLog("[%s] first haptic event: %.3f s, %.0f Hz, amplitude %.2f\n", m_controller[hand]->Serial().c_str(),
+                      hv.fDurationSeconds, hv.fFrequency, hv.fAmplitude);
+        }
+    }
+}
+
+void ServerProvider::SendContext(const vr::TrackedDevicePose_t* poses, const TapHandSnapshot tap[2], double now) {
+    ContextPacket pkt{};
+    pkt.h.magic = kMagicContext;
+    pkt.h.version = kVersion;
+    pkt.h.hand = 0xFF;
+    pkt.h.flags = (m_tapEnabled && m_tap->Capturing()) ? kCtxCapturing : 0;   // the bridge then sends CFIM
+    pkt.h.seq = ++m_contextSeq;
+    pkt.h.t_send_us = NowMicros();
+
+    const vr::TrackedDevicePose_t& hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
+    pkt.hmd_valid = hmd.bPoseIsValid && hmd.bDeviceIsConnected;
+    ToFloats(XformFromMatrix(hmd.mDeviceToAbsoluteTracking), pkt.hmd_pos, pkt.hmd_rot);
+    for (int i = 0; i < 3; ++i) {
+        pkt.hmd_lin_vel[i] = hmd.vVelocity.v[i];
+        pkt.hmd_ang_vel[i] = hmd.vAngularVelocity.v[i];
+    }
+    pkt.mode_left = m_controller[0] ? m_controller[0]->Mode() : 0;
+    pkt.mode_right = m_controller[1] ? m_controller[1]->Mode() : 0;
+    pkt.tap_hook_ok = m_tap->HooksActive() ? 1 : 0;
+
+    for (int hand = 0; hand < 2; ++hand) {
+        pkt.applied_hs_seq[hand] = m_controller[hand] ? m_controller[hand]->AppliedSeq() : 0;
+        const TapHandSnapshot& s = tap[hand];
+        TapHand& t = pkt.tap[hand];
+        t.pose_valid = s.poseValid;
+        t.skel_valid = s.skeletonValid;
+        t.tracking_result = s.trackingResult;
+        t.bone_count = uint8_t(std::min<uint32_t>(s.boneCount, 255));
+        t.system_click = s.systemClick;
+        t.source_found = s.sourceFound;
+        t.skel_age_us = uint32_t(std::min(s.skeletonAge, 4000.0) * 1e6);
+        ToFloats(s.rawPose, t.raw_pos, t.raw_rot);
+        t.lin_vel[0] = float(s.linVel.x); t.lin_vel[1] = float(s.linVel.y); t.lin_vel[2] = float(s.linVel.z);
+        t.ang_vel[0] = float(s.angVel.x); t.ang_vel[1] = float(s.angVel.y); t.ang_vel[2] = float(s.angVel.z);
+        std::memcpy(t.bones, s.bones, sizeof(t.bones));
+    }
+    (void)now;
+    m_link.SendContext(pkt);
+}
+
+void ServerProvider::LogStatus(const TapHandSnapshot tap[2], double now) {
+    // Update rates: the headset hand's (pose/skeleton per second) and what we republished from them.
+    const double dt = now - m_lastStatus;
+    m_lastStatus = now;
+    for (int hand = 0; hand < 2; ++hand) {
+        const OpticalTap::Rates src = m_tap->TakeRates(dt, hand);
+        const auto& c = m_controller[hand];
+        if (!c) continue;
+        double ourPose = 0, ourSkel = 0;
+        c->TakeEventRates(dt, ourPose, ourSkel);
+        const OpticalTap::Noise noise = m_tap->TakeNoise(hand);
+        char still[96] = "held still: -";
+        if (noise.windows > 0)
+            std::snprintf(still, sizeof(still), "held still %d s: wrist %.1f, tips %.1f, fingers %.1f mm",
+                          noise.windows, noise.wrist * 1e3, noise.tips * 1e3, noise.fingers * 1e3);
+        const GloveState g = m_link.Glove(hand);
+        const HandStateSample f = m_link.HandState(hand);
+        DriverLog("[%s] status: mode=%u%s tap(src=%s pose=%d skel=%d bones=%u age=%.2fs sys=%d) "
+                  "rates(src %.0f/%.0f Hz, new data %.0f/%.0f Hz, republished %.0f/%.0f Hz) noise(%s) glove=%s fused=%s\n",
+                  c->Serial().c_str(), unsigned(c->Mode()), c->Following() ? " (event)" : "",
+                  tap[hand].serial.empty() ? "-" : tap[hand].serial.c_str(), int(tap[hand].poseValid),
+                  int(tap[hand].skeletonValid), tap[hand].boneCount, std::min(tap[hand].skeletonAge, 999.0),
+                  int(tap[hand].systemClick), src.pose, src.skeleton, src.poseNew, src.skeletonNew, ourPose, ourSkel, still,
+                  g.valid ? (now - g.time < 0.5 ? "live" : "stale") : "none",
+                  f.valid ? (now - f.arrival < 0.5 ? "live" : "stale") : "none");
+    }
+}
+
+} // namespace cf

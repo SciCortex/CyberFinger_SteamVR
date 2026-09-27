@@ -18,6 +18,10 @@ import queue
 import json
 import math
 import csv
+import cf_protocol                                   # SteamVR driver wire protocol (CFG2 glove packets)
+import glove_report                                  # the glove's BLE input report, every firmware revision
+from driver_link import DriverLink                   # driver → bridge: haptic requests, driver status
+from haptics_view import describe as describe_haptic, draw_haptic_meter
 try:
     import key_postures                              # Key Postures tab: EMG + tilt recogniser for a few fixed postures
 except Exception:                                    # noqa: BLE001
@@ -120,17 +124,7 @@ except Exception:
     _ocal = None                      # a T3 failure disables ONLY the Live Calib tab, never core fusion
 VR_SERVICE_UUID = "0000cf00-0000-1000-8000-00805f9b34fb"
 VR_INPUT_UUID   = "0000cf01-0000-1000-8000-00805f9b34fb"
-GAMEPAD_MAGIC    = 0x50474643
-GAMEPAD_PACK_FMT = "<IBBhhBB"
-INPUT_REPORT_FMT = "<BBhhBBI"
-INPUT_REPORT_SIZE = struct.calcsize(INPUT_REPORT_FMT)
-INPUT_REPORT_IMU_FMT = "<BBhhBBI4f"
-INPUT_REPORT_IMU_SIZE = struct.calcsize(INPUT_REPORT_IMU_FMT)
-INPUT_REPORT_MULTI_FMT = "<BBhhBBI4fB4f4f"
-INPUT_REPORT_MULTI_SIZE = struct.calcsize(INPUT_REPORT_MULTI_FMT)
-ACCEL_TAIL_FMT = "<9h"
-ACCEL_TAIL_SIZE = struct.calcsize(ACCEL_TAIL_FMT)
-INPUT_REPORT_ACCEL_SIZE = INPUT_REPORT_MULTI_SIZE + ACCEL_TAIL_SIZE
+INPUT_REPORT_SIZE = glove_report.BASE.size   # shortest valid report; layouts in glove_report.py
 ZERO_ACCEL = (0, 0, 0)
 ACCEL_LSB_PER_G = 2048.0  # VR_ACCEL_LSB_PER_G — ±16g on every sensor
 GRAVITY_MS2 = 9.80665
@@ -333,6 +327,8 @@ class HandState:
         self.accel = ZERO_ACCEL
         self.accel_body2 = ZERO_ACCEL
         self.accel_joint = ZERO_ACCEL
+        self.rx_perf = 0.0       # time.perf_counter() when the latest report arrived
+        self.report_seq = 0      # the latest report's own sequence number
 
     def _joy_deadzoned(self):
         """Raw stick as (x, y) in [-1, 1] with a RADIAL deadzone: magnitudes within
@@ -604,43 +600,13 @@ class BLEManager:
     def _handle_data(self, data):
         if len(data) < INPUT_REPORT_SIZE:
             return
+        t_rx = time.perf_counter()
 
-        # Each revision is a strict prefix of the next, so decode with the
-        # widest layout this payload can satisfy and leave the rest at defaults.
-        present = 0
-        quats = (IDENTITY_QUAT, IDENTITY_QUAT, IDENTITY_QUAT)
-        accels = (ZERO_ACCEL, ZERO_ACCEL, ZERO_ACCEL)
-        has_accel = False
-
-        if len(data) >= INPUT_REPORT_MULTI_SIZE:
-            (hand, buttons, joy_x, joy_y, trigger, battery, seq,
-             q1w, q1x, q1y, q1z,
-             present,
-             q2w, q2x, q2y, q2z,
-             q3w, q3x, q3y, q3z) = struct.unpack(
-                INPUT_REPORT_MULTI_FMT, data[:INPUT_REPORT_MULTI_SIZE])
-            quats = ((q1w, q1x, q1y, q1z),
-                     (q2w, q2x, q2y, q2z),
-                     (q3w, q3x, q3y, q3z))
-
-            if len(data) >= INPUT_REPORT_ACCEL_SIZE:
-                a = struct.unpack(ACCEL_TAIL_FMT,
-                                  data[INPUT_REPORT_MULTI_SIZE:INPUT_REPORT_ACCEL_SIZE])
-                accels = (a[0:3], a[3:6], a[6:9])
-                has_accel = True
-
-        elif len(data) >= INPUT_REPORT_IMU_SIZE:
-            hand, buttons, joy_x, joy_y, trigger, battery, seq, qw, qx, qy, qz = \
-                struct.unpack(INPUT_REPORT_IMU_FMT, data[:INPUT_REPORT_IMU_SIZE])
-            # This revision has no presence bitmask. An all-zero quaternion is
-            # the only signal that the IMU failed to come up.
-            if any(abs(v) > 1e-6 for v in (qw, qx, qy, qz)):
-                present = IMU_BODY_PRIMARY
-                quats = ((qw, qx, qy, qz), IDENTITY_QUAT, IDENTITY_QUAT)
-
-        else:
-            hand, buttons, joy_x, joy_y, trigger, battery, seq = \
-                struct.unpack(INPUT_REPORT_FMT, data[:INPUT_REPORT_SIZE])
+        # Every firmware revision's layout, including v1.3's variable-length IMU tail (glove_report.py).
+        r = glove_report.decode(data)
+        hand, buttons, joy_x, joy_y, trigger, battery, seq = (
+            r.hand, r.buttons, r.joy_x, r.joy_y, r.trigger, r.battery, r.seq)
+        present, quats, accels, has_accel = r.present, r.quats, r.accels, r.has_accel
 
         h = min(hand, 1)
         state = self.left if h == 0 else self.right
@@ -653,6 +619,8 @@ class BLEManager:
         state.quat, state.quat_body2, state.quat_joint = quats
         state.has_accel = has_accel
         state.accel, state.accel_body2, state.accel_joint = accels
+        state.rx_perf = t_rx
+        state.report_seq = seq
 
         old_buttons = state.buttons
         state.buttons = buttons
@@ -871,17 +839,31 @@ class BLEManager:
 
 
 class VRMode:
-    def __init__(self, port=27015):
+    """Glove → SteamVR driver: one CFG2 packet per BLE report (see cf_protocol.py), plus the raw IMU slots
+    (CFIM) while the driver records a capture (`capturing()`, from the driver link)."""
+
+    def __init__(self, port=cf_protocol.DRIVER_PORT, capturing=None):
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.target = ("127.0.0.1", port)
+        self.seq = [0, 0]
+        self.capturing = capturing or (lambda: False)
 
     def on_input(self, hand, state):
-        pkt = struct.pack(GAMEPAD_PACK_FMT,
-                          GAMEPAD_MAGIC, hand, state.buttons,
-                          state.joy_x, state.joy_y, state.trigger, state.battery)
+        # Stick: centred + radial deadzone here; the firmware's +y is down, CFG2's is up.
+        jx, jy = state._joy_deadzoned()
+        joy_x, joy_y = cf_protocol.stick_to_int16(jx, -jy)
+        self.seq[hand] += 1
+        pkt = cf_protocol.pack_glove(hand, self.seq[hand], state.buttons, state.trigger,
+                                     joy_x, joy_y, state.battery)
         try:
             self.sock.sendto(pkt, self.target)
+            if self.capturing():
+                age_us = (time.perf_counter() - state.rx_perf) * 1e6 if state.rx_perf else 0
+                self.sock.sendto(cf_protocol.pack_imu(
+                    hand, state.report_seq, state.imu_present, (state.quat, state.quat_body2, state.quat_joint),
+                    (state.accel, state.accel_body2, state.accel_joint) if state.has_accel else None,
+                    age_us=age_us), self.target)
         except Exception:
             pass
 
@@ -2205,10 +2187,12 @@ class FusionStudioApp:
         self._config_path = os.path.join(self._config_dir, "settings.json")
         self._config = self._load_config()
         self.ble = BLEManager(self)
-        self.vr_mode = VRMode()
+        self.vr_mode = VRMode(capturing=self._driver_capturing)
         self.gamepad_mode = None         # created lazily on first use
         self.vrchat_gamepad_mode = None  # created lazily on first use
         self.active_mode = None
+        self.driver_link = None          # listens for the driver's haptic requests while the glove link runs
+        self._haptic_logged = [False, False]
         self.slimevr = None              # created lazily while forwarding is on
         self.imu_logger = None           # ImuLogger while "Log IMU (CSV)" is on
         self.skeleton = (create_skeleton_source(
@@ -2813,16 +2797,21 @@ class FusionStudioApp:
 
     def _glove_slot_quat(self, state, slot):
         """Glove quaternion for a slot name (body1|body2|joint), or None if that
-        IMU isn't present on the hand."""
-        m = {"body1": (IMU_BODY_PRIMARY, "quat"),
-             "body2": (IMU_BODY_SECONDARY, "quat_body2"),
-             "joint": (IMU_JOINT, "quat_joint")}.get(slot)
-        if state is None or m is None:
+        IMU isn't present on the hand. Body 1 and Body 2 are two chips at the same
+        spot (see SlimeVRForwarder._body_slot): asking for one that isn't fitted
+        gives the other."""
+        slots = {"body1": (IMU_BODY_PRIMARY, "quat"),
+                 "body2": (IMU_BODY_SECONDARY, "quat_body2"),
+                 "joint": (IMU_JOINT, "quat_joint")}
+        if state is None or slot not in slots:
             return None
-        bit, attr = m
-        if not (getattr(state, "imu_present", 0) & bit):
-            return None
-        return getattr(state, attr, None)
+        order = {"body1": ("body1", "body2"), "body2": ("body2", "body1")}.get(slot, (slot,))
+        present = getattr(state, "imu_present", 0)
+        for s in order:
+            bit, attr = slots[s]
+            if present & bit:
+                return getattr(state, attr, None)
+        return None
 
     def _optical_local(self, wj, right):
         """26-joint optical hand in ITS OWN frame R_opt (wrist-relative, de-rotated),
@@ -3693,6 +3682,8 @@ class FusionStudioApp:
 
         if self.slimevr_var.get():
             self._start_slimevr()
+        if self.active_mode is self.vr_mode:
+            self._start_driver_link()
 
         self.start_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.NORMAL)
@@ -3709,6 +3700,7 @@ class FusionStudioApp:
             self.active_mode.stop()
         self.active_mode = None
         self._stop_slimevr()
+        self._stop_driver_link()
 
         self.start_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.DISABLED)
@@ -3721,8 +3713,49 @@ class FusionStudioApp:
 
         # Recreate for next start
         self.ble = BLEManager(self)
+        self.vr_mode = VRMode(capturing=self._driver_capturing)   # stop() closed its socket
         self.gamepad_mode = None         # recreated lazily on next start
         self.vrchat_gamepad_mode = None  # recreated lazily on next start
+
+    def _start_driver_link(self):
+        if self.driver_link is None:
+            self.driver_link = DriverLink(on_haptic=self._on_haptic, log=self.log)
+        self.driver_link.start()
+
+    def _stop_driver_link(self):
+        if self.driver_link is not None:
+            self.driver_link.stop()
+            self.driver_link = None
+
+    def _driver_capturing(self):
+        """BLE thread: is the SteamVR driver recording a capture (tools/analyze_tap_capture.py --capture)?"""
+        link = self.driver_link
+        return link is not None and link.capturing
+
+    def _on_haptic(self, h):
+        """Driver-link thread: an app asked a hand to vibrate. The top bar shows it; this is also where the
+        request will be written to the glove over GATT once the firmware has an actuator."""
+        hand = h["hand"]
+        if not self._haptic_logged[hand]:
+            self._haptic_logged[hand] = True
+            st = {"count": 1, "duration": h["duration_s"], "frequency": h["frequency_hz"], "amplitude": h["amplitude"]}
+            self.log(f"Haptics: first request for the {'right' if hand else 'left'} hand ({describe_haptic(st)})")
+
+    def _draw_haptics(self):
+        """Top-bar haptics indicator, one row per hand (blank until the glove link runs)."""
+        c = getattr(self, "haptic_canvas", None)
+        if c is None:
+            return
+        c.delete("all")
+        if self.driver_link is None:
+            c.create_text(4, 18, text="haptics: start the glove link", fill=COLOR_FG_DIM, font=("Consolas", 8), anchor=tk.W)
+            return
+        now = time.perf_counter()
+        w = int(c.cget("width"))
+        for hand, label in ((0, "L"), (1, "R")):
+            draw_haptic_meter(c, 2, 2 + hand * 17, w - 4, 15, self.driver_link.haptics.state(hand, now), now,
+                              label=label, accent=COLOR_ACCENT, bg=COLOR_BG, dim=COLOR_FG_DIM, fg=COLOR_FG,
+                              line=COLOR_BG3, text_w=150)
 
     def on_input(self, hand, state):
         """Called from BLE thread on each input report."""
@@ -3787,6 +3820,8 @@ class FusionStudioApp:
         ttk.Label(g, text="GLOVE (BLE → SteamVR)", style="Status.TLabel").pack(side=tk.LEFT, padx=(0, 6))
         self.start_btn = ttk.Button(g, text="▶ Start glove", style="Accent.TButton", command=self._start_bridge); self.start_btn.pack(side=tk.LEFT)
         self.stop_btn = ttk.Button(g, text="■ Stop", style="Stop.TButton", command=self._stop_bridge, state=tk.DISABLED); self.stop_btn.pack(side=tk.LEFT, padx=(4, 0))
+        self.haptic_canvas = tk.Canvas(g, width=280, height=36, bg=COLOR_BG, highlightthickness=0)
+        self.haptic_canvas.pack(side=tk.LEFT, padx=(8, 0))
         e = ttk.Frame(src_bar); e.pack(side=tk.LEFT, padx=(0, 18))
         ttk.Label(e, text="EMG ARMBAND (MindRove)", style="Status.TLabel").pack(side=tk.LEFT, padx=(0, 6))
         self.emg_btn = ttk.Button(e, text="▶ Start EMG", style="Accent.TButton", command=self._toggle_armband); self.emg_btn.pack(side=tk.LEFT)
@@ -3892,6 +3927,7 @@ class FusionStudioApp:
             src = self.skeleton
         self._update_gate_tab(src)
         self._st_tick(src)
+        self._draw_haptics()
         if getattr(self, "armband", None) is not None:
             self.armband.tick()
             self._push_hand_imu()

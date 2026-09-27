@@ -1,0 +1,330 @@
+# SPDX-FileCopyrightText: 2026 DrSciCortex
+#
+# SPDX-License-Identifier: GPL-3.0-only
+
+"""Generate the default SteamVR bindings shipped with the CyberFinger driver.
+
+    python tools/generate_bindings.py [--steam "C:/Program Files (x86)/Steam"]
+
+Writes into resources/input/:
+
+  bindings/steam.app.438100_cyberfinger.json   VRChat   — derived from VRChat's own Touch binding
+  bindings/steam.app.2519830_cyberfinger.json  Resonite — its "Generic" action set (unknown controllers)
+  bindings/vrcompositor_cyberfinger.json       SteamVR dashboard — derived from SteamVR's Index binding
+  legacy_bindings_cyberfinger.json             legacy-input apps, emulating an Index controller
+
+The CyberFinger has, per hand: push-stick (+click), analog trigger (primary), grip button (grab),
+B = MENU (the context / rotary-dial button), A = Start/Select, and C/D/E. No touchpad, no capacitive touch.
+Derived bindings therefore drop touch inputs, trackpad sources and VRChat's gesture activators.
+
+The driver also exposes the standard hand-tracking gestures (index/middle/ring/pinky pinch, grasp, index
+point). They stay unbound, except the thumb-pinky pinch, which every binding here maps like B (MENU).
+
+In the VRChat and Resonite defaults, grab comes from /input/grab: the grip with the driver's tap to hold
+(a press shorter than grab_tap_ms holds until the next press, a longer one grabs while held). Binding
+/input/grip instead gives the plain button.
+
+The VRChat binding carries no emulation options: VRChat treats controller emulation as unsupported. The
+Resonite binding emulates an Oculus Touch controller, so Resonite always runs in its Touch mode with CyberFinger
+(its only mode with a dash button), whatever the streamer; the driver hides the streamers' own emulated Touch
+controllers (hide_other_hand_controllers), which Resonite would otherwise register instead or show as
+trackers. It fills Resonite's Generic set as well (the hand pose comes from there in every mode), each set with
+the skeletons: without them Resonite draws rigid canned hands. Re-run after an app update changes its manifest.
+"""
+
+import argparse
+import copy
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+OUT = os.path.join(os.path.dirname(HERE), "resources", "input")
+HANDS = ("left", "right")
+
+
+def load(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def save(obj, rel):
+    path = os.path.join(OUT, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(obj, f, indent=2)
+        f.write("\n")
+    print("wrote", os.path.relpath(path, os.path.dirname(HERE)))
+
+
+def header(app_key, name, description, options=None):
+    return {
+        "action_manifest_version": 0,
+        "alias_info": {},
+        "app_key": app_key,
+        "bindings": {},
+        "category": "steamvr_input",
+        "controller_type": "cyberfinger",
+        "description": description,
+        "interaction_profile": "",
+        "name": name,
+        "options": options or {},
+        "simulated_actions": [],
+    }
+
+
+def convert(binding, path_map, drop_output=lambda out: False):
+    """Re-target a binding file onto CyberFinger components.
+
+    path_map(path) returns the CyberFinger path, or None to drop the source. Touch inputs are removed
+    (the glove has no capacitive sensors); sources left without inputs disappear, as do chords that
+    reference a dropped component or a touch input.
+    """
+    out = {}
+    for aset, sec in binding.get("bindings", {}).items():
+        new = {}
+        sources = []
+        for src in sec.get("sources", []):
+            path = path_map(src["path"])
+            if path is None:
+                continue
+            inputs = {k: v for k, v in src.get("inputs", {}).items()
+                      if k != "touch" and not drop_output(v.get("output", ""))}
+            if not inputs and src.get("inputs"):
+                continue
+            s = copy.deepcopy(src)
+            s["path"] = path
+            s["inputs"] = inputs
+            sources.append(s)
+        if sources:
+            new["sources"] = sources
+        for kind in ("poses", "skeleton", "haptics"):
+            items = []
+            for item in sec.get(kind, []):
+                path = path_map(item["path"])
+                if path is not None and not drop_output(item.get("output", "")):
+                    items.append(dict(item, path=path))
+            if items:
+                new[kind] = items
+        chords = []
+        for chord in sec.get("chords", []):
+            if drop_output(chord.get("output", "")):
+                continue
+            ins = []
+            for path, how in chord["inputs"]:
+                mapped = path_map(path)
+                if mapped is None or how == "touch":
+                    ins = None
+                    break
+                ins.append([mapped, how])
+            if ins:
+                chords.append({"inputs": ins, "output": chord["output"]})
+        if chords:
+            new["chords"] = chords
+        if new:
+            out[aset] = new
+    return out
+
+
+PINKY_PINCH_CLICK = {"click_activate_threshold": "0.75", "click_deactivate_threshold": "0.5"}
+
+
+def mirror_menu_to_pinky(bindings):
+    """Give the thumb-pinky pinch the same actions as B (MENU), on both hands."""
+    for sec in bindings.values():
+        extra = []
+        for src in sec.get("sources", []):
+            parts = src["path"].split("/")
+            if len(parts) == 6 and parts[5] == "b" and src["mode"] == "button":
+                s = copy.deepcopy(src)
+                s["path"] = "/".join(parts[:5] + ["pinky_pinch"])
+                s["parameters"] = dict(src.get("parameters", {}), **PINKY_PINCH_CLICK)
+                extra.append(s)
+        sec.get("sources", []).extend(extra)
+    return bindings
+
+
+def tap_to_hold_grab(bindings, outputs):
+    """Bind these grab actions to /input/grab, the grip with the driver's tap to hold."""
+    for sec in bindings.values():
+        for src in sec.get("sources", []):
+            if (src["path"].endswith("/input/grip") and src["mode"] == "button"
+                    and src["inputs"].get("click", {}).get("output", "").lower() in outputs):
+                src["path"] = src["path"][:-len("grip")] + "grab"
+                src.pop("parameters", None)          # analog thresholds; /input/grab is a plain button
+    return bindings
+
+
+def touch_to_cyberfinger(path):
+    """Oculus Touch component paths → CyberFinger (left X/Y and right A/B both become a/b)."""
+    parts = path.split("/")          # ['', 'user', 'hand', side, 'input', component, ...]
+    if len(parts) < 6 or parts[1:3] != ["user", "hand"]:
+        return path
+    comp = parts[5]
+    comp = {"joystick": "thumbstick", "x": "a", "y": "b"}.get(comp, comp)
+    if comp in ("thumbrest",):
+        return None
+    parts[5] = comp
+    return "/".join(parts)
+
+
+def index_to_cyberfinger(path):
+    """Index controller paths → CyberFinger (identical names; no trackpad)."""
+    parts = path.split("/")
+    if len(parts) >= 6 and parts[1:3] == ["user", "hand"] and parts[5] in ("trackpad", "pinch"):
+        return None
+    return path
+
+
+def vrchat(steam):
+    src = os.path.join(steam, "steamapps", "common", "VRChat", "VRChat_Data", "StreamingAssets",
+                       "SteamVR", "bindings_oculus_touch.json")
+    touch = load(src)
+    b = header("steam.app.438100", "CyberFinger defaults for VRChat",
+               "Derived from VRChat's Touch binding. MENU = B/Y (tap: quick menu, hold: action menu), "
+               "Start/Select = A/X; the thumb-pinky pinch acts like MENU. Grab: a quick tap of the grip holds "
+               "until the next press, a longer press grabs while held. C/D/E and the other hand gestures are "
+               "left free for the user.")
+    b["bindings"] = mirror_menu_to_pinky(
+        convert(touch, touch_to_cyberfinger, drop_output=lambda o: "gesture" in o.lower()))
+    tap_to_hold_grab(b["bindings"], {"/actions/global/in/grab", "/actions/one_hand/in/grab"})
+    save(b, "bindings/steam.app.438100_cyberfinger.json")
+
+
+def resonite():
+    b = header("steam.app.2519830", "CyberFinger defaults for Resonite",
+               "Emulates an Oculus Touch controller: Resonite's Touch mode, the one with a dash button. Black "
+               "button (Start/Select): dash. MENU (and the thumb-pinky pinch): context menu. Grab: a quick tap "
+               "of the grip holds until the next press, a longer press grabs while held. Precision grab is "
+               "implemented in Resonite from the skeleton.",
+               options={"simulated_controller_type": "oculus_touch", "simulate_rendermodel": "full"})
+    sources = []
+    for h in HANDS:
+        sources += [
+            {"path": f"/user/hand/{h}/input/trigger", "mode": "trigger",
+             "inputs": {"click": {"output": "/actions/generic/in/actionprimary"},
+                        "pull": {"output": "/actions/generic/in/strength"}}},
+            {"path": f"/user/hand/{h}/input/thumbstick", "mode": "joystick",
+             "inputs": {"click": {"output": "/actions/generic/in/actionsecondary"},
+                        "position": {"output": "/actions/generic/in/axis"}}},
+            {"path": f"/user/hand/{h}/input/grab", "mode": "button",
+             "inputs": {"click": {"output": "/actions/generic/in/actiongrab"}}},
+            {"path": f"/user/hand/{h}/input/b", "mode": "button",
+             "inputs": {"click": {"output": "/actions/generic/in/actionmenu"}}},
+        ]
+    b["bindings"]["/actions/generic"] = {
+        "sources": sources,
+        "poses": [{"path": f"/user/hand/{h}/pose/raw", "output": "/actions/generic/in/pose"} for h in HANDS],
+        "skeleton": [{"path": "/user/hand/left/input/skeleton/left", "output": "/actions/generic/in/lefthand"},
+                     {"path": "/user/hand/right/input/skeleton/right", "output": "/actions/generic/in/righthand"}],
+        "haptics": [{"path": f"/user/hand/{h}/output/haptic", "output": "/actions/generic/out/haptic"} for h in HANDS],
+    }
+    # Resonite's OculusTouch set: Resonite picks its controller mode from the render model of the devices it
+    # registers as hands, and the emulation above shows CyberFinger to it as a Touch controller. Without the
+    # skeletons here it draws rigid canned Touch hands. Its hand pose always comes from the Generic set's pose
+    # (the Touch offset it applies to that is undone for the hand). The black button (A) opens the dash.
+    touch = []
+    for h in HANDS:
+        touch += [
+            {"path": f"/user/hand/{h}/input/trigger", "mode": "trigger",
+             "inputs": {"click": {"output": "/actions/oculustouch/in/trigger_click"},
+                        "pull": {"output": "/actions/oculustouch/in/trigger"}}},
+            {"path": f"/user/hand/{h}/input/thumbstick", "mode": "joystick",
+             "inputs": {"click": {"output": "/actions/oculustouch/in/joystick_click"},
+                        "position": {"output": "/actions/oculustouch/in/joystick"}}},
+            {"path": f"/user/hand/{h}/input/grab", "mode": "button",
+             "inputs": {"click": {"output": "/actions/oculustouch/in/grip_click"}}},
+            {"path": f"/user/hand/{h}/input/a", "mode": "button",
+             "inputs": {"click": {"output": "/actions/oculustouch/in/button_xa"}}},
+            {"path": f"/user/hand/{h}/input/b", "mode": "button",
+             "inputs": {"click": {"output": "/actions/oculustouch/in/button_yb"}}},
+        ]
+    b["bindings"]["/actions/oculustouch"] = {
+        "sources": touch,
+        "poses": [{"path": f"/user/hand/{h}/pose/raw", "output": "/actions/oculustouch/in/pose"} for h in HANDS],
+        "skeleton": [{"path": "/user/hand/left/input/skeleton/left", "output": "/actions/oculustouch/in/left_hand"},
+                     {"path": "/user/hand/right/input/skeleton/right",
+                      "output": "/actions/oculustouch/in/right_hand"}],
+        "haptics": [{"path": f"/user/hand/{h}/output/haptic", "output": "/actions/oculustouch/out/haptic"}
+                    for h in HANDS],
+    }
+    mirror_menu_to_pinky(b["bindings"])
+    save(b, "bindings/steam.app.2519830_cyberfinger.json")
+
+
+def compositor(steam):
+    src = os.path.join(steam, "steamapps", "common", "SteamVR", "resources", "config",
+                       "vrcompositor_bindings_knuckles.json")
+    knuckles = load(src)
+    b = header("openvr.component.vrcompositor", "CyberFinger SteamVR dashboard bindings",
+               "Derived from SteamVR's Index dashboard binding. Trigger: click (a light press first locks the "
+               "laser, so the click lands where it points); grip: right click; stick: scroll, push = middle "
+               "click; B (MENU, and the thumb-pinky pinch): back; A (black button): home. The system button "
+               "(the Quest left-palm pinch, forwarded by the driver) toggles the dashboard; hold it to recenter.")
+    b["bindings"] = mirror_menu_to_pinky(convert(knuckles, index_to_cyberfinger))
+    # Index right-clicks with the trackpad, which the CyberFinger doesn't have: use the plain grip button
+    # (/input/grip, not /input/grab: a right click must not latch).
+    b["bindings"]["/actions/lasermouse"]["sources"] += [
+        {"path": f"/user/hand/{h}/input/grip", "mode": "button",
+         "inputs": {"click": {"output": "/actions/lasermouse/in/rightclick"}}} for h in HANDS]
+    save(b, "bindings/vrcompositor_cyberfinger.json")
+
+
+def legacy():
+    b = header("", "CyberFinger legacy bindings (Index emulation)",
+               "For apps using the legacy input API: presents CyberFinger as an Index controller.",
+               options={"mirror_actions": False, "simulated_controller_type": "knuckles",
+                        "simulate_rendermodel": True})
+    del b["app_key"]
+    sources = []
+    for h in HANDS:
+        H = h.capitalize()
+        sources += [
+            {"path": f"/user/hand/{h}/input/trigger", "mode": "trigger",
+             "inputs": {"pull": {"output": f"/actions/legacy/in/{H}_Axis1_Value"}}},
+            {"path": f"/user/hand/{h}/input/trigger", "mode": "button",
+             "parameters": {"click_activate_threshold": "0.55", "click_deactivate_threshold": "0.5",
+                            "haptic_amplitude": "0"},
+             "inputs": {"click": {"output": f"/actions/legacy/in/{H}_Axis1_Press"}}},
+            {"path": f"/user/hand/{h}/input/thumbstick", "mode": "joystick",
+             "inputs": {"position": {"output": f"/actions/legacy/in/{H}_Axis0_Value"},
+                        "click": {"output": f"/actions/legacy/in/{H}_Axis0_Press"}}},
+            {"path": f"/user/hand/{h}/input/grip", "mode": "trigger",
+             "inputs": {"pull": {"output": f"/actions/legacy/in/{H}_Axis2_Value1"}}},
+            {"path": f"/user/hand/{h}/input/grip", "mode": "button",
+             "inputs": {"click": {"output": f"/actions/legacy/in/{H}_Grip_Press"}}},
+            {"path": f"/user/hand/{h}/input/a", "mode": "button",
+             "inputs": {"click": {"output": f"/actions/legacy/in/{H}_A_Press"}}},
+            {"path": f"/user/hand/{h}/input/b", "mode": "button",
+             "inputs": {"click": {"output": f"/actions/legacy/in/{H}_ApplicationMenu_Press"}}},
+            {"path": f"/user/hand/{h}/input/system", "mode": "button",
+             "inputs": {"click": {"output": f"/actions/legacy/in/{H}_System_Press"}}},
+        ]
+    b["bindings"]["/actions/legacy"] = {
+        "sources": sources,
+        "poses": [{"path": f"/user/hand/{h}/pose/raw", "output": f"/actions/legacy/in/{h.capitalize()}_Pose"}
+                  for h in HANDS],
+        "haptics": [{"path": f"/user/hand/{h}/output/haptic", "output": f"/actions/legacy/out/{h.capitalize()}_Haptic"}
+                    for h in HANDS],
+    }
+    mirror_menu_to_pinky(b["bindings"])
+    save(b, "legacy_bindings_cyberfinger.json")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--steam", default=r"C:\Program Files (x86)\Steam", help="Steam install folder")
+    args = ap.parse_args(argv)
+    try:
+        vrchat(args.steam)
+        compositor(args.steam)
+    except FileNotFoundError as e:
+        print(f"missing source file: {e.filename}", file=sys.stderr)
+        return 1
+    resonite()
+    legacy()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

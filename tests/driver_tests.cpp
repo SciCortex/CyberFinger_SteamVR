@@ -1,0 +1,407 @@
+/*
+ * SPDX-FileCopyrightText: 2026 DrSciCortex
+ *
+ * SPDX-License-Identifier: GPL-3.0-only
+ */
+// ═══════════════════════════════════════════════════════════════════════════
+// driver_tests.cpp — checks that need no SteamVR runtime
+//
+//   driver_tests <tests/protocol_vectors.bin>
+//
+// 1. Wire protocol: parse the golden vectors written by bridge/cf_protocol.py.
+// 2. Skeleton synthesis (Valve sample port): unit quaternions, aux bones,
+//    handedness, mirror symmetry, curl estimates.
+// 3. PASSTHROUGH re-rooting keeps every joint where the headset put it, and
+//    the republished pose moves like the headset hand's.
+// 4. Grab, tap to hold.
+// ═══════════════════════════════════════════════════════════════════════════
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <vector>
+#include "BoneData.h"
+#include "MathUtil.h"
+#include "Protocol.h"
+#include "PoseFilter.h"
+#include "SkeletonSynth.h"
+#include "SpreadMeter.h"
+#include "TapHold.h"
+#include "Utils.h"
+
+using namespace cf;
+
+static int g_failures = 0;
+#define CHECK(cond)                                                              \
+    do {                                                                         \
+        if (!(cond)) {                                                           \
+            std::printf("FAIL %s:%d  %s\n", __FILE__, __LINE__, #cond);          \
+            ++g_failures;                                                        \
+        }                                                                        \
+    } while (0)
+#define CHECK_NEAR(a, b, tol) CHECK(std::fabs(double(a) - double(b)) <= (tol))
+
+static void TestProtocol(const char* path) {
+    std::ifstream f(path, std::ios::binary);
+    CHECK(bool(f));
+    if (!f) return;
+    std::vector<std::vector<uint8_t>> pkts;
+    uint32_t len;
+    while (f.read(reinterpret_cast<char*>(&len), 4)) {
+        std::vector<uint8_t> p(len);
+        f.read(reinterpret_cast<char*>(p.data()), len);
+        pkts.push_back(std::move(p));
+    }
+    CHECK(pkts.size() == 5);
+    if (pkts.size() != 5) return;
+
+    CHECK(pkts[0].size() == sizeof(GlovePacket));
+    GlovePacket g;
+    std::memcpy(&g, pkts[0].data(), sizeof(g));
+    CHECK(g.h.magic == kMagicGlove);
+    CHECK(g.h.version == kVersion);
+    CHECK(g.h.hand == 1);
+    CHECK(g.h.seq == 7);
+    CHECK(g.h.age_us == 5);
+    CHECK(g.buttons == (kBtnMenu | kBtnTrigger));
+    CHECK(g.trigger == 200);
+    CHECK(g.joy_x == -1000);
+    CHECK(g.joy_y == 32767);
+    CHECK(g.battery_pct == 88);
+
+    CHECK(pkts[1].size() == sizeof(HandStatePacket));
+    HandStatePacket hs;
+    std::memcpy(&hs, pkts[1].data(), sizeof(hs));
+    CHECK(hs.h.magic == kMagicHandState);
+    CHECK(hs.h.hand == 0);
+    CHECK(hs.h.seq == 42);
+    CHECK(hs.h.age_us == 1234);
+    CHECK(hs.h.flags == (kHsPoseValid | kHsHasBones | kHsCameraSees));
+    CHECK_NEAR(hs.raw_pos[1], 1.2, 1e-6);
+    CHECK_NEAR(hs.raw_rot[3], 0.5, 1e-6);
+    CHECK_NEAR(hs.ang_vel[2], -3, 1e-6);
+    CHECK_NEAR(hs.curl[4], 0.5, 1e-6);
+    CHECK_NEAR(hs.splay[0], -0.5, 1e-6);
+    CHECK(hs.optical_seq == 99);
+    CHECK(hs.key_posture == 3);
+    CHECK_NEAR(hs.bones[30].px, 0.3, 1e-6);
+    CHECK_NEAR(hs.bones[30].py, -0.6, 1e-6);
+    CHECK_NEAR(hs.bones[30].pw, 1.0, 1e-6);
+    CHECK_NEAR(hs.bones[30].qw, 1.0, 1e-6);
+
+    CHECK(pkts[2].size() == sizeof(ContextPacket));
+    ContextPacket c;
+    std::memcpy(&c, pkts[2].data(), sizeof(c));
+    CHECK(c.h.magic == kMagicContext);
+    CHECK(c.h.hand == 0xFF);
+    CHECK(c.h.seq == 5);
+    CHECK(c.h.flags == kCtxCapturing);
+    CHECK(c.hmd_valid == 1);
+    CHECK(c.mode_left == kModeFused);
+    CHECK(c.mode_right == kModePassthrough);
+    CHECK(c.tap_hook_ok == 1);
+    CHECK_NEAR(c.hmd_pos[1], 1.6, 1e-6);
+    CHECK_NEAR(c.hmd_rot[0], 1.0, 1e-6);
+    CHECK(c.applied_hs_seq[0] == 42);
+    CHECK(c.tap[1].pose_valid == 1);
+    CHECK(c.tap[1].tracking_result == 200);
+    CHECK(c.tap[1].bone_count == 31);
+    CHECK(c.tap[1].system_click == 1);
+    CHECK(c.tap[1].skel_age_us == 12345);
+    CHECK_NEAR(c.tap[1].raw_pos[2], -0.4, 1e-6);
+    CHECK_NEAR(c.tap[1].bones[5].pz, 0.125, 1e-6);
+
+    CHECK(pkts[3].size() == sizeof(HapticPacket));
+    HapticPacket hp;
+    std::memcpy(&hp, pkts[3].data(), sizeof(hp));
+    CHECK(hp.h.magic == kMagicHaptic);
+    CHECK(hp.h.hand == 1);
+    CHECK(hp.h.seq == 3);
+    CHECK_NEAR(hp.duration_s, 0.25, 1e-6);
+    CHECK_NEAR(hp.frequency_hz, 160.0, 1e-6);
+    CHECK_NEAR(hp.amplitude, 0.75, 1e-6);
+
+    CHECK(pkts[4].size() == sizeof(ImuPacket));
+    ImuPacket im;
+    std::memcpy(&im, pkts[4].data(), sizeof(im));
+    CHECK(im.h.magic == kMagicImu);
+    CHECK(im.h.hand == 0);
+    CHECK(im.h.seq == 1000);
+    CHECK(im.h.age_us == 4321);
+    CHECK(im.present == (kImuBody1 | kImuJoint));
+    CHECK(im.has_accel == 1);
+    CHECK_NEAR(im.quat[0][0], 1.0, 1e-6);
+    CHECK_NEAR(im.quat[2][1], -0.5, 1e-6);
+    CHECK_NEAR(im.quat[2][3], -0.5, 1e-6);
+    CHECK(im.accel[0][2] == 2048);
+    CHECK(im.accel[2][1] == 300);
+    CHECK(im.accel[2][2] == -2048);
+}
+
+static void TestGestures() {
+    CHECK_NEAR(PinchFromDistance(0.01), 1.0, 1e-6);
+    CHECK_NEAR(PinchFromDistance(0.04), 0.5, 1e-6);
+    CHECK_NEAR(PinchFromDistance(0.10), 0.0, 1e-6);
+
+    const float zero[5] = {}, fist[5] = { 1, 1, 1, 1, 1 }, point[5] = { 0.5f, 0, 1, 1, 1 };
+    vr::VRBoneTransform_t b[eBone_Count];
+    SynthesizeSkeleton(true, zero, zero, b);
+    const HandGestures open = GesturesFromBones(b);
+    CHECK(open.grasp < 0.2f);
+    CHECK(!open.indexPoint);
+    for (float p : open.pinch) CHECK(p < 0.5f);
+    SynthesizeSkeleton(true, fist, zero, b);
+    CHECK(GesturesFromBones(b).grasp > 0.8f);
+    SynthesizeSkeleton(true, point, zero, b);
+    CHECK(GesturesFromBones(b).indexPoint);
+}
+
+static double QuatNorm(const vr::HmdQuaternionf_t& q) {
+    return std::sqrt(double(q.w) * q.w + double(q.x) * q.x + double(q.y) * q.y + double(q.z) * q.z);
+}
+
+static void TestSynth() {
+    const float open[5] = {}, closed[5] = { 1, 1, 1, 1, 1 }, zero[5] = {};
+    vr::VRBoneTransform_t L[eBone_Count], R[eBone_Count], F[eBone_Count];
+    SynthesizeSkeleton(false, open, zero, L);
+    SynthesizeSkeleton(true, open, zero, R);
+    SynthesizeSkeleton(false, closed, zero, F);
+
+    for (int b = 0; b < eBone_Count; ++b) {
+        CHECK_NEAR(QuatNorm(L[b].orientation), 1.0, 1e-4);
+        CHECK_NEAR(QuatNorm(R[b].orientation), 1.0, 1e-4);
+        CHECK_NEAR(L[b].position.v[3], 1.0, 1e-6);
+    }
+    // Root is identity; the wrist is the Index-derived offset.
+    CHECK_NEAR(L[eBone_Root].orientation.w, 1.0, 1e-6);
+    CHECK_NEAR(L[eBone_Wrist].position.v[2], 0.164722, 1e-6);
+    CHECK_NEAR(R[eBone_Wrist].position.v[0], 0.034038, 1e-6);
+
+    // Aux bones mirror the last knuckle of each finger in model space.
+    Xform model[eBone_Count];
+    ModelSpace(L, model);
+    for (int f = 0; f < 5; ++f) {
+        const Xform aux = BoneToXform(L[eBone_Aux_Thumb + f]);
+        CHECK(Length(aux.p - model[kAuxSource[f]].p) < 1e-5);
+    }
+
+    // Handedness from bone layout.
+    CHECK(SkeletonHandedness(L, eBone_Count) == -1);
+    CHECK(SkeletonHandedness(R, eBone_Count) == +1);
+
+    // Mirror symmetry: right-hand model positions are the left's with X negated.
+    Xform ml[eBone_Count], mr[eBone_Count];
+    ModelSpace(L, ml);
+    ModelSpace(R, mr);
+    double worst = 0;
+    for (int b = 0; b <= eBone_PinkyFinger4; ++b) {
+        const Vec3 d = mr[b].p - Vec3{ -ml[b].p.x, ml[b].p.y, ml[b].p.z };
+        worst = std::fmax(worst, Length(d));
+    }
+    CHECK(worst < 1e-5);
+    if (worst >= 1e-5) std::printf("  mirror error %.6f m\n", worst);
+
+    // Curl estimates: open hand low, fist high.
+    float co[5], cc[5];
+    CurlsFromBones(L, co);
+    CurlsFromBones(F, cc);
+    for (int f = 1; f < 5; ++f) {
+        CHECK(co[f] < 0.2f);
+        CHECK(cc[f] > 0.8f);
+    }
+    CHECK(cc[0] > co[0]);
+    std::printf("  curls open  %.2f %.2f %.2f %.2f %.2f\n", co[0], co[1], co[2], co[3], co[4]);
+    std::printf("  curls fist  %.2f %.2f %.2f %.2f %.2f\n", cc[0], cc[1], cc[2], cc[3], cc[4]);
+}
+
+// PASSTHROUGH re-rooting (ReRootBones + the matching raw pose) keeps every joint in place, also
+// when the source skeleton's root bone isn't the identity.
+static void TestReroot() {
+    const float curls[5] = { 0.3f, 0.6f, 0.2f, 0.9f, 0.1f }, splay[5] = { 0.2f, -0.3f, 0, 0.4f, -0.2f };
+    vr::VRBoneTransform_t link[eBone_Count];
+    SynthesizeSkeleton(true, curls, splay, link);
+    // Give the "Steam Link" skeleton a different root → wrist offset, and a non-identity root.
+    link[eBone_Wrist] = XformToBone({ Normalize(Quat{ 0.9, 0.1, -0.3, 0.2 }), { 0.02, -0.05, 0.09 } });
+    FillAuxBones(link);                                   // aux bones for an identity root …
+    const Xform root{ Normalize(Quat{ 0.95, 0.05, 0.2, -0.1 }), { 0.01, 0.02, -0.03 } };
+    link[eBone_Root] = XformToBone(root);
+    for (int b = eBone_Aux_Thumb; b <= eBone_Aux_PinkyFinger; ++b)   // … kept in place under the new root
+        link[b] = XformToBone(Inverse(root) * BoneToXform(link[b]));
+    const Xform rawLink{ Normalize(Quat{ 0.7, -0.2, 0.5, 0.1 }), { 0.3, 1.1, -0.4 } };
+
+    const Xform ourWrist = SynthWristBone(true);
+    const Xform linkWrist = SourceWrist(link);
+    const Xform rawOurs = rawLink * (linkWrist * Inverse(ourWrist));
+    vr::VRBoneTransform_t ours[eBone_Count];
+    ReRootBones(link, linkWrist, ourWrist, ours);
+
+    Xform ml[eBone_Count], mo[eBone_Count];
+    ModelSpace(link, ml);
+    ModelSpace(ours, mo);
+    double worst = 0;
+    for (int b = 1; b < eBone_Count; ++b) {
+        const Xform wl = rawLink * ml[b], wo = rawOurs * mo[b];
+        worst = std::fmax(worst, Length(wl.p - wo.p));
+        const Quat dq = Conj(wl.q) * wo.q;
+        worst = std::fmax(worst, 1.0 - std::fabs(dq.w));
+    }
+    CHECK(worst < 1e-5);
+    CHECK_NEAR(BoneToXform(ours[eBone_Root]).q.w, 1.0, 1e-6);
+    std::printf("  re-root worst error %.2e\n", worst);
+}
+
+// OffsetDriverPose: the offset point's pose, and velocities that match rigid-body motion.
+static void TestOffsetPose() {
+    vr::DriverPose_t src{};
+    src.poseTimeOffset = -0.021;
+    src.qWorldFromDriverRotation.w = 1;
+    src.qDriverFromHeadRotation.w = 1;
+    const Quat q = Normalize(Quat{ 0.8, 0.3, -0.4, 0.2 });
+    src.qRotation = ToHmdQuat(q);
+    const Vec3 p{ 0.2, 1.3, -0.5 }, v{ 0.4, -0.1, 0.25 }, w{ 1.5, -2.0, 0.7 };
+    ToArray(p, src.vecPosition);
+    ToArray(v, src.vecVelocity);
+    ToArray(w, src.vecAngularVelocity);
+    src.poseIsValid = true;
+    src.result = vr::TrackingResult_Running_OK;
+    const Xform offset{ Normalize(Quat{ 0.9, -0.1, 0.3, 0.1 }), { 0.03, -0.04, 0.16 } };
+
+    const vr::DriverPose_t out = OffsetDriverPose(src, offset);
+    const Xform expect = Xform{ q, p } * offset;
+    CHECK(Length(FromArray(out.vecPosition) - expect.p) < 1e-9);
+    CHECK(std::fabs(std::fabs((Conj(FromHmdQuat(out.qRotation)) * expect.q).w) - 1.0) < 1e-9);
+    CHECK_NEAR(out.poseTimeOffset, src.poseTimeOffset, 0);
+    CHECK(out.poseIsValid && out.result == vr::TrackingResult_Running_OK);
+
+    // Move the source rigidly for dt (world-frame angular velocity) and differentiate the offset point.
+    const double dt = 1e-6, angle = Length(w) * dt;
+    const Vec3 axis = w * (1.0 / Length(w));
+    const Quat dq{ std::cos(angle / 2), axis.x * std::sin(angle / 2), axis.y * std::sin(angle / 2),
+                   axis.z * std::sin(angle / 2) };
+    const Xform later = Xform{ dq * q, p + v * dt } * offset;
+    const Vec3 numeric = (later.p - expect.p) * (1.0 / dt);
+    const double err = Length(numeric - FromArray(out.vecVelocity));
+    CHECK(err < 1e-5);
+    std::printf("  offset pose velocity error %.2e m/s\n", err);
+}
+
+// Still-hand noise: known noise on a still point reads back; a moving point doesn't count.
+static void TestSpread() {
+    SpreadMeter still, moving;
+    unsigned seed = 12345;
+    auto noise = [&]() {                         // uniform in ±1 mm per axis: std 1/√3 mm
+        seed = seed * 1664525u + 1013904223u;
+        return ((seed >> 8) / double(1u << 24) * 2.0 - 1.0) * 1e-3;
+    };
+    for (int i = 0; i < 90 * 5; ++i) {          // 5 s at 90 Hz
+        const double t = i / 90.0;
+        still.Add({ 0.3 + noise(), 1.2 + noise(), -0.4 + noise() }, t);
+        moving.Add({ 0.3 + 0.2 * t, 1.2, -0.4 }, t);
+    }
+    int windows = 0, movingWindows = 0;
+    const double spread = still.Take(windows);
+    moving.Take(movingWindows);
+    CHECK(windows >= 3);
+    CHECK_NEAR(spread, 1e-3, 1.5e-4);            // RMS distance: √3 · (1/√3 mm) = 1 mm
+    CHECK(movingWindows == 0);
+    std::printf("  still-hand spread %.3f mm over %d windows\n", spread * 1e3, windows);
+}
+
+// PASSTHROUGH pose filter: smooths a still hand, follows steady motion, ignores a short runaway.
+static void TestPoseFilter() {
+    PoseFilter::Params prm;
+    PoseFilter f;
+    unsigned seed = 7;
+    auto noise = [&]() { seed = seed * 1664525u + 1013904223u; return ((seed >> 8) / double(1u << 24) - 0.5) * 2e-3; };
+    double t = 0, errStill = 0, rawStill = 0;
+    Vec3 p, v, w;
+    Quat q;
+    for (int i = 0; i < 1000; ++i, t += 1.0 / 360) {           // still hand, ±1 mm noise
+        const Vec3 x{ 0.2 + noise(), 1.1 + noise(), -0.3 + noise() };
+        p = x;
+        q = Quat{};
+        f.Filter(p, q, v, w, t, prm);
+        if (i > 200) {
+            errStill += Dot(p - Vec3{ 0.2, 1.1, -0.3 }, p - Vec3{ 0.2, 1.1, -0.3 });
+            rawStill += Dot(x - Vec3{ 0.2, 1.1, -0.3 }, x - Vec3{ 0.2, 1.1, -0.3 });
+        }
+    }
+    CHECK(errStill < 0.25 * rawStill);                          // at least halves the noise (rms)
+    double lagMove = 0;
+    for (int i = 0; i < 360; ++i, t += 1.0 / 360) {            // steady 0.5 m/s along x for 1 s
+        p = { 0.2 + 0.5 * (i + 1) / 360.0, 1.1, -0.3 };
+        const double truth = p.x;
+        q = Quat{};
+        f.Filter(p, q, v, w, t, prm);
+        if (i == 359) lagMove = truth - p.x;
+    }
+    CHECK(lagMove < 0.02);                                      // under 2 cm behind at 0.5 m/s
+    CHECK_NEAR(v.x, 0.5 * prm.prediction, 0.1 * prm.prediction);   // and reports the motion's velocity, scaled
+    const Vec3 rest = p;
+    double worst = 0;
+    for (int i = 0; i < 20; ++i, t += 1.0 / 360) {             // runaway: 8 m/s for 28 ms, then back
+        p = (i < 10) ? Vec3{ rest.x + 0.1 + 8.0 * i / 360, rest.y, rest.z } : rest;
+        q = Quat{};
+        f.Filter(p, q, v, w, t, prm);
+        worst = std::fmax(worst, Length(p - rest));
+    }
+    CHECK(worst < 0.03);                                        // the output stays within 3 cm
+    std::printf("  pose filter: still noise x%.2f, lag at 0.5 m/s %.1f mm, runaway excursion %.1f mm\n",
+                std::sqrt(errStill / rawStill), lagMove * 1e3, worst * 1e3);
+}
+
+// Grab, tap to hold: short press latches until the next press, long press only while held.
+static void TestTapHold() {
+    TapHold g(0.2);
+    double t = 0;
+    auto step = [&](bool down, double dt) { t += dt; return g.Update(down, t); };
+    CHECK(!step(false, 0.01));
+    CHECK(step(true, 0.01));        // tap …
+    CHECK(step(false, 0.10));       // … released after 0.1 s: stays held
+    CHECK(step(false, 1.00));
+    CHECK(step(true, 0.01));        // next press …
+    CHECK(!step(false, 0.05));      // … lets go on release
+    CHECK(step(true, 0.01));        // long press: held while down
+    CHECK(step(true, 0.50));
+    CHECK(!step(false, 0.01));      // … and released with the button
+    CHECK(step(true, 0.01));        // tap to latch, then a long press ends it on release
+    CHECK(step(false, 0.05));
+    CHECK(step(true, 0.01));
+    CHECK(step(true, 0.80));
+    CHECK(!step(false, 0.01));
+    CHECK(step(true, 0.01));        // latched, then the glove is lost
+    CHECK(step(false, 0.05));
+    g.Reset();
+    CHECK(!step(false, 0.01));
+    TapHold off(0.0);               // latching off
+    CHECK(off.Update(true, 0.0));
+    CHECK(!off.Update(false, 0.05));
+}
+
+// Setting lists such as pose_filter_types: "a|b", case and blanks ignored.
+static void TestSplitList() {
+    const std::vector<std::string> l = SplitList(" svl_hand_interaction_augmented | VD_Hand_Controller || ");
+    CHECK(l.size() == 2);
+    CHECK(l.size() == 2 && l[0] == "svl_hand_interaction_augmented" && l[1] == "vd_hand_controller");
+    CHECK(SplitList("").empty());
+    CHECK(Lower("Svl_Hand") == "svl_hand");
+}
+
+int main(int argc, char** argv) {
+    TestProtocol(argc > 1 ? argv[1] : "tests/protocol_vectors.bin");
+    TestSynth();
+    TestReroot();
+    TestOffsetPose();
+    TestSpread();
+    TestPoseFilter();
+    TestTapHold();
+    TestSplitList();
+    TestGestures();
+    if (g_failures) {
+        std::printf("%d check(s) failed\n", g_failures);
+        return 1;
+    }
+    std::printf("all driver tests passed\n");
+    return 0;
+}
