@@ -58,8 +58,31 @@ struct HandGestures {
     float pinch[4] = {};
     float grasp = 0.f;
     bool  indexPoint = false;
+    bool  twoFingerPoint = false;      // index and middle out, ring and pinky curled, the thumb across them
+    float curls[5] = {};               // thumb..pinky, as the gestures saw them (GesturesFromBones)
+    const char* twoFingerWhy = nullptr;  // why it isn't a two-finger point (TwoFingerPointShape)
 };
 HandGestures GesturesFromBones(const vr::VRBoneTransform_t bones[eBone_Count]);
+// The two-finger point from the curls (thumb..pinky): index and middle out, ring and pinky folded, the thumb across
+// them. why: the first rule that fails, else null.
+bool TwoFingerPointShape(const float curls[5], const char** why = nullptr);
 float PinchFromDistance(double metres);
+
+// The palm in the skeleton's model space: its centre (the wrist and the index and pinky knuckles) and its unit normal,
+// out of the palm (the way the fingers curl). right: which hand.
+void PalmFrame(bool right, const vr::VRBoneTransform_t bones[eBone_Count], Vec3& centre, Vec3& normal);
+
+// What a pinky pinch looks like, to tell a deliberate one from any thumb-to-pinky contact.
+struct PinkyPinchShape {
+    double palmToHeadDeg = 180;        // the palm's normal against the direction to the head (0: facing the face)
+    float  curls[5] = {};              // thumb..pinky, 0 open .. 1 closed
+    double thumbTo[4] = {};            // m, the thumb tip to the index..pinky tips
+};
+// pose: the hand pose the skeleton is relative to; head: the headset's position (same space), or null if unknown.
+PinkyPinchShape PinkyShape(bool right, const vr::VRBoneTransform_t bones[eBone_Count], const Xform& pose,
+                           const Vec3* head);
+// A deliberate pinky pinch: the palm toward the face, the index and middle fingers relaxed and fairly straight, and
+// the pinky alone at the thumb (a thumb on the last two or three fingers is a grip, not a pinch). why: what failed.
+bool PinkyPinchMeant(const PinkyPinchShape& s, const char** why = nullptr);
 
 } // namespace cf

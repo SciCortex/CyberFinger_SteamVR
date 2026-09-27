@@ -163,32 +163,6 @@
               "output": "/actions/legacy/in/Right_System_Press"
             }
           }
-        },
-        {
-          "path": "/user/hand/left/input/pinky_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/legacy/in/Left_ApplicationMenu_Press"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
-          "path": "/user/hand/right/input/pinky_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/legacy/in/Right_ApplicationMenu_Press"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
         }
       ],
       "poses": [

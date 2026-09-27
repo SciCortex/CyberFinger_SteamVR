@@ -36,7 +36,8 @@ const char* ModeName(uint8_t m) {
 } // namespace
 
 CyberFingerController::CyberFingerController(int hand, const Config& cfg)
-    : m_hand(hand), m_cfg(cfg), m_synthWrist(SynthWristBone(hand == 1)), m_grab(cfg.grabTapTime) {
+    : m_hand(hand), m_cfg(cfg), m_synthWrist(SynthWristBone(hand == 1)), m_grab(cfg.grabTapTime),
+      m_aButton(cfg.blackHoldTime) {
     m_pose.qWorldFromDriverRotation.w = 1;
     m_pose.qDriverFromHeadRotation.w = 1;
     m_pose.qRotation.w = 1;
@@ -74,10 +75,21 @@ vr::EVRInitError CyberFingerController::Activate(uint32_t objectId) {
     props->SetFloatProperty(c, vr::Prop_DeviceBatteryPercentage_Float, 1.f);
     props->SetUint64Property(c, vr::Prop_HardwareRevision_Uint64, 2);
     props->SetUint64Property(c, vr::Prop_FirmwareVersion_Uint64, 2);
+    // Status icons (tools/make_status_icons.py): grey until the glove tracks, blue while it does.
+    const std::string icon = std::string("{cyberfinger}/icons/cyberfinger_") + (right ? "right" : "left");
+    const std::string iconOff = icon + "_off.png", iconReady = icon + "_ready.png";
+    for (const auto prop : { vr::Prop_NamedIconPathDeviceOff_String, vr::Prop_NamedIconPathDeviceSearching_String,
+                             vr::Prop_NamedIconPathDeviceSearchingAlert_String, vr::Prop_NamedIconPathDeviceNotReady_String,
+                             vr::Prop_NamedIconPathDeviceStandby_String, vr::Prop_NamedIconPathDeviceStandbyAlert_String })
+        props->SetStringProperty(c, prop, iconOff.c_str());
+    for (const auto prop : { vr::Prop_NamedIconPathDeviceReady_String, vr::Prop_NamedIconPathDeviceReadyAlert_String,
+                             vr::Prop_NamedIconPathDeviceAlertLow_String })
+        props->SetStringProperty(c, prop, iconReady.c_str());
 
     auto* in = vr::VRDriverInput();
     in->CreateBooleanComponent(c, "/input/system/click", &m_bool[kSystem]);
     in->CreateBooleanComponent(c, "/input/a/click", &m_bool[kA]);
+    in->CreateBooleanComponent(c, "/input/a_hold/click", &m_bool[kAHold]);   // A's long press (LongPress.h)
     in->CreateBooleanComponent(c, "/input/b/click", &m_bool[kB]);
     in->CreateBooleanComponent(c, "/input/c/click", &m_bool[kC]);
     in->CreateBooleanComponent(c, "/input/d/click", &m_bool[kD]);
@@ -95,13 +107,17 @@ vr::EVRInitError CyberFingerController::Activate(uint32_t objectId) {
     in->CreateScalarComponent(c, "/input/finger/middle", &m_scalar[kFingerMiddle], vr::VRScalarType_Absolute, one);
     in->CreateScalarComponent(c, "/input/finger/ring", &m_scalar[kFingerRing], vr::VRScalarType_Absolute, one);
     in->CreateScalarComponent(c, "/input/finger/pinky", &m_scalar[kFingerPinky], vr::VRScalarType_Absolute, one);
-    // The standard hand-tracking gestures, unbound by default (pinky pinch mirrors B in the shipped bindings).
+    // The standard hand-tracking gestures (no app action bound by default), and three of them as buttons, for Flux
+    // Actions in Resonite: the pinky pinch, the index point, and the two-finger point (index and middle).
     in->CreateScalarComponent(c, "/input/index_pinch/value", &m_scalar[kIndexPinch], vr::VRScalarType_Absolute, one);
     in->CreateScalarComponent(c, "/input/middle_pinch/value", &m_scalar[kMiddlePinch], vr::VRScalarType_Absolute, one);
     in->CreateScalarComponent(c, "/input/ring_pinch/value", &m_scalar[kRingPinch], vr::VRScalarType_Absolute, one);
     in->CreateScalarComponent(c, "/input/pinky_pinch/value", &m_scalar[kPinkyPinch], vr::VRScalarType_Absolute, one);
     in->CreateScalarComponent(c, "/input/grasp/value", &m_scalar[kGrasp], vr::VRScalarType_Absolute, one);
     in->CreateBooleanComponent(c, "/input/index_point/touch", &m_bool[kIndexPoint]);
+    in->CreateBooleanComponent(c, "/input/pinky_pinch/click", &m_bool[kPinkyPinchClick]);
+    in->CreateBooleanComponent(c, "/input/index_point/click", &m_bool[kIndexPointClick]);
+    in->CreateBooleanComponent(c, "/input/two_finger_point/click", &m_bool[kTwoFingerPoint]);
     in->CreateHapticComponent(c, "/output/haptic", &m_haptic);
 
     const vr::EVRInputError err = in->CreateSkeletonComponent(
@@ -398,7 +414,9 @@ void CyberFingerController::Update(const GloveState& glove, const HandStateSampl
     m_pose.deviceIsConnected = (mode != kModeReleased);
     if (!follow) vr::VRServerDriverHost()->TrackedDevicePoseUpdated(m_objectId, m_pose, sizeof(vr::DriverPose_t));
 
-    // Gestures: the headset's own values while it tracks the hand, else derived from our skeleton.
+    // Gestures: the headset's own pinches while it tracks the hand, else derived from our skeleton. The points come
+    // from the skeleton as well: Steam Link declares an index point but wasn't seen setting it (2026-09-27), and has
+    // no two-finger one.
     HandGestures gestures;
     const bool live = (mode != kModeReleased);
     if (!live) {
@@ -407,8 +425,47 @@ void CyberFingerController::Update(const GloveState& glove, const HandStateSampl
         for (int f = 0; f < 4; ++f) gestures.pinch[f] = tap.input[kTapIndexPinch + f];
         gestures.grasp = tap.input[kTapGrip];
         gestures.indexPoint = tap.input[kTapIndexPoint] > 0.5f;
+        if (poseValid) {
+            const HandGestures fromBones = GesturesFromBones(bones);
+            gestures.indexPoint = gestures.indexPoint || fromBones.indexPoint;
+            gestures.twoFingerPoint = fromBones.twoFingerPoint;
+            gestures.twoFingerWhy = fromBones.twoFingerWhy;
+            std::copy(fromBones.curls, fromBones.curls + 5, gestures.curls);
+        }
     } else if (poseValid) {
         gestures = GesturesFromBones(bones);
+    }
+
+    // The two-finger point's start, and its near misses (index and middle fairly straight, the ring or pinky bending,
+    // yet no point: TwoFingerPointShape says why), at most once a second, to tune it.
+    const float* c = gestures.curls;
+    const bool twoPoint = live && poseValid && gestures.twoFingerPoint;
+    const bool nearMiss = live && poseValid && !twoPoint && gestures.twoFingerWhy && std::max(c[1], c[2]) < 0.5f &&
+                          std::max(c[3], c[4]) > 0.35f && now - m_twoPointLogged > 1.0;
+    if ((twoPoint && !m_twoPointWas) || nearMiss) {
+        m_twoPointLogged = now;
+        DriverLog("[%s] two-finger point %s: curls thumb %.2f index %.2f middle %.2f ring %.2f pinky %.2f\n",
+                  m_cfg.serial.c_str(), twoPoint ? "counts" : gestures.twoFingerWhy, c[0], c[1], c[2], c[3], c[4]);
+    }
+    m_twoPointWas = twoPoint;
+
+    // The pinky pinch as a button only when it's meant (PinkyPinchMeant): the palm toward the face, the other fingers
+    // relaxed, the pinky alone at the thumb. Checked while the pinch is closed and not yet a click; each closing is
+    // logged with what the hand looked like, to tune the thresholds.
+    const bool wasClosed = m_pinkyClosed;
+    m_pinkyClosed = live && gestures.pinch[3] >= (m_pinkyClosed ? 0.5f : 0.75f);
+    m_pinkyMeant = false;
+    if (m_pinkyClosed && poseValid) {
+        const PinkyPinchShape shape = PinkyShape(Right(), bones, raw, m_headValid ? &m_head : nullptr);
+        const char* why = nullptr;
+        m_pinkyMeant = PinkyPinchMeant(shape, &why);
+        if (!wasClosed && now - m_pinkyLogged > 0.3) {
+            m_pinkyLogged = now;
+            DriverLog("[%s] pinky pinch %s: palm %.0f deg from the face, curls index %.2f middle %.2f ring %.2f, "
+                      "thumb to middle %.1f ring %.1f pinky %.1f cm\n", m_cfg.serial.c_str(),
+                      m_pinkyMeant ? "counts" : why, shape.palmToHeadDeg, shape.curls[1], shape.curls[2],
+                      shape.curls[3], shape.thumbTo[1] * 100, shape.thumbTo[2] * 100, shape.thumbTo[3] * 100);
+        }
     }
 
     if (!follow) SubmitSkeleton(bones);
@@ -437,18 +494,41 @@ void CyberFingerController::SubmitInputs(const GloveState& g, bool fresh, bool l
     in->UpdateScalarComponent(m_scalar[kGrip], (b & kBtnGrip) ? 1.f : 0.f, 0);
     in->UpdateBooleanComponent(m_bool[kGripClick], (b & kBtnGrip) != 0, 0);
     bool grab = false;
+    const bool tapToHold = m_grabTapToHold.load(std::memory_order_relaxed);
+    if (tapToHold != m_grabTapApplied) {
+        m_grabTapApplied = tapToHold;
+        m_grab.SetTapTime(tapToHold ? m_cfg.grabTapTime : 0.0);
+        if (!tapToHold) m_grab.Reset();                  // let go of a latched grab
+    }
     if (fresh) grab = m_grab.Update((b & kBtnGrip) != 0, now);
     else m_grab.Reset();                     // button state unknown: let go
     in->UpdateBooleanComponent(m_bool[kGrab], grab, 0);
     in->UpdateScalarComponent(m_scalar[kStickX], fresh ? g.joyX : 0.f, 0);
     in->UpdateScalarComponent(m_scalar[kStickY], fresh ? g.joyY : 0.f, 0);
     in->UpdateBooleanComponent(m_bool[kStickClick], (b & kBtnStickClick) != 0, 0);
-    in->UpdateBooleanComponent(m_bool[kA], (b & m_cfg.maskA) != 0, 0);
+    // A (black button): a click, or held for blackHoldTime, /input/a_hold instead, for as long as it stays held
+    // (Resonite: FluxAction1 left, FluxAction2 right). With the long press, A reports on release (LongPress.h).
+    bool a = (b & m_cfg.maskA) != 0, aHold = false;
+    if (m_cfg.blackHoldTime > 0) {
+        bool fired = false;
+        if (fresh) {
+            a = m_aButton.Update(a, now, fired);
+            aHold = m_aButton.Held();
+        } else {
+            m_aButton.Reset();
+        }
+    }
+    in->UpdateBooleanComponent(m_bool[kA], a, 0);
+    in->UpdateBooleanComponent(m_bool[kAHold], aHold, 0);
     in->UpdateBooleanComponent(m_bool[kB], (b & m_cfg.maskB) != 0, 0);
     in->UpdateBooleanComponent(m_bool[kC], (b & kBtnC) != 0, 0);
     in->UpdateBooleanComponent(m_bool[kD], (b & kBtnD) != 0, 0);
     in->UpdateBooleanComponent(m_bool[kE], (b & kBtnE) != 0, 0);
-    const bool system = (b & m_cfg.maskSystem) != 0 || (live && m_cfg.forwardTapSystem && tap.systemClick);
+    // System (the SteamVR dashboard): the left glove's pink button, a glove button mapped to it, and the headset's
+    // palm-pinch gesture if forwarded (off by default). The right pink button is the bridge's (the microphone).
+    const bool pink = fresh && !Right() && (g.buttons2 & kBtn2Pink) != 0;
+    const bool system = (b & m_cfg.maskSystem) != 0 || pink ||
+                        (live && m_cfg.forwardTapSystem && tap.systemClick);
     in->UpdateBooleanComponent(m_bool[kSystem], system, 0);
     for (int f = 0; f < 4; ++f) {
         in->UpdateScalarComponent(m_scalar[kFingerIndex + f], curls[f + 1], 0);
@@ -456,6 +536,11 @@ void CyberFingerController::SubmitInputs(const GloveState& g, bool fresh, bool l
     }
     in->UpdateScalarComponent(m_scalar[kGrasp], gestures.grasp, 0);
     in->UpdateBooleanComponent(m_bool[kIndexPoint], gestures.indexPoint, 0);
+    m_pinkyPinched = m_pinkyClosed && (m_pinkyPinched || m_pinkyMeant);
+    in->UpdateBooleanComponent(m_bool[kPinkyPinchClick], m_pinkyClick.Update(m_pinkyPinched, now), 0);
+    in->UpdateBooleanComponent(m_bool[kIndexPointClick], m_pointClick.Update(live && gestures.indexPoint, now), 0);
+    in->UpdateBooleanComponent(m_bool[kTwoFingerPoint], m_twoPointClick.Update(live && gestures.twoFingerPoint, now),
+                               0);
 
     if (fresh && g.battery != m_lastBattery && now - m_lastBatteryUpdate > 10.0) {
         m_lastBattery = g.battery;

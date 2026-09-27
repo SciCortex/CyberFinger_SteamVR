@@ -88,32 +88,6 @@
               "output": "/actions/generic/in/actionmenu"
             }
           }
-        },
-        {
-          "path": "/user/hand/left/input/pinky_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/generic/in/actionmenu"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
-          "path": "/user/hand/right/input/pinky_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/generic/in/actionmenu"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
         }
       ],
       "poses": [
@@ -250,32 +224,6 @@
               "output": "/actions/oculustouch/in/button_yb"
             }
           }
-        },
-        {
-          "path": "/user/hand/left/input/pinky_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/oculustouch/in/button_xa"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
-          "path": "/user/hand/right/input/pinky_pinch",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/oculustouch/in/button_yb"
-            }
-          },
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
         }
       ],
       "poses": [
@@ -308,11 +256,141 @@
           "output": "/actions/oculustouch/out/haptic"
         }
       ]
+    },
+    "/actions/fluxactions": {
+      "sources": [
+        {
+          "path": "/user/hand/left/input/a_hold",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction1"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/a_hold",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction2"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/c",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction3"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/c",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction4"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/d",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction5"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/d",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction6"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/e",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction7"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/e",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction8"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/two_finger_point",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction36"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/two_finger_point",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction37"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/pinky_pinch",
+          "mode": "trigger",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction38"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/pinky_pinch",
+          "mode": "trigger",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction39"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/index_point",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction40"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/index_point",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction41"
+            }
+          }
+        }
+      ]
     }
   },
   "category": "steamvr_input",
   "controller_type": "cyberfinger",
-  "description": "Emulates an Oculus Touch controller: Resonite's Touch mode, the one with a dash button. Black button (Start/Select) and the left thumb-pinky pinch: dash. MENU (and the right thumb-pinky pinch): context menu. Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. Precision grab is implemented in Resonite from the skeleton.",
+  "description": "Emulates an Oculus Touch controller: Resonite's Touch mode, the one with a dash button. Black button (Start/Select): dash. MENU: context menu. Left pink button: SteamVR dashboard. Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. Precision grab is implemented in Resonite from the skeleton. Flux Actions (MoreFluxActions mod), left/right: black button held 1/2, C 3/4, D 5/6, E 7/8, two-finger point 36/37, pinky pinch 38/39, index point 40/41.",
   "interaction_profile": "",
   "name": "CyberFinger defaults for Resonite",
   "options": {

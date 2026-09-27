@@ -168,6 +168,8 @@ void StudioLink::OnDatagram(const uint8_t* data, int size) {
         g.valid = true;
         g.time = now;
         g.buttons = p.buttons;
+        g.buttons2 = p.buttons2;
+        g.resync = p.resync;
         g.triggerAnalog = true;
         g.trigger = p.trigger / 255.f;
         g.joyX = Clamp11(p.joy_x / 32767.f);

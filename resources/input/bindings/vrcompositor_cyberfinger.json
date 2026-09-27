@@ -178,32 +178,6 @@
           "path": "/user/hand/right/input/thumbstick"
         },
         {
-          "inputs": {
-            "click": {
-              "output": "/actions/lasermouse/in/Back"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/right/input/pinky_pinch",
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/lasermouse/in/Back"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/left/input/pinky_pinch",
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
           "path": "/user/hand/left/input/grip",
           "mode": "button",
           "inputs": {
@@ -494,39 +468,13 @@
           },
           "mode": "button",
           "path": "/user/hand/right/input/b"
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/roomsetup/in/Back"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/left/input/pinky_pinch",
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/roomsetup/in/Back"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/right/input/pinky_pinch",
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
         }
       ]
     }
   },
   "category": "steamvr_input",
   "controller_type": "cyberfinger",
-  "description": "Derived from SteamVR's Index dashboard binding. Trigger: click (a light press first locks the laser, so the click lands where it points); grip: right click; stick: scroll, push = middle click; B (MENU, and the thumb-pinky pinch): back; A (black button): home. The system button (the Quest left-palm pinch, forwarded by the driver) toggles the dashboard; hold it to recenter.",
+  "description": "Derived from SteamVR's Index dashboard binding. Trigger: click (a light press first locks the laser, so the click lands where it points); grip: right click; stick: scroll, push = middle click; B (MENU): back; A (black button): home. The system button (the left glove's pink button) toggles the dashboard.",
   "interaction_profile": "",
   "name": "CyberFinger SteamVR dashboard bindings",
   "options": {},

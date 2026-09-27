@@ -55,89 +55,103 @@
       "binding_image_point": [ 698, 978 ],
       "order": 5
     },
-    "/input/c": {
+    "/input/a_hold": {
       "type": "button",
       "click": true,
-      "binding_image_point": [ 785, 372 ],
+      "binding_image_point": [ 698, 978 ],
       "order": 6
     },
-    "/input/d": {
+    "/input/c": {
       "type": "button",
       "click": true,
       "binding_image_point": [ 785, 372 ],
       "order": 7
     },
-    "/input/e": {
+    "/input/d": {
       "type": "button",
       "click": true,
       "binding_image_point": [ 785, 372 ],
       "order": 8
     },
+    "/input/e": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [ 785, 372 ],
+      "order": 9
+    },
     "/input/system": {
       "type": "button",
       "click": true,
       "binding_image_point": [ 695, 1131 ],
-      "order": 9
+      "order": 10
     },
     "/input/index_pinch": {
       "type": "trigger",
       "value": true,
       "binding_image_point": [ 490, 45 ],
-      "order": 20
+      "order": 21
     },
     "/input/middle_pinch": {
       "type": "trigger",
       "value": true,
       "binding_image_point": [ 285, 195 ],
-      "order": 21
+      "order": 22
     },
     "/input/ring_pinch": {
       "type": "trigger",
       "value": true,
       "binding_image_point": [ 338, 338 ],
-      "order": 22
+      "order": 23
     },
     "/input/pinky_pinch": {
       "type": "trigger",
       "value": true,
+      "click": true,
       "binding_image_point": [ 371, 429 ],
-      "order": 23
+      "order": 24
     },
     "/input/grasp": {
       "type": "trigger",
       "value": true,
       "binding_image_point": [ 470, 300 ],
-      "order": 24
+      "order": 25
     },
     "/input/index_point": {
-      "type": "trigger",
+      "type": "button",
+      "click": true,
       "touch": true,
       "binding_image_point": [ 560, 120 ],
-      "order": 25
+      "order": 26
+    },
+    "/input/two_finger_point": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [ 610, 170 ],
+      "order": 27
     },
     "/input/finger/index": {
       "type": "trigger",
       "visibility": "InputValueVisibility_AvailableButHidden",
       "binding_image_point": [ 560, 120 ],
-      "order": 100
+      "order": 101
     },
     "/input/finger/middle": {
       "type": "trigger",
       "visibility": "InputValueVisibility_AvailableButHidden",
       "binding_image_point": [ 400, 190 ],
-      "order": 101
+      "order": 102
     },
     "/input/finger/ring": {
       "type": "trigger",
       "visibility": "InputValueVisibility_AvailableButHidden",
       "binding_image_point": [ 410, 300 ],
-      "order": 102
+      "order": 103
     },
     "/input/finger/pinky": {
       "type": "trigger",
       "visibility": "InputValueVisibility_AvailableButHidden",
       "binding_image_point": [ 420, 380 ],
-      "order": 103
+      "order": 104
     },
     "/input/skeleton/left": {
       "type": "skeleton",

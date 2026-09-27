@@ -20,6 +20,8 @@ import math
 import csv
 import cf_protocol                                   # SteamVR driver wire protocol (CFG2 glove packets)
 import glove_report                                  # the glove's BLE input report, every firmware revision
+import glove_control                                 # bridge → glove commands (haptics)
+import pink_button                                   # the right pink button: Windows microphone mute
 from driver_link import DriverLink                   # driver → bridge: haptic requests, driver status
 from haptics_view import describe as describe_haptic, draw_haptic_meter
 try:
@@ -302,6 +304,7 @@ def _generate_fallback_icon(color):
 class HandState:
     def __init__(self):
         self.buttons = 0
+        self.buttons2 = 0          # the extension byte's buttons (glove_report.PINK)
         self.joy_x = 0
         self.joy_y = 0
         self.joy_cx = 0          # stick center offset (auto-captured at rest on connect)
@@ -486,6 +489,7 @@ class BLEManager:
         self._polling_chars = []
         self._ble_devices = []     # track opened BLE device handles
         self._gatt_services = []   # track opened GATT service handles
+        self.haptics = glove_control.HapticSender(log=app.log)   # vibration commands to the gloves
 
     def start(self):
         self._running = True
@@ -507,6 +511,7 @@ class BLEManager:
             if str(e) != "Event loop stopped before Future completed.":
                 self.app.log(f"BLE thread error: {e}")
         finally:
+            self.haptics.detach_all()
             # Clean up: unsubscribe notifications
             for _, char, token in self._subscriptions:
                 try:
@@ -624,6 +629,9 @@ class BLEManager:
 
         old_buttons = state.buttons
         state.buttons = buttons
+        if r.buttons2 != state.buttons2 and r.buttons2:
+            self.app.log(f"{'L' if h == 0 else 'R'} PINK")
+        state.buttons2 = r.buttons2
         state.joy_x = joy_x
         state.joy_y = joy_y
         # Auto-center the stick from the first ~20 packets after connect (assumed at rest):
@@ -793,6 +801,12 @@ class BLEManager:
         if not vr_input:
             self.app.log(f"{label}: CF01 characteristic not found")
             return None
+        # The control characteristic: haptics go there (glove_control.py)
+        vr_ctrl = next((c for c in char_result.characteristics if "cf02" in str(c.uuid).lower()), None)
+        if vr_ctrl is not None:
+            self.haptics.attach(0 if label == "LEFT" else 1, vr_ctrl)
+        else:
+            self.app.log(f"{label}: CF02 control characteristic not found (no haptics)")
 
         # Clear any stale CCCD from previous session
         try:
@@ -854,7 +868,7 @@ class VRMode:
         joy_x, joy_y = cf_protocol.stick_to_int16(jx, -jy)
         self.seq[hand] += 1
         pkt = cf_protocol.pack_glove(hand, self.seq[hand], state.buttons, state.trigger,
-                                     joy_x, joy_y, state.battery)
+                                     joy_x, joy_y, state.battery, buttons2=state.buttons2)
         try:
             self.sock.sendto(pkt, self.target)
             if state.imu_present:
@@ -2191,6 +2205,8 @@ class FusionStudioApp:
         self.vrchat_gamepad_mode = None  # created lazily on first use
         self.active_mode = None
         self.driver_link = None          # listens for the driver's haptic requests while the glove link runs
+        # VR mode: the right glove's pink button mutes and unmutes the Windows microphone
+        self.pink_button = pink_button.PinkButton(self.log, haptics=lambda: getattr(self.ble, "haptics", None))
         self._haptic_logged = [False, False]
         self.slimevr = None              # created lazily while forwarding is on
         self.imu_logger = None           # ImuLogger while "Log IMU (CSV)" is on
@@ -3728,13 +3744,14 @@ class FusionStudioApp:
 
 
     def _on_haptic(self, h):
-        """Driver-link thread: an app asked a hand to vibrate. The top bar shows it; this is also where the
-        request will be written to the glove over GATT once the firmware has an actuator."""
+        """Driver-link thread: an app asked a hand to vibrate. The top bar shows it, and the glove gets it over
+        GATT (glove_control.py; firmware 1.3.3+ with the motor)."""
         hand = h["hand"]
         if not self._haptic_logged[hand]:
             self._haptic_logged[hand] = True
             st = {"count": 1, "duration": h["duration_s"], "frequency": h["frequency_hz"], "amplitude": h["amplitude"]}
             self.log(f"Haptics: first request for the {'right' if hand else 'left'} hand ({describe_haptic(st)})")
+        self.ble.haptics.request(hand, h["duration_s"], h["frequency_hz"], h["amplitude"])
 
     def _draw_haptics(self):
         """Top-bar haptics indicator, one row per hand (blank until the glove link runs)."""
@@ -3759,6 +3776,8 @@ class FusionStudioApp:
                 self.active_mode.update_gamepad(self.ble.left, self.ble.right)
             else:
                 self.active_mode.on_input(hand, state)
+            if self.active_mode is self.vr_mode:
+                self.pink_button.on_input(hand, state.buttons2)
 
         # Runs alongside the active mode, not instead of it — SlimeVR takes the
         # orientation none of the other modes forward.

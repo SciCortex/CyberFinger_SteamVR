@@ -48,19 +48,22 @@ private:
     bool FilteredSource(const std::string& controllerType) const;   // listed in pose_filter_types
     void ScanOtherControllers(double now);
     void UpdateHandoff(const vr::TrackedDevicePose_t* poses, const TapHandSnapshot tap[2], double now);
-    void UpdateHiddenControllers(const bool hide[2]);
+    void UpdateHiddenControllers(const bool hide[2], bool hideHandSources);
     void RestoreHiddenControllers();
     void SendContext(const vr::TrackedDevicePose_t* poses, const TapHandSnapshot tap[2], double now);
     void LogStatus(const TapHandSnapshot tap[2], double now);
     void OnHaptic(const vr::VREvent_HapticVibration_t& hv);
     void LoadImuCalibration();
     void UpdateImuCalibration(const TapHandSnapshot tap[2], double now);
+    void ColdStartImu(int hand);
     void SaveImuCalibration();
 
     StudioLink m_link;
     ImuFusion m_imuFusion[2];         // the glove's joint IMU + optical orientation, per hand (fed by m_link)
     bool m_imuFusionEnabled = true;   // setting imu_fusion
     bool m_imuFusionKnown = false;
+    bool m_grabTapToHold = true;      // setting grab_tap_to_hold
+    bool m_grabTapKnown = false;
 
     // The IMU calibration carried across sessions (%LOCALAPPDATA%\CyberFinger\imu_calibration.txt), per hand and
     // hand-tracking source (their hand frames may differ): the mounting and lag the fusion starts from.
@@ -69,6 +72,8 @@ private:
     bool   m_imuHaveBase[2] = {};
     std::string m_imuSource[2];                   // the source the fusion started for
     size_t m_imuSavedSolves[2] = {};              // full solves already taken
+    int m_resyncSeen[2] = { -1, -1 };             // the bridge's last resync count (CFG2), -1 before its first
+    size_t m_imuResyncsLogged[2] = {};            // resyncs already logged
     bool   m_imuCalDirty = false;
     double m_nextImuCalCheck = 0, m_nextImuCalSave = 0;
     std::unique_ptr<OpticalTap> m_tap;
@@ -98,11 +103,13 @@ private:
     uint32_t m_deviceCount = 0;                   // a change means a device was just added…
     double m_fastScanUntil = 0;                   // … so scan every frame until then
     std::vector<std::string> m_handSourceTypes;   // tap_controller_types: hand-tracking sources, never others
+    std::vector<vr::PropertyContainerHandle_t> m_handSources;  // the devices of those types, rescanned with the others
     // SlimeVR's body trackers (elbows, chest …): device index and role code (BodyTrackerCode), rescanned with the
     // others; captured (kind 8) for the arm model.
     std::vector<std::pair<uint32_t, uint8_t>> m_bodyTrackers;
 
-    // Marked Prop_NeverTracked while CyberFinger holds their hand.
+    // Marked Prop_NeverTracked: the other controllers while CyberFinger holds their hand, the hand-tracking sources
+    // while CyberFinger is active.
     std::set<vr::PropertyContainerHandle_t> m_hidden;
     std::set<vr::PropertyContainerHandle_t> m_hideRefused;   // SteamVR refused the write: don't retry
     bool m_hideSetting = true;                    // hide_other_hand_controllers

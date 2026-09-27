@@ -119,7 +119,8 @@ vr::EVRInitError ServerProvider::Init(vr::IVRDriverContext* pDriverContext) {
         cfg.maskA = ParseButtons(SettingString("button_a", "STSEL"));
         cfg.maskB = ParseButtons(SettingString("button_b", "MENU"));
         cfg.maskSystem = ParseButtons(SettingString("button_system", "NONE"));
-        cfg.forwardTapSystem = SettingBool("forward_tap_system_button", true);
+        cfg.forwardTapSystem = SettingBool("forward_tap_system_button", false);
+        cfg.blackHoldTime = std::max(0, SettingInt("black_hold_ms", 800)) / 1000.0;
         cfg.fusedTimeout = std::max(0.02, SettingInt("fused_timeout_ms", 150) / 1000.0);
         cfg.disconnectAfter = std::max(0, SettingInt("disconnect_after_ms", 0)) / 1000.0;
 
@@ -199,6 +200,15 @@ void ServerProvider::RunFrame() {
         PollCaptureRequest();
         m_hideSetting = SettingBool("hide_other_hand_controllers", true);
         m_yieldSetting = SettingBool("yield_to_controllers", true);
+        const bool tapToHold = SettingBool("grab_tap_to_hold", true);
+        if (tapToHold != m_grabTapToHold || !m_grabTapKnown) {
+            m_grabTapToHold = tapToHold;
+            m_grabTapKnown = true;
+            for (auto& c : m_controller)
+                if (c) c->SetGrabTapToHold(tapToHold);
+            DriverLog("Grab: tap to hold %s\n", tapToHold ? "on (a quick tap of the grip holds until the next press)"
+                                                         : "off (the grab follows the grip button)");
+        }
         const bool fuse = SettingBool("imu_fusion", true);
         if (fuse != m_imuFusionEnabled || !m_imuFusionKnown) {
             m_imuFusionEnabled = fuse;
@@ -222,7 +232,7 @@ void ServerProvider::RunFrame() {
     ScanOtherControllers(now);
     UpdateHandoff(poses, tap, now);
     const bool hide[2] = { m_active && m_hideSetting && !m_yield[0], m_active && m_hideSetting && !m_yield[1] };
-    UpdateHiddenControllers(hide);
+    UpdateHiddenControllers(hide, m_active && m_hideSetting);
 
     // How far the headset's tracking of each hand is trusted: where the hand is seen from, the other hand in front
     // of it (TrackingTrust.h). The other hand counts while its tracking is live, not while a streamer holds it.
@@ -237,6 +247,21 @@ void ServerProvider::RunFrame() {
                                   otherLive ? &o.rawPose.p : nullptr);
         }
         m_controller[hand]->SetTrackingTrust(trust);
+        const Xform head = XformFromMatrix(hmd.mDeviceToAbsoluteTracking);
+        m_controller[hand]->SetHeadPosition(hmd.bPoseIsValid != 0, head.p);
+    }
+
+    // The bridge asks for an IMU fusion resync (its button, a triple tap on the glove) with a new count in CFG2: a
+    // lost packet only delays it. The first count seen from a bridge is its start, not a request.
+    for (int hand = 0; hand < 2; ++hand) {
+        const GloveState g = m_link.Glove(hand);
+        if (!g.valid) continue;
+        if (m_resyncSeen[hand] >= 0 && g.resync != m_resyncSeen[hand]) {
+            m_imuFusion[hand].Resync();
+            m_imuResyncsLogged[hand] = m_imuFusion[hand].GetStatus().resyncs;
+            DriverLog("[%s] IMU fusion resync, asked for by the bridge\n", hand ? "right" : "left");
+        }
+        m_resyncSeen[hand] = g.resync;
     }
 
     for (int hand = 0; hand < 2; ++hand)
@@ -375,6 +400,7 @@ void ServerProvider::ScanOtherControllers(double now) {
         if (m_controller[h] && m_controller[h]->ObjectId() != vr::k_unTrackedDeviceIndexInvalid)
             ours[h] = props->TrackedDeviceToPropertyContainer(m_controller[h]->ObjectId());
     m_others.clear();
+    m_handSources.clear();
     m_bodyTrackers.clear();
     for (uint32_t i = 1; i < vr::k_unMaxTrackedDeviceCount; ++i) {           // 0 is the headset
         const vr::PropertyContainerHandle_t c = props->TrackedDeviceToPropertyContainer(i);
@@ -382,6 +408,10 @@ void ServerProvider::ScanOtherControllers(double now) {
         const std::string type = Lower(props->GetStringProperty(c, vr::Prop_ControllerType_String));
         if (const int body = BodyTrackerCode(type); body >= 0) {
             m_bodyTrackers.push_back({ i, uint8_t(body) });
+            continue;
+        }
+        if (std::find(m_handSourceTypes.begin(), m_handSourceTypes.end(), type) != m_handSourceTypes.end()) {
+            m_handSources.push_back(c);
             continue;
         }
         vr::ETrackedPropertyError err = vr::TrackedProp_Success;
@@ -392,9 +422,7 @@ void ServerProvider::ScanOtherControllers(double now) {
         if (err != vr::TrackedProp_Success ||
             (role != vr::TrackedControllerRole_LeftHand && role != vr::TrackedControllerRole_RightHand))
             continue;
-        if (type == "cyberfinger" ||                                            // ours, or a hand-tracking source
-            std::find(m_handSourceTypes.begin(), m_handSourceTypes.end(), type) != m_handSourceTypes.end())
-            continue;
+        if (type == "cyberfinger") continue;                                    // ours
         m_others.push_back({ c, i, role == vr::TrackedControllerRole_LeftHand ? 0 : 1 });
     }
 }
@@ -414,7 +442,11 @@ void ServerProvider::UpdateHandoff(const vr::TrackedDevicePose_t* poses, const T
         if (!m_controller[h]) continue;
         const char* serial = m_controller[h]->Serial().c_str();
         if (!m_yieldSetting || !m_active) {
-            if (m_yield[h]) DriverLog("[%s] taking the hand back (yield_to_controllers or active changed)\n", serial);
+            if (m_yield[h]) {
+                DriverLog("[%s] taking the hand back (yield_to_controllers or active changed); IMU fusion starts over\n",
+                          serial);
+                ColdStartImu(h);
+            }
             m_yield[h] = false;
             m_yieldSince[h] = m_returnSince[h] = -1;
             continue;
@@ -443,7 +475,9 @@ void ServerProvider::UpdateHandoff(const vr::TrackedDevicePose_t* poses, const T
             if (m_returnSince[h] >= 0 && now - m_returnSince[h] >= 0.3) {
                 m_yield[h] = false;
                 m_yieldSince[h] = -1;
-                DriverLog("[%s] hand tracking is back: taking the hand again\n", serial);
+                DriverLog("[%s] hand tracking is back: taking the hand again; IMU fusion starts over, as from cold\n",
+                          serial);
+                ColdStartImu(h);
             }
         }
     }
@@ -453,20 +487,27 @@ void ServerProvider::UpdateHandoff(const vr::TrackedDevicePose_t* poses, const T
 // anyway: Resonite maps role-less controllers as trackers and draws them on the hands, or registers them as its
 // hands instead. Marked Prop_NeverTracked, they are skipped (Resonite checks it when a device connects). Shown
 // again when CyberFinger lets go of the hand. Frame loop, after ScanOtherControllers.
-void ServerProvider::UpdateHiddenControllers(const bool hide[2]) {
+//
+// The headset's hand-tracking devices (hideHandSources: while CyberFinger is active) the same, whether CyberFinger
+// holds the hand or not: it takes the hand back 0.3 s after they come back, and in between SteamVR can give them the
+// role and Resonite register them. With a binding that simulates Touch, SteamVR reports the same serial for them as
+// for CyberFinger ("<headset>_Controller_Left"), and Resonite's engine drives one controller from both: the idle one
+// overwrites CyberFinger's pose and input every frame. CyberFinger still reads them through its hooks (OpticalTap).
+void ServerProvider::UpdateHiddenControllers(const bool hide[2], bool hideHandSources) {
     vr::CVRPropertyHelpers* props = vr::VRProperties();
-    std::set<vr::PropertyContainerHandle_t> want;
+    std::map<vr::PropertyContainerHandle_t, const char*> want;   // container -> while what
     for (const OtherController& o : m_others)
-        if (hide[o.hand]) want.insert(o.container);
-    for (const vr::PropertyContainerHandle_t c : want) {
+        if (hide[o.hand]) want[o.container] = "while CyberFinger holds its hand";
+    if (hideHandSources)
+        for (const vr::PropertyContainerHandle_t c : m_handSources) want[c] = "while CyberFinger is active";
+    for (const auto& [c, why] : want) {
         if (m_hidden.count(c) || m_hideRefused.count(c)) continue;
         const vr::ETrackedPropertyError err = props->SetBoolProperty(c, vr::Prop_NeverTracked_Bool, true);
         const std::string serial = props->GetStringProperty(c, vr::Prop_SerialNumber_String);
         const std::string type = props->GetStringProperty(c, vr::Prop_ControllerType_String);
         if (err == vr::TrackedProp_Success) {
             m_hidden.insert(c);
-            DriverLog("Hiding %s (%s) from apps while CyberFinger holds its hand (never tracked)\n", serial.c_str(),
-                      type.c_str());
+            DriverLog("Hiding %s (%s) from apps %s (never tracked)\n", serial.c_str(), type.c_str(), why);
         } else {
             m_hideRefused.insert(c);
             DriverLog("Could not hide %s (%s): property error %d\n", serial.c_str(), type.c_str(), int(err));
@@ -590,6 +631,20 @@ void ServerProvider::SaveImuCalibration() {
     if (m_imuCalDirty) DriverLog("IMU calibration: cannot replace %s\n", path.c_str());
 }
 
+// Start a hand's IMU fusion over as at a cold start: from the calibration saved for its hand-tracking source (this
+// session's good solves are averaged into it), the lag measured again. For a hand taken back from the controllers:
+// the headset lost it for the whole time, the IMU's heading drifted, and handling the controllers may have moved the
+// glove on the hand. A resync would start from this session's last solve instead, which fits worse when the glove
+// moved (2026-09-27: 18° against the saved calibration's ~11°, and two minutes to solve again, against 23 s from cold).
+// Frame loop.
+void ServerProvider::ColdStartImu(int hand) {
+    if (m_imuSource[hand].empty()) return;
+    const auto it = m_imuSaved[hand].find(m_imuSource[hand]);
+    m_imuFusion[hand].Reset();
+    m_imuFusion[hand].SetPrior(it != m_imuSaved[hand].end() ? it->second : m_imuBase[hand]);
+    m_imuSavedSolves[hand] = 0;   // log its next calibration like the first
+}
+
 void ServerProvider::UpdateImuCalibration(const TapHandSnapshot tap[2], double now) {
     if (now < m_nextImuCalCheck) return;
     m_nextImuCalCheck = now + 0.5;
@@ -612,6 +667,11 @@ void ServerProvider::UpdateImuCalibration(const TapHandSnapshot tap[2], double n
         // A new good full solve: remember it. Sessions scatter by ~15° (how the glove sits, the postures seen),
         // so a solve near the saved calibration is averaged with it rather than replacing it.
         const ImuFusion::Status st = m_imuFusion[hand].GetStatus();
+        if (st.resyncs < m_imuResyncsLogged[hand]) m_imuResyncsLogged[hand] = st.resyncs;       // after a Reset
+        if (st.resyncs > m_imuResyncsLogged[hand]) {
+            m_imuResyncsLogged[hand] = st.resyncs;
+            DriverLog("[%s] IMU fusion resync: the joint IMU came back after a gap (the glove switched off?)\n", name);
+        }
         ImuFusion::Calibration c;
         if (m_imuSource[hand].empty() || st.solves == m_imuSavedSolves[hand] || st.residualDeg > kSaveMaxResidualDeg ||
             !m_imuFusion[hand].GetCalibration(c))

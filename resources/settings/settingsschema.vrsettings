@@ -17,7 +17,17 @@
             {
                 "name": "/settings/driver_cyberfinger/forward_tap_system_button",
                 "control": "toggle",
-                "label": "Quest left palm pinch opens the dashboard"
+                "label": "Quest left palm pinch also opens the dashboard (the left pink button always does)"
+            },
+            {
+                "name": "/settings/driver_cyberfinger/black_hold_ms",
+                "control": "slider",
+                "label": "Black button long press (ms): held this long it's the A held input instead of A (Resonite: FluxAction1 left, FluxAction2 right, with the MoreFluxActions mod); A then acts on release. 0 = no long press",
+                "requires_restart": true,
+                "min": 0,
+                "max": 2000,
+                "step": 50,
+                "decimals": 0
             },
             {
                 "name": "/settings/driver_cyberfinger/pose_filter",
@@ -83,7 +93,7 @@
             {
                 "name": "/settings/driver_cyberfinger/hide_other_hand_controllers",
                 "control": "toggle",
-                "label": "Hide the streamer's emulated Touch controllers from apps while CyberFinger holds the hands",
+                "label": "Hide the streamer's hand tracking and other hand controllers from apps while CyberFinger holds the hands",
                 "advanced_only": true
             },
             {
@@ -93,9 +103,14 @@
                 "advanced_only": true
             },
             {
+                "name": "/settings/driver_cyberfinger/grab_tap_to_hold",
+                "control": "toggle",
+                "label": "Grab: tap to hold (a quick tap of the grip holds until the next press; off: the grab follows the grip)"
+            },
+            {
                 "name": "/settings/driver_cyberfinger/grab_tap_ms",
                 "control": "slider",
-                "label": "Grab: a tap shorter than this (ms) holds until the next press (0 = off)",
+                "label": "Grab: with tap to hold, a tap shorter than this (ms) holds",
                 "requires_restart": true,
                 "min": 0,
                 "max": 500,

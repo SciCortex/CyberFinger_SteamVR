@@ -49,6 +49,11 @@ enum GloveButton : uint8_t {
     kBtnStartSelect = 0x80,
 };
 
+// CFG2 buttons2: buttons beyond the first byte (firmware 1.3.3+, the report's extension byte).
+enum GloveButton2 : uint8_t {
+    kBtn2Pink       = 0x01,   // the pink power key, a short press as a click: left = SteamVR's system button
+};
+
 // CFHS flags
 enum HandStateFlags : uint16_t {
     kHsPoseValid  = 0x0001,   // raw_pos/raw_rot are usable
@@ -101,7 +106,9 @@ struct GlovePacket {          // 'CFG2'
     uint8_t trigger;          // 0..255 analog
     int16_t joy_x, joy_y;     // centred + deadzoned by the sender, ±32767, +y = up
     uint8_t battery_pct;
-    uint8_t reserved[3];
+    uint8_t buttons2;         // GloveButton2 bits (0 from older bridges)
+    uint8_t resync;           // a count the bridge bumps to resync this hand's IMU fusion (its button, a triple tap)
+    uint8_t reserved;
 };
 
 struct HandStatePacket {      // 'CFHS'

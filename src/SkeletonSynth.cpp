@@ -270,7 +270,78 @@ HandGestures GesturesFromBones(const vr::VRBoneTransform_t bones[eBone_Count]) {
     CurlsFromBones(bones, curls);
     g.grasp = (curls[1] + curls[2] + curls[3] + curls[4]) / 4.f;
     g.indexPoint = curls[1] < 0.35f && std::min({ curls[2], curls[3], curls[4] }) > 0.6f;
+    g.twoFingerPoint = TwoFingerPointShape(curls, &g.twoFingerWhy);
+    std::copy(curls, curls + 5, g.curls);
     return g;
+}
+
+// Loosened on real attempts (2026-09-27): the headset saw the ring finger folded under the thumb at only 0.45-0.8, and
+// the straight index and middle up to 0.36. The index point needs the middle curled, so the two never overlap.
+bool TwoFingerPointShape(const float c[5], const char** why) {
+    constexpr float kStraight = 0.42f;          // index and middle below this
+    constexpr float kFolded = 0.45f;            // ring and pinky above this
+    constexpr float kThumbAcross = 0.3f;        // the thumb above this (out, it's a V)
+    const char* fail = nullptr;
+    if (std::max(c[1], c[2]) >= kStraight)
+        fail = "the index or middle isn't straight";
+    else if (std::min(c[3], c[4]) <= kFolded)
+        fail = "the ring or pinky isn't folded";
+    else if (c[0] <= kThumbAcross)
+        fail = "the thumb isn't across";
+    if (why) *why = fail;
+    return fail == nullptr;
+}
+
+void PalmFrame(bool right, const vr::VRBoneTransform_t bones[eBone_Count], Vec3& centre, Vec3& normal) {
+    Xform model[eBone_Count];
+    ModelSpace(bones, model);
+    const Vec3 wrist = model[eBone_Wrist].p;
+    const Vec3 index = model[eBone_IndexFinger1].p, middle = model[eBone_MiddleFinger1].p;
+    const Vec3 pinky = model[eBone_PinkyFinger1].p;
+    centre = (wrist + index + pinky) * (1.0 / 3.0);
+    // Fingers along, knuckles across from the pinky to the index: a right palm's normal is across × along (palm
+    // toward you, fingers up: the index is on your right), a left one's the other way round.
+    const Vec3 along = middle - wrist, across = index - pinky;
+    const Vec3 n = right ? Cross(across, along) : Cross(along, across);
+    normal = n * (1.0 / std::max(1e-9, Length(n)));
+}
+
+PinkyPinchShape PinkyShape(bool right, const vr::VRBoneTransform_t bones[eBone_Count], const Xform& pose,
+                           const Vec3* head) {
+    PinkyPinchShape s;
+    Xform model[eBone_Count];
+    ModelSpace(bones, model);
+    const Vec3 thumbTip = model[eBone_Thumb3].p;
+    for (int f = 0; f < 4; ++f) s.thumbTo[f] = Length(model[kFingerFirstBone[f + 1] + 4].p - thumbTip);
+    CurlsFromBones(bones, s.curls);
+    if (head) {
+        Vec3 centre, normal;
+        PalmFrame(right, bones, centre, normal);
+        const Vec3 toHead = *head - (pose.p + Rotate(pose.q, centre));
+        const double d = Length(toHead);
+        if (d > 1e-6) {
+            const double c = Dot(Rotate(pose.q, normal), toHead) / d;
+            s.palmToHeadDeg = std::acos(std::max(-1.0, std::min(1.0, c))) * 180.0 / kPi;
+        }
+    }
+    return s;
+}
+
+bool PinkyPinchMeant(const PinkyPinchShape& s, const char** why) {
+    constexpr double kPalmToFaceDeg = 50;       // the palm's normal within this of the direction to the head
+    constexpr float kRelaxedCurl = 0.6f;        // index and middle: relaxed, fairly straight
+    constexpr float kRingCurl = 0.8f;           // the ring finger follows the pinky a little
+    constexpr double kRingClear = 0.015;        // m: the ring tip this much further from the thumb than the pinky's
+    constexpr double kMiddleClear = 0.035;      // m: the middle tip at least this far from the thumb
+    const char* fail = nullptr;
+    if (s.palmToHeadDeg > kPalmToFaceDeg)
+        fail = "the palm isn't toward the face";
+    else if (std::max(s.curls[1], s.curls[2]) > kRelaxedCurl || s.curls[3] > kRingCurl)
+        fail = "the other fingers are curled";
+    else if (s.thumbTo[2] < s.thumbTo[3] + kRingClear || s.thumbTo[1] < kMiddleClear)
+        fail = "the thumb is on more than the pinky";
+    if (why) *why = fail;
+    return fail == nullptr;
 }
 
 } // namespace cf

@@ -54,10 +54,30 @@ def variable(present):
     return pkt
 
 
+def extended(present, buttons2):
+    """v1.3.3+ firmware: the variable tail, then the extension byte (flagged by imu_present bit 7)."""
+    pkt = bytearray(variable(present))
+    pkt[gr.PREFIX_SIZE] |= gr.EXT
+    return bytes(pkt) + bytes([buttons2])
+
+
 class GloveReportTest(unittest.TestCase):
     def assertQuat(self, got, want):
         for g, w in zip(got, want):
             self.assertAlmostEqual(g, w, places=6)
+
+    def test_extension_byte(self):
+        for present in (0, gr.BODY1, gr.BODY1 | gr.JOINT, gr.BODY1 | gr.BODY2 | gr.JOINT, gr.BODY2 | gr.JOINT):
+            for b2 in (0, gr.PINK):
+                pkt = extended(present, b2)
+                self.assertNotIn(len(pkt), (gr.FIXED_SIZE, gr.FIXED_ACCEL_SIZE))   # never a legacy layout
+                r = gr.decode(pkt)
+                self.assertEqual((r.present, r.buttons2), (present, b2))
+                if present & gr.JOINT:
+                    self.assertQuat(r.quats[2], QJ)
+                    self.assertEqual(r.accels[2], AJ)
+        self.assertEqual(len(extended(gr.BODY1 | gr.JOINT, 0)), 58)
+        self.assertEqual(gr.decode(variable(gr.BODY1 | gr.JOINT)).buttons2, 0)         # older firmware
 
     def test_base_fields(self):
         r = gr.decode(base())

@@ -32,6 +32,8 @@
 #include "Protocol.h"
 #include "SkeletonSynth.h"
 #include "StudioLink.h"
+#include "LongPress.h"
+#include "GestureClick.h"
 #include "TapHold.h"
 
 namespace cf {
@@ -46,7 +48,9 @@ public:
         uint8_t maskA = kBtnStartSelect;    // glove buttons driving /input/a/click
         uint8_t maskB = kBtnMenu;           // … /input/b/click (context menu, like Touch B/Y)
         uint8_t maskSystem = 0;             // … /input/system/click (dashboard)
-        bool    forwardTapSystem = true;    // headset hand's system button → ours
+        bool    forwardTapSystem = false;   // headset hand's system button → ours (the left pink button does it)
+        double  blackHoldTime = 0.8;        // s: the A button (black) held this long is /input/a_hold instead of A
+                                            // (Resonite: FluxAction1/2); 0 = no long press (A reports as pressed)
         double  fusedTimeout = 0.15;        // s
         double  disconnectAfter = 0.0;      // s without any data → report disconnected; 0 = never
         Xform   noSkeletonOffset;           // tap raw pose → our raw pose, when no tap skeleton was ever seen
@@ -82,8 +86,14 @@ public:
     // once calibrated. The FUSED mode (the Studio's own fusion) never uses it.
     void SetImuFusion(ImuFusion* fusion) { m_imu = fusion; }
     void SetImuFusionEnabled(bool on) { m_imuEnabled.store(on, std::memory_order_relaxed); }
+    // Tap to hold on the grab (setting grab_tap_to_hold): off, the grab simply follows the grip button. Live.
+    void SetGrabTapToHold(bool on) { m_grabTapToHold.store(on, std::memory_order_relaxed); }
     // How far the headset's tracking of this hand is trusted now (TrackingTrust.h), set every frame.
     void SetTrackingTrust(double trust) { m_trust.store(trust, std::memory_order_relaxed); }
+    // The headset's position (raw tracking space), each frame before Update: the pinky pinch wants the palm toward
+    // the face. valid false: unknown, and the pinky pinch stays off.
+    void SetHeadPosition(bool valid, const Vec3& p) { m_headValid = valid; m_head = p; }
+
     bool ImuFused() const { return m_imuFused.load(std::memory_order_relaxed); }
 
     const std::string& Serial() const { return m_cfg.serial; }
@@ -122,6 +132,20 @@ private:
     std::atomic<uint32_t> m_eventSkeletons{ 0 };
 
     TapHold   m_grab;
+    LongPress m_aButton;                  // A: a click, or held long, /input/a_hold
+    std::atomic<bool> m_grabTapToHold{ true };
+    bool      m_grabTapApplied = true;
+    // The gestures as buttons: /input/pinky_pinch/click (hysteresis on the pinch), index_point/click,
+    // two_finger_point/click
+    bool      m_pinkyPinched = false;       // the click: a meant pinky pinch, held until the pinch opens
+    bool      m_pinkyClosed = false;        // the raw pinky pinch (hysteresis), whatever the hand's shape
+    bool      m_pinkyMeant = false;         // PinkyPinchMeant, this frame
+    double    m_pinkyLogged = -1e9;
+    double    m_twoPointLogged = -1e9;
+    bool      m_twoPointWas = false;         // the two-finger point, as last logged
+    bool      m_headValid = false;
+    Vec3      m_head;
+    GestureClick m_pinkyClick, m_pointClick, m_twoPointClick;
 
     std::mutex         m_filterLock;      // republish thread vs settings updates
     PoseFilter         m_filter;
@@ -151,7 +175,8 @@ private:
     double    m_lastBatteryUpdate = -1e9;
     uint8_t   m_lastBattery = 255;
 
-    enum Bool { kSystem, kA, kB, kC, kD, kE, kTriggerClick, kGripClick, kGrab, kStickClick, kIndexPoint, kNumBool };
+    enum Bool { kSystem, kA, kAHold, kB, kC, kD, kE, kTriggerClick, kGripClick, kGrab, kStickClick, kIndexPoint,
+                kPinkyPinchClick, kIndexPointClick, kTwoFingerPoint, kNumBool };
     enum Scalar { kTrigger, kGrip, kStickX, kStickY, kFingerIndex, kFingerMiddle, kFingerRing, kFingerPinky,
                   kIndexPinch, kMiddlePinch, kRingPinch, kPinkyPinch, kGrasp, kNumScalar };
     vr::VRInputComponentHandle_t m_bool[kNumBool] = {};

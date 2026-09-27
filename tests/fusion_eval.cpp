@@ -275,6 +275,8 @@ int main(int argc, char** argv) {
                         "the output %.0f deg/min; trust median %.2f, below 0.5 %.0f %% of the seen\n", st.rejected,
                         100.0 * st.rejected / std::max<size_t>(1, seenN), st.escapes, st.corrTravelDeg / minutes,
                         tr.empty() ? 1.0 : Pct(tr, 0.5), 100.0 * lowTrust / std::max<size_t>(1, seenN));
+            std::printf("  off the hand: found %zu time(s)%s; %zu resync(s)\n", st.offHandTimes,
+                        st.offHand ? " (still, at the end)" : "", st.resyncs);
             // where the headset is at its best (trusted, the hand nearly still): does the output still agree?
             std::vector<double> good;
             for (size_t i = 0; i < s.size(); ++i) {

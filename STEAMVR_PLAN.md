@@ -25,7 +25,7 @@ What the survey of the installed SteamVR, VRChat and Resonite files settled:
 | Pink wrist button | The PMU power button (IO expander pin 4). The firmware ignores short presses (`TODO emit another button press event`) and the VR report's 8 button bits are all used: exposing it needs a firmware bit and a `CFG2` field (a reserved byte is free) |
 | Quest OS button | Handled by Horizon OS; under Steam Link it never reaches SteamVR, and a driver cannot press it |
 | Gestures | The standard hand-tracking set (pinches, grasp, index point) is exposed but unbound, except thumb-pinky pinch = MENU. Values come from Steam Link's own gestures (hooked) or from the skeleton |
-| Haptics | Driver → bridge `CFHP` (36 B, UDP 27016). Both bridges show the requests per hand; the GATT link to the glove comes later |
+| Haptics | Driver → bridge `CFHP` (36 B, UDP 27016) → glove `VR_CMD_HAPTIC` on `0xCF02` (6 B, write without response; `bridge/glove_control.py`, firmware 1.3.3 `src/haptics.cpp`: DRV2605L real-time drive of the ERM motor). VR mode only |
 | VRChat binding | Derived from VRChat's own Touch binding (`tools/generate_bindings.py`), with touch and gesture inputs removed |
 | Resonite | Picks its controller mode from the render model of the devices it registers as hands; only its Touch mode has a dash. The default binding emulates an Oculus Touch controller, with pose and skeletons bound (in Touch mode Resonite undoes its Touch offset for the hand): black button = dash, B = context menu. The streamers' own Touch controllers are marked never tracked while CyberFinger holds the hands, or Resonite registers them instead or shows them as trackers |
 | Streamers | Steam Link streams predicted, noisy hand poses (broadband 8–40 Hz); Virtual Desktop's are clean. Both present Oculus-identity Touch controllers besides the hand devices; Steam Link creates its native controller devices (`VRLINKQ3_Controller_*`) only when they're first picked up |
@@ -103,6 +103,17 @@ Items marked *check* are hypotheses to verify.
 
 ### Buttons and bindings
 
+- [x] Pink buttons (firmware 1.3.3, the report's extension byte): left → SteamVR dashboard (driver), right →
+  Windows microphone mute (bridge, VR mode). Hand-tracking gestures off by default: no palm-pinch forward
+  (`forward_tap_system_button` false), no thumb-pinky pinch in the default bindings. *Check live.*
+- [x] Black button long press (`black_hold_ms`, 800) → `/input/a_hold`, held while the button stays down; Resonite's
+  default binds it to FluxAction1 (left) / FluxAction2 (right). *To check:* SteamVR still loads Resonite's binding
+  when the FluxActions set is missing (mod not installed).
+- [ ] **MoreFluxActions** (`~/src/MoreFluxActionsMod`, BepInEx): the renderer half adds FluxAction1–42 to Resonite's
+  SteamVR manifest and reads them; the engine half fires `FluxActionN.Pressed` / `.Released` / `FluxActionN`
+  (bool) dynamic impulses under the local user. Both halves build; *test in game*. Next: the AI tool
+  (pyresonitelink) that writes ProtoFlux for the actions and deploys it under the avatar.
+
 - [x] Tap to hold (CyberFingerMod style): `/input/grab` is the grip with a driver-side latch. A press shorter
   than `grab_tap_ms` (200) holds until the next press, a longer one grabs while held; the VRChat and Resonite
   defaults bind grab to it. SteamVR's *Toggle Button* can't do this (it flips on every press).
@@ -152,7 +163,9 @@ Items marked *check* are hypotheses to verify.
   into VQF, Wire buffer 1024 (the FIFO read overran the 128-byte default: boot loop). Firmware 1.3.2-beta, both
   gloves: 3–5 ms behind the joint IMU (capture 2026-09-27); rotation jitter at rest 0.03° → 0.04–0.06°.
 - [ ] Phase 1b, Studio side: §7.1 split compute from drawing, §7.3 `SteamVRContextSource`, §7.4 `SteamVROutput`.
-- [ ] Haptics to the glove over GATT (`_on_haptic` in both bridges).
+- [x] Haptics to the glove over GATT (2026-09-27): both bridges forward the driver's requests in VR mode
+  (`glove_control.py`, coalesced per hand); firmware 1.3.3 drives the motor from the main loop (the DRV2605L
+  shares I2C with the IMUs). *Check live:* the feel of the ERM constants (35 ms minimum pulse, drive 40–127).
 
 ### Release and repos
 
@@ -163,6 +176,12 @@ Items marked *check* are hypotheses to verify.
 - [ ] Retire `origin/steamvr` (July): superseded (its variable-length IMU parser is `glove_report.py` now, its
   `vr_controller.py` and driver changes target the v1 protocol and `MergedController`). Tag it before deleting.
 - [ ] Try the installer here: upgrade 1.4.1 → 2.0.0 in place, dev registration replaced.
+- [ ] **Instruction manual:** revise and expand once the current work settles (pink buttons, haptics, the black
+  button's long press and FluxActions, the IMU fusion, the arm chain). Source `docs/manual/manual.html` (labelled
+  glove images, callouts in the images' pixel coordinates); `python docs/manual/build_manual.py [--single-file]`
+  rebuilds the standalone page. First version published as a private claude.ai page (2026-09-27).
+- [ ] **Web version of the manual:** host it (e.g. GitHub Pages from `docs/`), link it from the README, the
+  installer and the bridge.
 
 ## 1. Goal
 

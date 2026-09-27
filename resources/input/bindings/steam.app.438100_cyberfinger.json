@@ -254,58 +254,6 @@
           },
           "mode": "joystick",
           "path": "/user/hand/right/input/thumbstick"
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/udon_menu"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/left/input/pinky_pinch",
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/udon_menu"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/right/input/pinky_pinch",
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/menu"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/left/input/pinky_pinch",
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/menu"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/right/input/pinky_pinch",
-          "parameters": {
-            "click_activate_threshold": "0.75",
-            "click_deactivate_threshold": "0.5"
-          }
         }
       ],
       "poses": [
@@ -631,7 +579,7 @@
   },
   "category": "steamvr_input",
   "controller_type": "cyberfinger",
-  "description": "Derived from VRChat's Touch binding. MENU = B/Y (tap: quick menu, hold: action menu), Start/Select = A/X; the thumb-pinky pinch acts like MENU. Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. C/D/E and the other hand gestures are left free for the user.",
+  "description": "Derived from VRChat's Touch binding. MENU = B/Y (tap: quick menu, hold: action menu), Start/Select = A/X. Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. C/D/E and the other hand gestures are left free for the user.",
   "interaction_profile": "",
   "name": "CyberFinger defaults for VRChat",
   "options": {},

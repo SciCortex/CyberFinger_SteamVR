@@ -18,8 +18,15 @@ B = MENU (the context / rotary-dial button), A = Start/Select, and C/D/E. No tou
 Derived bindings therefore drop touch inputs, trackpad sources and VRChat's gesture activators.
 
 The driver also exposes the standard hand-tracking gestures (index/middle/ring/pinky pinch, grasp, index
-point). They stay unbound, except the thumb-pinky pinch, which every binding here maps like B (MENU); in
-Resonite the left one opens the dash instead.
+point). No app action is bound to them: the thumb-pinky pinch, once mapped like B (MENU) and to Resonite's dash,
+fired too easily. The SteamVR dashboard opens from the left glove's pink button (/input/system), not from the
+Quest palm pinch (the driver no longer forwards it by default).
+
+In Resonite, the MoreFluxActions mod's Flux Actions (ProtoFlux on the avatar, nothing without flux) take the
+buttons Resonite doesn't use and two of the gestures (left, right): black button held 1, 2; C 3, 4; D 5, 6;
+E 7, 8; two-finger point 36, 37; pinky pinch 38, 39; index point 40, 41. 42 is left for the bridge's right
+pink button. The gestures are the driver's clicks (/input/<gesture>/click: debounced, the pinch with hysteresis),
+which the binding UI shows like any button; the points come from the skeleton.
 
 In the VRChat and Resonite defaults, grab comes from /input/grab: the grip with the driver's tap to hold
 (a press shorter than grab_tap_ms holds until the next press, a longer one grabs while held). Binding
@@ -127,24 +134,6 @@ def convert(binding, path_map, drop_output=lambda out: False):
     return out
 
 
-PINKY_PINCH_CLICK = {"click_activate_threshold": "0.75", "click_deactivate_threshold": "0.5"}
-
-
-def mirror_menu_to_pinky(bindings):
-    """Give the thumb-pinky pinch the same actions as B (MENU), on both hands."""
-    for sec in bindings.values():
-        extra = []
-        for src in sec.get("sources", []):
-            parts = src["path"].split("/")
-            if len(parts) == 6 and parts[5] == "b" and src["mode"] == "button":
-                s = copy.deepcopy(src)
-                s["path"] = "/".join(parts[:5] + ["pinky_pinch"])
-                s["parameters"] = dict(src.get("parameters", {}), **PINKY_PINCH_CLICK)
-                extra.append(s)
-        sec.get("sources", []).extend(extra)
-    return bindings
-
-
 def tap_to_hold_grab(bindings, outputs):
     """Bind these grab actions to /input/grab, the grip with the driver's tap to hold."""
     for sec in bindings.values():
@@ -183,11 +172,10 @@ def vrchat(steam):
     touch = load(src)
     b = header("steam.app.438100", "CyberFinger defaults for VRChat",
                "Derived from VRChat's Touch binding. MENU = B/Y (tap: quick menu, hold: action menu), "
-               "Start/Select = A/X; the thumb-pinky pinch acts like MENU. Grab: a quick tap of the grip holds "
+               "Start/Select = A/X. Grab: a quick tap of the grip holds "
                "until the next press, a longer press grabs while held. C/D/E and the other hand gestures are "
                "left free for the user.")
-    b["bindings"] = mirror_menu_to_pinky(
-        convert(touch, touch_to_cyberfinger, drop_output=lambda o: "gesture" in o.lower()))
+    b["bindings"] = convert(touch, touch_to_cyberfinger, drop_output=lambda o: "gesture" in o.lower())
     tap_to_hold_grab(b["bindings"], {"/actions/global/in/grab", "/actions/one_hand/in/grab"})
     save(b, "bindings/steam.app.438100_cyberfinger.json")
 
@@ -195,10 +183,12 @@ def vrchat(steam):
 def resonite():
     b = header("steam.app.2519830", "CyberFinger defaults for Resonite",
                "Emulates an Oculus Touch controller: Resonite's Touch mode, the one with a dash button. Black "
-               "button (Start/Select) and the left thumb-pinky pinch: dash. MENU (and the right thumb-pinky "
-               "pinch): context menu. Grab: a quick tap "
+               "button (Start/Select): dash. MENU: context menu. Left pink button: SteamVR dashboard. Grab: a "
+               "quick tap "
                "of the grip holds until the next press, a longer press grabs while held. Precision grab is "
-               "implemented in Resonite from the skeleton.",
+               "implemented in Resonite from the skeleton. Flux Actions (MoreFluxActions mod), left/right: black "
+               "button held 1/2, C 3/4, D 5/6, E 7/8, two-finger point 36/37, pinky pinch 38/39, index point "
+               "40/41.",
                options={"simulated_controller_type": "oculus_touch", "simulate_rendermodel": "full"})
     sources = []
     for h in HANDS:
@@ -250,12 +240,29 @@ def resonite():
         "haptics": [{"path": f"/user/hand/{h}/output/haptic", "output": "/actions/oculustouch/out/haptic"}
                     for h in HANDS],
     }
-    mirror_menu_to_pinky(b["bindings"])
-    # In Touch mode the left thumb-pinky pinch opens the dash, like the black button; the right one stays MENU.
-    for src in b["bindings"]["/actions/oculustouch"]["sources"]:
-        if src["path"] == "/user/hand/left/input/pinky_pinch":
-            src["inputs"] = {"click": {"output": "/actions/oculustouch/in/button_xa"}}
+    # Flux Actions, which the MoreFluxActions mod adds to Resonite's manifest for ProtoFlux on the avatar, on what
+    # Resonite leaves free: FLUX_ACTIONS below, left then right. Without the mod this action set doesn't exist
+    # (to check: that SteamVR still loads the rest of the binding then).
+    sources = []
+    for component, mode, input_name, first in FLUX_ACTIONS:
+        for i, h in enumerate(HANDS):
+            src = {"path": f"/user/hand/{h}/input/{component}", "mode": mode,
+                   "inputs": {input_name: {"output": f"/actions/fluxactions/in/fluxaction{first + i}"}}}
+            sources.append(src)
+    b["bindings"]["/actions/fluxactions"] = {"sources": sources}
     save(b, "bindings/steam.app.2519830_cyberfinger.json")
+
+
+# (component, binding mode, input, FluxAction for the left hand; the right hand gets the next one)
+FLUX_ACTIONS = (
+    ("a_hold", "button", "click", 1),              # the black button, held (the driver's black_hold_ms)
+    ("c", "button", "click", 3),
+    ("d", "button", "click", 5),
+    ("e", "button", "click", 7),
+    ("two_finger_point", "button", "click", 36),   # hand tracking: index and middle out, the thumb over the others
+    ("pinky_pinch", "trigger", "click", 38),       # hand tracking: thumb-pinky pinch (the driver's click)
+    ("index_point", "button", "click", 40),        # hand tracking: index finger pointing (the driver's click)
+)
 
 
 def compositor(steam):
@@ -265,9 +272,9 @@ def compositor(steam):
     b = header("openvr.component.vrcompositor", "CyberFinger SteamVR dashboard bindings",
                "Derived from SteamVR's Index dashboard binding. Trigger: click (a light press first locks the "
                "laser, so the click lands where it points); grip: right click; stick: scroll, push = middle "
-               "click; B (MENU, and the thumb-pinky pinch): back; A (black button): home. The system button "
-               "(the Quest left-palm pinch, forwarded by the driver) toggles the dashboard; hold it to recenter.")
-    b["bindings"] = mirror_menu_to_pinky(convert(knuckles, index_to_cyberfinger))
+               "click; B (MENU): back; A (black button): home. The system button (the left glove's pink button) "
+               "toggles the dashboard.")
+    b["bindings"] = convert(knuckles, index_to_cyberfinger)
     # Index right-clicks with the trackpad, which the CyberFinger doesn't have: use the plain grip button
     # (/input/grip, not /input/grab: a right click must not latch).
     b["bindings"]["/actions/lasermouse"]["sources"] += [
@@ -313,7 +320,6 @@ def legacy():
         "haptics": [{"path": f"/user/hand/{h}/output/haptic", "output": f"/actions/legacy/out/{h.capitalize()}_Haptic"}
                     for h in HANDS],
     }
-    mirror_menu_to_pinky(b["bindings"])
     save(b, "legacy_bindings_cyberfinger.json")
 
 

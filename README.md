@@ -6,6 +6,9 @@ push-stick, trigger, grip and buttons, plus a full hand skeleton and pose from t
 
 Note: this is a *work-in-progress*, and currently alpha software.
 
+**Documentation:** [docs/README.md](docs/README.md) maps the pieces (gloves, bridge, driver, the MoreFluxActions
+mod for Resonite) and where each is documented. The user manual is in [docs/manual](docs/manual/).
+
 ## How it works
 
 - The driver adds two controllers, `CYBERFINGER_L` and `CYBERFINGER_R`, which take the left/right hand roles
@@ -18,13 +21,15 @@ Note: this is a *work-in-progress*, and currently alpha software.
     is republished the moment the streamer submits it, with its own timing, so apps get the same stream as
     from the streamer's hands;
   - **NO_POSE** — nothing tracks the hand: the pose is reported invalid, buttons keep working.
-- **The Quest left-palm pinch (≡)** that opens the SteamVR dashboard keeps working: the driver forwards
-  Steam Link's system button to CyberFinger's.
-- **Buttons first.** Actions come from the glove's buttons. The standard hand-tracking gestures (pinches,
-  grasp, index point) are exposed for binding but unassigned by default — except the thumb-pinky pinch,
-  which acts like MENU.
-- **Haptics** requested by apps are forwarded to the bridge, which shows them per hand (a GATT link to the
-  glove comes later).
+- **The pink wrist buttons** (firmware 1.3.3+): the left one opens the SteamVR dashboard, the right one mutes
+  and unmutes the Windows microphone (the bridge, in VR mode), confirmed on the glove's motor. The bridge's
+  "Right pink button" option can make it a FluxAction instead (1–42, default 42), sent straight to the
+  MoreFluxActions mod over loopback UDP (`bridge/flux_actions.py`).
+- **Buttons only.** Actions come from the glove's buttons. The standard hand-tracking gestures (pinches,
+  grasp, index point) are exposed for binding but unassigned by default, and the Quest left-palm pinch no
+  longer opens the dashboard (`forward_tap_system_button` brings it back): they fired too easily.
+- **Haptics** requested by apps reach the glove's motor through the bridge (firmware 1.3.3+, CFV1BP boards: the
+  hardware revisions with a motor). Without one, the requests are simply ignored.
 - **Apps:** VRChat and Resonite get native bindings; every other app sees an Index controller (SteamVR
   automatic rebinding + legacy binding emulation).
 
@@ -109,7 +114,7 @@ Then:
    (`python bridge/fusion_studio.py`, *▶ Start glove*). Put the gloves in "VR mode".
 3. Check what the driver sees: `python bridge/tools/cf_driver_probe.py` (stop the bridge's glove link first —
    both listen on UDP 27016). With your hands in view it shows `PASSTHROUGH`, `skeleton live 31 bones`, and
-   `[SYSTEM pressed]` while you do the left-palm pinch; haptic requests are printed as they arrive.
+   `[SYSTEM pressed]` when you press the left pink button; haptic requests are printed as they arrive.
    `--fake-hand right` drives the right hand from a synthetic fused stream to test the FUSED path.
 
 ## Controls
@@ -120,30 +125,45 @@ Then:
 | Grab (grip) | `/input/grab` (tap to hold) | Grab: a quick tap holds until the next press, a longer press grabs while held | same |
 | Joystick (+ push) | `/input/thumbstick` | Move (L), turn (R) | Axis, secondary (push) |
 | MENU — context / rotary-dial button | `/input/b` (B/Y) | Menu: tap quick menu, hold action menu | Context menu |
-| Thumb-pinky pinch (hand tracking) | `/input/pinky_pinch` | same as MENU | Left: dash; right: context menu |
 | Start/Select (black wrist button) | `/input/a` (A/X) | Mic (L), jump (R) | Dash |
-| C, D, E (if fitted) | `/input/c`, `/input/d`, `/input/e` | unbound | unbound |
-| Index / middle / ring pinch, grasp, index point | `/input/index_pinch` … `/input/index_point` | unbound | unbound |
-| Quest left-palm pinch | `/input/system` (left) | SteamVR dashboard | SteamVR dashboard |
+| Black wrist button held (≥ 0.8 s) | `/input/a_hold` | unbound | FluxAction1 (L), FluxAction2 (R), with the MoreFluxActions mod |
+| Left pink wrist button (power key, a short press) | `/input/system` (left) | SteamVR dashboard | SteamVR dashboard |
+| Right pink wrist button (power key, a short press) | — (the bridge) | Windows microphone mute | same, or a FluxAction (bridge option) |
+| C, D, E (some hardware revisions and models only) | `/input/c`, `/input/d`, `/input/e` | unbound | FluxAction3/4 (C, L/R), 5/6 (D), 7/8 (E), with the mod |
+| Pinches, grasp, index point, two-finger point (hand tracking) | `/input/index_pinch` … `/input/index_point`, `/input/two_finger_point` | unbound | Two-finger point FluxAction36/37 (L/R), pinky pinch 38/39, index point 40/41, with the mod (their `/click`s); the rest unbound |
+
+`/input/pinky_pinch/click` is stricter than the pinch's value: it counts only with the palm toward the face (within
+50°), the index and middle fingers relaxed, and the thumb on the pinky alone (the ring tip 1.5 cm further from it,
+the middle 3.5 cm away), so a thumb on the last two or three fingers doesn't count. SteamVR's log shows each
+closing: `pinky pinch counts` or why not, with the palm angle, curls and distances (`PinkyPinchMeant`).
 
 Everything unbound can be bound per app in SteamVR's *Controller bindings* UI, which shows the controls on a
 picture of the glove. A glove button can also be made the dashboard button with the `button_system` setting.
+Holding a pink button shows the glove's power-off notice after a moment; held about 5–7 s in all, the glove
+switches off and its screen goes dark.
+
+The black button has a long press: held for `black_hold_ms` (800 ms), it is `/input/a_hold` instead of A,
+for as long as you keep holding it. In Resonite it is FluxAction1 on the left hand and FluxAction2 on the right,
+actions the MoreFluxActions mod adds for ProtoFlux on your avatar. Because of the long press, A reports when you
+release it, and can't be held in an app; `black_hold_ms` = 0 gives the plain button back.
 
 In the SteamVR dashboard: the trigger clicks (a light press first locks the laser, so the click lands where it
-points), the grip right-clicks, the stick scrolls (push: middle click), B (and the thumb-pinky pinch) goes
-back, A (black button) goes home. The system button (the Quest left-palm pinch) toggles the dashboard; hold
-it to recenter.
+points), the grip right-clicks, the stick scrolls (push: middle click), B goes back, A (black button) goes
+home. The left pink button toggles the dashboard.
 
 **Grab, tap to hold.** SteamVR's binding modes either toggle on every press or follow the button, so the driver
 does this itself: `/input/grab` is the grip button with a latch. A press shorter than `grab_tap_ms` (200 ms)
 holds the grab until the next press; a longer press grabs while held. `/input/grip` is the plain button.
+`grab_tap_to_hold` (SteamVR settings: *Grab: tap to hold*, on by default) switches the latch off live: the grab
+then follows the grip button.
 
 Gesture values come from Steam Link's own hand-tracking gestures while it tracks the hand, and from the
 hand skeleton otherwise.
 
 ## Glove IMU fusion
 
-With a bridge running and the glove connected, the driver fuses the glove's joint IMU (on the back of the hand)
+With a bridge running and a glove with the joint IMU connected (some hardware revisions; the body IMU in the
+wrist module, which every glove has, isn't used here), the driver fuses the glove's joint IMU (on the back of the hand)
 with the headset's hand orientation, until the Fusion Studio's own fusion takes over (the FUSED mode bypasses it).
 While the headset sees the hand and it turns slowly, the driver learns the IMU's heading and how it sits on the
 hand, and measures how far the headset's stream trails the IMU. The hand orientation then comes from the IMU,
@@ -166,8 +186,26 @@ head or overhead, and very close to or far from the headset (`src/TrackingTrust.
 Steam Link). The less a view is trusted, the slower it may correct the IMU, and only trusted views calibrate it.
 And a headset orientation more than 25° from the fused one (narrower in poor views) is refused outright: palm
 flips, phantom spins and edge-of-view errors no longer turn the hand. If the headset, in full view, is refused
-for 3 s on end, it's the IMU that's off (the glove slipped on the hand), and the hand follows the headset again.
-The status line counts the refused samples.
+for 3 s on end, it's the IMU that's off (the glove slipped on the hand), and the hand follows the headset again;
+the calibration pairs from before are dropped, since they describe how the glove sat then. The status line counts
+the refused samples.
+
+Taking the glove off and putting it back needs nothing:
+- **Glove put down, switched on:** the headset sees the hand turn (over 15°/s) while the IMU lies still (under
+  3°/s). After about a second of that, the fusion treats the glove as off the hand: the headset alone gives the
+  orientation, and the fusion learns nothing from the bare hand. Once the IMU turns with the hand again (their
+  rotation rates within 35 % for half a second), it resyncs.
+- **Glove switched off and on:** the IMU's new heading is caught by the data gap. More than 5 s without IMU data
+  also resyncs.
+- **A resync** keeps the mounting and the lag, and fits the heading again from the next views: the fused
+  orientation is back within about half a second of seeing the hand. On the recorded sessions, worn throughout,
+  the off-hand test never fired.
+- **By hand:** the bridge's **Resync IMU** button, or a **triple tap** on a glove's joint IMU (the module on the
+  back of the hand; three firm taps, 0.1–0.5 s apart, the hand otherwise still), does the same for both hands.
+  The tapped glove answers with two short pulses. The bridge's console logs each tap's size;
+  `tap_threshold_g` in its `settings.json` (default 1.0 g) sets how firm a tap must be.
+
+The resync reaches the driver as a count in CFG2's `resync` byte (see [Wire protocol](#wire-protocol-v2)).
 
 Offline, `out\build\x64-Release\fusion_eval.exe <capture.csv> [prior=default|<other capture.csv>]` replays a
 capture (with the IMUs) through the same code, optionally starting from another session's calibration.
@@ -180,7 +218,16 @@ When an app vibrates a CyberFinger hand, the driver sends the request (duration,
 the bridge (`CFHP`, UDP 27016). The CyberFinger GUI shows it at the bottom of each hand panel, and the Fusion
 Studio in its top bar: the LED lights while the vibration is requested (brightness = amplitude), the
 waveform is drawn at the requested frequency, and a bar shows the time left. `cf_driver_probe.py` prints
-the requests. Forwarding them to the glove over GATT will hook into `_on_haptic` in the bridges.
+the requests.
+
+In VR mode the bridges forward them to the glove (`bridge/glove_control.py`): a 6-byte command on the VR
+service's control characteristic (`0xCF02`, write without response; amplitude, duration, frequency), merged per
+hand while a write is in flight. Firmware 1.3.3+ drives the glove's DRV2605L and ERM coin motor with it
+(CFV1BP boards; others ignore it). An ERM motor can't render short clicks or high frequencies, so the firmware
+stretches every pulse to at least ~35 ms, gives any non-zero amplitude enough drive to be felt, extends a
+running vibration with each new request, and pulses the motor at the requested frequency only below 30 Hz. The
+tuning constants are in the firmware's `src/haptics.h`. Click a hand panel's HAPTIC strip in the CyberFinger GUI
+(VR mode) for a test pulse.
 
 ## Application support
 
@@ -191,15 +238,23 @@ the requests. Forwarding them to the glove over GATT will hook into `_on_haptic`
   Accurate* hands. VRChat comes second for now: the defaults are tuned for Resonite.
 - **Resonite** — native binding that emulates an Oculus Touch controller. Resonite picks its controller mode
   from the render model of the devices it registers as hands, and only its Touch mode has a dash button, so
-  CyberFinger shows itself to Resonite as a Touch controller: the black button (A) and the left thumb-pinky pinch
-  open the dash, B and the right pinch the context menu, plus hand skeletons, trigger, grab and stick, on any
-  streamer. Steam Link and Virtual Desktop
+  CyberFinger shows itself to Resonite as a Touch controller: the black button (A) opens the dash, B the context
+  menu, plus hand skeletons, trigger, grab and stick, on any streamer. Steam Link and Virtual Desktop
   also emulate Touch controllers from hand tracking; while CyberFinger holds the hands the driver marks those
   *never tracked* (`hide_other_hand_controllers`), or Resonite would register them instead of CyberFinger or
-  draw them as trackers on the hands. A custom binding needs the skeletons in the *OculusTouch* set: without
+  draw them as trackers on the hands. The headset's own hand-tracking devices (Steam Link's hand trackers) are
+  hidden the whole time CyberFinger is active: with Touch simulated, SteamVR gives them the same serial as
+  CyberFinger (`<headset>_Controller_Left`), and Resonite's engine, which tells controllers apart by serial, would
+  let the idle one overwrite CyberFinger's pose and input every frame. A custom binding needs the skeletons in the *OculusTouch* set: without
   them Resonite draws rigid canned hands at a Touch offset. Resonite builds the hand from the *Generic* set's
   pose (`/pose/raw`) and the skeleton (*WithoutController*, model space), undoing its Touch offset for the
   hand, and ignores the tracking level. Precision grab is left to Resonite-side logic reading the skeleton.
+  **Programmable buttons:** with the [MoreFluxActions](https://github.com/DrSciCortex/MoreFluxActionsMod) mod,
+  the binding's *Flux Actions* set maps the black button's hold (`/input/a_hold`) to FluxAction1 (left) and
+  FluxAction2 (right), C/D/E to 3–8, the two-finger point to 36/37 and the pinky pinch and index point to 38–41
+  (left, then right): dynamic
+  impulses for your own ProtoFlux, nothing until you build some. 42 is left for the bridge's right pink button. See
+  [docs/README.md](docs/README.md#programmable-buttons-in-resonite).
 - **Other SteamVR Input and OpenXR apps** — SteamVR converts the app's Index binding (then Touch, then Vive)
   and tells the app it is talking to an Index controller (`resources/input/cyberfinger_remapping.json`).
   Trackpad bindings are dropped: the CyberFinger has no trackpad.
@@ -223,8 +278,10 @@ Settings live in `resources/settings/default.vrsettings` (section `driver_cyberf
 | `optical_tap` / `optical_tap_hook` | `true` / `true` | Use the headset's hand tracking; capture its skeleton with the hook |
 | `tap_serial_left` / `_right` | `Hand_Left` / `Hand_Right` | Serial substrings of the headset hand devices (Steam Link: `VRLINKQ_Hand_Left`); `a\|b` lists |
 | `tap_controller_types` | `svl_hand_interaction_augmented\|vd_hand_controller` | Controller types of headset hand devices (Steam Link, Virtual Desktop) |
-| `forward_tap_system_button` | `true` | Forward the headset hand's system button (Quest left-palm pinch) |
-| `grab_tap_ms` | `200` | `/input/grab`: a press shorter than this holds until the next press (0 = plain button) |
+| `forward_tap_system_button` | `false` | Also forward the headset hand's system button (Quest left-palm pinch) to the dashboard; the left pink button always opens it |
+| `black_hold_ms` | `800` | Held this long, the black button is `/input/a_hold` instead of A (Resonite: FluxAction1 left, FluxAction2 right, with the MoreFluxActions mod); A then reports on release. 0 = no long press |
+| `grab_tap_to_hold` | `true` | `/input/grab`'s tap to hold (live); off, the grab follows the grip button |
+| `grab_tap_ms` | `200` | With tap to hold: a press shorter than this holds until the next press |
 | `passthrough_events` | `true` | Republish the headset hands' updates as they arrive; `false`: once per frame |
 | `pose_filter` | `true` | Filter the headset hand pose in PASSTHROUGH, for the sources in `pose_filter_types` (live) |
 | `pose_filter_types` | `svl_hand_interaction_augmented` | Source controller types whose poses are filtered: Steam Link's. Others (Virtual Desktop's `vd_hand_controller`) pass through as streamed; add types with `\|` (live) |
@@ -234,7 +291,7 @@ Settings live in `resources/settings/default.vrsettings` (section `driver_cyberf
 | `pose_filter_gate_cm` | `5` | A pose this far beyond plausible hand motion is treated as a glitch (live) |
 | `imu_fusion` | `true` | In PASSTHROUGH, the hand orientation from the glove's joint IMU (calibrated against the headset's, which keeps it aligned), also while the hand is out of view; needs a bridge with the glove connected (live) |
 | `yield_to_controllers` | `true` | When a hand's headset hand tracking stops while a controller for that hand is tracked (you picked the Touch controllers up), release the hand to the controller (after ~0.5 s); take it back as soon as hand tracking is live again |
-| `hide_other_hand_controllers` | `true` | While CyberFinger holds the hands, mark other drivers' hand controllers (the Touch controllers Steam Link and Virtual Desktop emulate from hand tracking) *never tracked*, so apps skip them; undone when CyberFinger is switched off |
+| `hide_other_hand_controllers` | `true` | While CyberFinger holds the hands, mark other drivers' hand controllers (the Touch controllers Steam Link and Virtual Desktop emulate from hand tracking) *never tracked*, so apps skip them; the headset's hand-tracking devices the whole time CyberFinger is active (CyberFinger still reads them); undone when CyberFinger is switched off |
 | `debug_captures` | `false` | Record the hand data on request (`tools/analyze_tap_capture.py --capture N`); a debugging tool |
 | `button_a` / `button_b` / `button_system` | `STSEL` / `MENU` / `NONE` | Glove buttons for A, B and the dashboard; names: `TRIGGER GRIP C D E MENU STICK STSEL`, combine with `\|` |
 | `legacy_5bit_buttons` | `false` | Decode legacy `CFGP` packets with the pre-2026 firmware button layout |
@@ -251,7 +308,7 @@ Little-endian, packed, localhost. The layouts are defined in [`src/Protocol.h`](
 
 | Packet | Direction | Port | Content |
 |---|---|---|---|
-| `CFG2` (34 B) | bridge → driver | 27015 | Glove buttons (firmware bit layout), analog trigger, centred stick (+y up), battery |
+| `CFG2` (34 B) | bridge → driver | 27015 | Glove buttons (firmware bit layout), analog trigger, centred stick (+y up), battery, the pink button (`buttons2`), the IMU fusion resync count (`resync`: a new value resyncs that hand) |
 | `CFHS` (1140 B) | Fusion Studio → driver | 27015 | Fused hand: `/pose/raw` + velocities in SteamVR raw space, curls/splay, 31 bones |
 | `CFOP` (2200 B) | driver → bridge | 27016 | HMD pose, driver mode per hand, Steam Link hand pose + skeleton + system button |
 | `CFHP` (36 B) | driver → bridge | 27016 | Haptic request: hand, duration, frequency, amplitude |
@@ -300,8 +357,11 @@ hand every 10 s.
   names the source.
 - **Buttons don't register** — the bridge must run in VR mode; the log shows
   `StudioLink: first glove packet (CFG2)`.
-- **The left-palm pinch doesn't open the dashboard** — the probe should show `[SYSTEM pressed]` for the left
-  hand; check `forward_tap_system_button`.
+- **The left pink button doesn't open the dashboard** — it needs firmware 1.3.3+ (the bridge log shows
+  `L PINK`); the probe should show `[SYSTEM pressed]` for the left hand.
+- **The right pink button doesn't mute** — the bridge must be in VR mode, with "Right pink button" on mic
+  mute; its log shows `Mic: muted` / `Mic: live`. It mutes Windows' default recording device (and the default
+  communications one).
 
 ## Architecture
 

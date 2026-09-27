@@ -40,6 +40,8 @@ MAGIC_LEGACY = _magic("CFGP")
 # Firmware button bits
 BTN_TRIGGER, BTN_GRIP, BTN_C, BTN_D, BTN_E, BTN_MENU, BTN_STICK, BTN_STSEL = (
     0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80)
+# CFG2 buttons2: buttons beyond the first byte
+GLOVE_BTN2_PINK = 0x01        # the pink power key (left: SteamVR's system button)
 
 # CFHS flags
 HS_POSE_VALID, HS_HAS_BONES, HS_CAMERA_SEES, HS_CALIBRATED = 0x1, 0x2, 0x4, 0x8
@@ -55,7 +57,7 @@ MODE_NAMES = {0: "NONE", 1: "FUSED", 2: "PASSTHROUGH", 3: "NO_POSE", 4: "RELEASE
 
 HEADER = struct.Struct("<IBBHIIQ")
 BONE = struct.Struct("<8f")
-GLOVE_BODY = struct.Struct("<BBhhB3x")
+GLOVE_BODY = struct.Struct("<BBhhBBBx")
 HAND_BODY = struct.Struct("<3f4f3f3f5f5ff5fIBBBB")
 TAP_HEAD = struct.Struct("<BBBBBBxxI3f4f3f3f")
 CONTEXT_BODY = struct.Struct("<BBBB3f4f3f3fII")
@@ -93,10 +95,13 @@ def stick_to_int16(x, y, deadzone=0.0):
     return clamp(x), clamp(y)
 
 
-def pack_glove(hand, seq, buttons, trigger, joy_x, joy_y, battery, age_us=0):
-    """CFG2. joy_x/joy_y: int16, already centred, +y = up."""
+def pack_glove(hand, seq, buttons, trigger, joy_x, joy_y, battery, age_us=0, buttons2=0, resync=0):
+    """CFG2. joy_x/joy_y: int16, already centred, +y = up. buttons2: GLOVE_BTN2_* (the glove's extension byte).
+    resync: a count; each new value asks the driver to resync this hand's IMU fusion (Protocol.h
+    GlovePacket::resync)."""
     return _header(MAGIC_GLOVE, hand, seq, age_us=age_us) + GLOVE_BODY.pack(
-        buttons & 0xFF, max(0, min(255, int(trigger))), int(joy_x), int(joy_y), max(0, min(100, int(battery))))
+        buttons & 0xFF, max(0, min(255, int(trigger))), int(joy_x), int(joy_y), max(0, min(100, int(battery))),
+        buttons2 & 0xFF, resync & 0xFF)
 
 
 def pack_hand_state(hand, seq, raw_pos, raw_rot, lin_vel=(0, 0, 0), ang_vel=(0, 0, 0),

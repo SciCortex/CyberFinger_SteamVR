@@ -25,6 +25,8 @@ struct GloveState {
     bool     valid = false;
     double   time = -1e9;         // arrival, NowSeconds()
     uint8_t  buttons = 0;         // GloveButton bits (current firmware layout)
+    uint8_t  buttons2 = 0;        // GloveButton2 bits (the pink button; CFG2 only)
+    uint8_t  resync = 0;          // the bridge's IMU fusion resync count: a new value asks for ImuFusion::Resync
     bool     triggerAnalog = false;
     float    trigger = 0.f;       // 0..1, when triggerAnalog
     float    joyX = 0.f, joyY = 0.f;   // -1..1, +y up

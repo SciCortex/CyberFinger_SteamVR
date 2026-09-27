@@ -81,6 +81,22 @@ public:
         double escapeTime = 3.0;       // s of refusing every trusted view: then it's the output that's off
         double escapeTau = 0.15;       // s: how fast the output then settles
         double minPairTrust = 0.8;     // calibration pairs only from views trusted this much (HeadsetViewTrust)
+        double resyncAfterGap = 5.0;   // s without IMU data (the glove switched off, or reconnecting), then Resync:
+                                       // a glove switched off and on has a new heading, which the gate would
+                                       // otherwise refuse the headset over until its escape
+        // Off the hand: the headset sees the hand turn while the IMU lies still (the glove put down, switched on).
+        // The fusion then learns nothing and outputs nothing (the headset alone) — no pairs, no corrections, no
+        // escapes toward a bare hand — until the IMU turns with the hand again, which resyncs it. Rotation rates,
+        // not orientations, so it needs no calibration: a glove on the hand turns as fast as the hand.
+        // Both rates over offHandRateSpan: over the 40 ms the lag uses, the headset's jitter at rest (~1° between
+        // frames) would read as 25°/s of turning; over 0.2 s as ~5°/s.
+        double offHandOpticalRate = 0.25; // rad/s: the hand turning (15°/s) …
+        double offHandImuRate = 0.05;  // rad/s: … and the IMU not (3°/s; a glove lying still shows < 0.01)
+        double offHandRateSpan = 0.2;  // s
+        double offHandAfter = 1.0;     // s of that (decaying over offHandMemory): off the hand
+        double onHandAfter = 0.5;      // s of the IMU turning with the hand (rates within onHandRateMatch): back on
+        double onHandRateMatch = 0.35; // |IMU − hand| / hand
+        double offHandMemory = 3.0;    // s
     };
 
     struct Status {
@@ -98,6 +114,9 @@ public:
         size_t rejected = 0;           // optical samples the gate refused
         size_t escapes = 0;            // steady disagreements followed after all
         double corrTravelDeg = 0;      // how far the optical corrections turned the output, in all
+        size_t resyncs = 0;            // Resync calls, asked for or after an IMU gap
+        bool   offHand = false;        // the glove is off the hand (the IMU still while the hand turns): no output
+        size_t offHandTimes = 0;       // times it was found off the hand
     };
 
     // What carries over to the next session: the mounting (hand-fixed frame of the optical source) and the lag.
@@ -147,6 +166,16 @@ public:
         }
     }
 
+    // Start the heading over, keeping what belongs to the glove and the streamer: the mounting (this session's
+    // solve, else the prior) and the lag. For a glove whose IMU restarted (switched off and on: a new heading) or
+    // that was off the hand (its pairs meaningless): the heading is fitted again from the next few trusted views,
+    // within a second, instead of the gate refusing the headset until its escape and the stale pairs spoiling the
+    // solves for a minute (pairWindow). Done by itself when the IMU resumes after resyncAfterGap. Any thread.
+    void Resync() {
+        std::lock_guard<std::mutex> g(m_lock);
+        ResyncLocked();
+    }
+
     // The latest full solve's mounting and the lag, to save for the next session. False before a full solve.
     bool GetCalibration(Calibration& c) const {
         std::lock_guard<std::mutex> g(m_lock);
@@ -159,6 +188,7 @@ public:
     void AddImu(double t, Quat q) {
         std::lock_guard<std::mutex> g(m_lock);
         q = Normalize(q);
+        if (!m_imu.empty() && t > m_imu.back().t + m_p.resyncAfterGap) ResyncLocked();   // the glove was off
         if (!m_imu.empty()) {
             if (t <= m_imu.back().t) return;
             if (Dot4(q, m_imu.back().q) < 0) q = Neg(q);
@@ -193,6 +223,31 @@ public:
             m_extraGate = std::min(m_p.maxGapGateDeg, std::max(m_extraGate, m_p.gapGateDegPerS * (t - m_gapStart)));
         }
 
+        // Off the hand, or back on it: the two rotation rates, from well-tracked views only.
+        double optRate, imuRate;
+        const double span = m_p.offHandRateSpan;
+        if (trust >= 0.9 && RateAt(m_opt, t - 0.5 * span - 0.005, optRate, span) &&
+            RateAt(m_imu, t - m_st.lag - 0.5 * span - 0.005, imuRate, span)) {
+            const double keep = std::exp(-dt / m_p.offHandMemory);
+            const bool turning = optRate > m_p.offHandOpticalRate;
+            if (!m_st.offHand) {
+                m_offEvidence = m_offEvidence * keep + (turning && imuRate < m_p.offHandImuRate ? dt : 0.0);
+                if (m_offEvidence > m_p.offHandAfter) {
+                    m_st.offHand = true;
+                    ++m_st.offHandTimes;
+                    m_onEvidence = 0;
+                }
+            } else {
+                const bool together = turning && std::fabs(imuRate - optRate) < m_p.onHandRateMatch * optRate;
+                m_onEvidence = together ? m_onEvidence + dt : m_onEvidence * keep;
+                if (m_onEvidence > m_p.onHandAfter) {           // back on the hand: start the heading over
+                    ResyncLocked();
+                    return;
+                }
+            }
+        }
+        if (m_st.offHand) return;                               // learn nothing from a bare hand
+
         if (t >= m_nextLag) { m_nextLag = t + 1.0; MeasureLag(t); }
 
         // Only a slowly turning hand is compared: in motion the two streams disagree by several degrees
@@ -216,7 +271,13 @@ public:
                 if (m_refusedSince < 0) { m_refusedSince = t; m_refusedCount = 0; }
                 if (++m_refusedCount < 30 || t - m_refusedSince < m_p.escapeTime) { m_escaping = false; return; }
                 escaping = true;
-                if (!m_escaping) ++m_st.escapes;
+                if (!m_escaping) {
+                    // The output was off, not the headset: the pairs so far describe how the glove sat before (it
+                    // was adjusted, or slipped), and would spoil the next solves for a pairWindow. Start them over.
+                    ++m_st.escapes;
+                    m_pairs.clear();
+                    m_st.pairs = 0;
+                }
             } else if (trust >= 0.9) {
                 m_refusedSince = -1;
             }
@@ -257,7 +318,8 @@ public:
     // False until calibrated, or when the IMU is silent.
     bool Orientation(double now, Quat& q, Vec3& w) {
         std::lock_guard<std::mutex> g(m_lock);
-        if (!m_st.calibrated || !m_haveCorr || m_imu.size() < 3 || now - m_imu.back().t > m_p.imuTimeout)
+        if (!m_st.calibrated || !m_haveCorr || m_st.offHand || m_imu.size() < 3 ||
+            now - m_imu.back().t > m_p.imuTimeout)
             return false;
         const Stamped& b = m_imu.back();
         q = Normalize(m_corr * Model(b.q));
@@ -318,10 +380,10 @@ private:
     }
 
     // Rotation rate (rad/s) of a stream around time t, over 40 ms: frame-independent, so the two streams compare.
-    static bool RateAt(const std::deque<Stamped>& s, double t, double& r) {
+    static bool RateAt(const std::deque<Stamped>& s, double t, double& r, double span = 0.04) {
         Quat a, b;
-        if (!At(s, t - 0.02, a) || !At(s, t + 0.02, b)) return false;
-        r = 2.0 * std::acos(std::min(1.0, std::fabs(Dot4(a, b)))) / 0.04;
+        if (!At(s, t - 0.5 * span, a) || !At(s, t + 0.5 * span, b)) return false;
+        r = 2.0 * std::acos(std::min(1.0, std::fabs(Dot4(a, b)))) / span;
         return true;
     }
 
@@ -523,6 +585,34 @@ private:
         return 2.0 * std::asin(std::sqrt(std::max(0.0, cost / m_pairs.size()))) * 180.0 / kPi;
     }
 
+    void ResyncLocked() {
+        if (m_solved) {                                 // this session's mounting beats the one it started from
+            m_prior.mount = m_mount;
+            m_havePrior = true;
+        }
+        m_imu.clear();
+        m_opt.clear();
+        m_pairs.clear();
+        const Status was = m_st;                        // the lag, and the running counts, carry on
+        m_st = Status{};
+        m_st.lag = was.lag;
+        m_st.lagCorrelation = was.lagCorrelation;
+        m_st.lagRaw = was.lagRaw;
+        m_st.lagWindows = was.lagWindows;
+        m_st.solves = was.solves;
+        m_st.rejected = was.rejected;
+        m_st.escapes = was.escapes;
+        m_st.corrTravelDeg = was.corrTravelDeg;
+        m_st.resyncs = was.resyncs + 1;
+        m_st.offHandTimes = was.offHandTimes;
+        m_haveCorr = m_solved = false;
+        m_nextPair = m_nextSolve = m_nextPriorFit = 0;
+        m_everSeen = m_inGap = m_escaping = false;
+        m_extraGate = 0;
+        m_refusedSince = -1;
+        m_offEvidence = m_onEvidence = 0;
+    }
+
     void Apply(double alpha, const Quat& mount) {
         if (m_st.calibrated && m_haveCorr && !m_imu.empty()) {   // keep the output where it is
             const Quat before = m_corr * Model(m_imu.back().q);
@@ -561,6 +651,9 @@ private:
     double m_extraGate = 0;            // deg: the gate's widening after a loss
     double m_refusedSince = -1;        // every trusted view refused since then (-1: one was accepted since) …
     size_t m_refusedCount = 0;         // … this many of them
+    // off the hand
+    double m_offEvidence = 0;          // s (decaying) of the hand turning while the IMU is still
+    double m_onEvidence = 0;           // s of the IMU turning with the hand, while off
 };
 
 } // namespace cf

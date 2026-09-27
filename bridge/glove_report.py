@@ -13,6 +13,9 @@ Each revision keeps the frozen 28-byte prefix (CyberFingerFW_ESP32/src/vr_gatt.h
   29 .. 79   variable tail (v1.3.0 and later): imu_present, then only the slots it flags, in slot order:
              body 1 accel (its quaternion is the prefix's), body 2 quaternion + accel, joint quaternion + accel.
              A glove with body 1 + joint sends 57 bytes.
+  + 1        extension byte (v1.3.3 and later, flagged by imu_present bit 7): buttons beyond the frozen 8 —
+             bit 0 the pink power key (a short press, reported as a ~80 ms click). A glove with body 1 + joint
+             sends 58 bytes.
 
 Only 79 bytes fits both tails (all three slots, with accel); there the layout whose quaternions are unit wins.
 """
@@ -30,12 +33,16 @@ FIXED_SIZE = HEADER_SIZE + 2 * QUAT.size   # 61
 FIXED_ACCEL_SIZE = FIXED_SIZE + 3 * ACCEL.size   # 79
 
 BODY1, BODY2, JOINT = 0x01, 0x02, 0x04     # imu_present bits (VrImuBit)
+EXT = 0x80                                 # imu_present bit: the extension byte ends the report (VR_REPORT_EXT)
+PINK = 0x01                                # extension byte: the pink power key (VR_BTN2_PWR)
 IDENTITY = (1.0, 0.0, 0.0, 0.0)
 ZERO = (0, 0, 0)
 
-Report = namedtuple("Report", "hand buttons joy_x joy_y trigger battery seq present quats accels has_accel")
+Report = namedtuple("Report", "hand buttons joy_x joy_y trigger battery seq present quats accels has_accel buttons2",
+                    defaults=(0,))
 Report.__doc__ = ("quats: body 1, body 2, joint (w, x, y, z), identity when absent. accels: raw sensor-frame "
-                  "counts per slot, zero when absent; meaningful only with has_accel.")
+                  "counts per slot, zero when absent; meaningful only with has_accel. buttons2: the extension "
+                  "byte's buttons (PINK), 0 from older firmware.")
 
 
 def variable_size(present):
@@ -81,16 +88,19 @@ def decode(data):
         # One quaternion and no presence byte: an all-zero quaternion means the IMU didn't come up.
         present = BODY1 if any(abs(c) > 1e-6 for c in q1) else 0
         return Report(*base, present, (q1 if present else IDENTITY, IDENTITY, IDENTITY), (ZERO,) * 3, False)
-    present = data[PREFIX_SIZE] & (BODY1 | BODY2 | JOINT)
-    n, nv = len(data), variable_size(present)
+    flags = data[PREFIX_SIZE]
+    present = flags & (BODY1 | BODY2 | JOINT)
+    ext = 1 if flags & EXT else 0                # v1.3.3+: one extension byte after the IMU blocks
+    n, nv = len(data), variable_size(present) + ext
     variable = _variable_tail(data, present, q1) if n >= nv else None
+    buttons2 = data[nv - 1] if ext and n >= nv else 0
     if n == nv and not (n == FIXED_ACCEL_SIZE and not all(_is_unit(q) for q in variable[0][1:])):
         quats, accels, has_accel = variable      # exactly the v1.3+ length (at 79: if its quaternions are unit)
-    elif n in (FIXED_SIZE, FIXED_ACCEL_SIZE):
+    elif not ext and n in (FIXED_SIZE, FIXED_ACCEL_SIZE):
         quats, accels, has_accel = _fixed_tail(data, q1)
     elif variable:
         quats, accels, has_accel = variable      # longer than we know: a later revision appending more
     else:                                        # cut short: only the prefix's quaternion is certain
         present &= BODY1
         quats, accels, has_accel = [q1 if present else IDENTITY, IDENTITY, IDENTITY], [ZERO, ZERO, ZERO], False
-    return Report(*base, present, tuple(quats), tuple(accels), has_accel)
+    return Report(*base, present, tuple(quats), tuple(accels), has_accel, buttons2)

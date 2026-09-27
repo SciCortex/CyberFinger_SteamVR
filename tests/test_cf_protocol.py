@@ -34,8 +34,16 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(len(pkt), cfp.GLOVE_SIZE)
         h = cfp.unpack_header(pkt)
         self.assertEqual((h["magic"], h["hand"], h["seq"]), (cfp.MAGIC_GLOVE, 1, 3))
-        buttons, trigger, jx, jy, battery = cfp.GLOVE_BODY.unpack_from(pkt, cfp.HEADER.size)
-        self.assertEqual((buttons, trigger, jx, jy, battery), (cfp.BTN_MENU, 255, 100, -200, 100))
+        buttons, trigger, jx, jy, battery, buttons2, resync = cfp.GLOVE_BODY.unpack_from(pkt, cfp.HEADER.size)
+        self.assertEqual((buttons, trigger, jx, jy, battery, buttons2, resync),
+                         (cfp.BTN_MENU, 255, 100, -200, 100, 0, 0))
+        # the IMU fusion resync count: the byte after buttons2 (GlovePacket::resync), wrapping at 256
+        pkt = cfp.pack_glove(0, 5, 0, 0, 0, 0, 50, resync=257)
+        self.assertEqual(len(pkt), cfp.GLOVE_SIZE)
+        self.assertEqual(pkt[cfp.HEADER.size + 8], 1)
+        # the pink button: the byte after battery_pct (Protocol.h GlovePacket::buttons2)
+        pkt = cfp.pack_glove(0, 4, 0, 0, 0, 0, 50, buttons2=cfp.GLOVE_BTN2_PINK)
+        self.assertEqual(pkt[cfp.HEADER.size + 7], cfp.GLOVE_BTN2_PINK)
 
     def test_stick(self):
         self.assertEqual(cfp.stick_to_int16(0.05, 0.05, 0.12), (0, 0))

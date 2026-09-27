@@ -29,6 +29,8 @@
 #include "SkeletonSynth.h"
 #include "SpreadMeter.h"
 #include "TapHold.h"
+#include "LongPress.h"
+#include "GestureClick.h"
 #include "Utils.h"
 
 using namespace cf;
@@ -156,6 +158,91 @@ static void TestGestures() {
     CHECK(GesturesFromBones(b).grasp > 0.8f);
     SynthesizeSkeleton(true, point, zero, b);
     CHECK(GesturesFromBones(b).indexPoint);
+    CHECK(!GesturesFromBones(b).twoFingerPoint);
+    // The two-finger point: index and middle out, ring and pinky curled, the thumb across them. With the thumb out
+    // (a V), or the middle curled (the index point), it isn't one.
+    const float two[5] = { 0.7f, 0, 0, 1, 1 }, vee[5] = { 0, 0, 0, 1, 1 };
+    SynthesizeSkeleton(true, two, zero, b);
+    CHECK(GesturesFromBones(b).twoFingerPoint);
+    CHECK(!GesturesFromBones(b).indexPoint);
+    SynthesizeSkeleton(false, two, zero, b);
+    CHECK(GesturesFromBones(b).twoFingerPoint);
+    SynthesizeSkeleton(true, vee, zero, b);
+    CHECK(!GesturesFromBones(b).twoFingerPoint);
+    SynthesizeSkeleton(true, fist, zero, b);
+    CHECK(!GesturesFromBones(b).twoFingerPoint);
+    // Real attempts (2026-09-27 log, thumb and pinky assumed across and folded): the ring folded only to 0.51-0.59,
+    // the middle at 0.36. The index point (middle curled) and an open hand stay out.
+    auto curled = [](float index, float middle, float ring) {
+        const float c[5] = { 0.5f, index, middle, ring, 0.7f };
+        return TwoFingerPointShape(c);
+    };
+    CHECK(curled(0.22f, 0.22f, 0.51f));
+    CHECK(curled(0.28f, 0.30f, 0.57f));
+    CHECK(curled(0.30f, 0.36f, 0.53f));
+    CHECK(!curled(0.20f, 0.70f, 0.70f));               // the index point
+    CHECK(!curled(0.24f, 0.22f, 0.24f));               // an open hand
+    const float thumbOut[5] = { 0.1f, 0.2f, 0.2f, 0.7f, 0.7f };
+    const char* why = nullptr;
+    CHECK(!TwoFingerPointShape(thumbOut, &why) && why != nullptr);
+
+    // The palm's normal points the way the fingers curl, on either hand (the sign is chirality's, so check it on the
+    // synthetic skeleton rather than trust a convention): curling moves the middle fingertip along the normal.
+    for (int right = 0; right < 2; ++right) {
+        const float half[5] = { 0, 0.5f, 0.5f, 0.5f, 0.5f };
+        vr::VRBoneTransform_t open[eBone_Count], curled[eBone_Count];
+        SynthesizeSkeleton(right == 1, zero, zero, open);
+        SynthesizeSkeleton(right == 1, half, zero, curled);
+        Vec3 c, n;
+        PalmFrame(right == 1, open, c, n);
+        Xform mo[eBone_Count], mc[eBone_Count];
+        ModelSpace(open, mo);
+        ModelSpace(curled, mc);
+        CHECK(Dot(mc[eBone_MiddleFinger4].p - mo[eBone_MiddleFinger4].p, n) > 0.01);
+        // A head straight out of the palm: 0°; behind the back of the hand: 180°.
+        const Xform pose{ QuatFromEulerXYZDeg(30, -20, 50), { 0.1, 1.2, -0.3 } };
+        const Vec3 front = pose.p + Rotate(pose.q, c + n * 0.4), back = pose.p + Rotate(pose.q, c - n * 0.4);
+        CHECK(PinkyShape(right == 1, open, pose, &front).palmToHeadDeg < 1.0);
+        CHECK(PinkyShape(right == 1, open, pose, &back).palmToHeadDeg > 179.0);
+        CHECK(PinkyShape(right == 1, open, pose, nullptr).palmToHeadDeg == 180.0);
+    }
+    // A deliberate pinky pinch, and the ones it must refuse.
+    PinkyPinchShape meant;
+    meant.palmToHeadDeg = 25;
+    const float relaxed[5] = { 0.4f, 0.2f, 0.25f, 0.45f, 0.9f };
+    std::copy(relaxed, relaxed + 5, meant.curls);
+    const double tips[4] = { 0.07, 0.06, 0.04, 0.012 };
+    std::copy(tips, tips + 4, meant.thumbTo);
+    CHECK(PinkyPinchMeant(meant));
+    PinkyPinchShape s = meant;
+    s.palmToHeadDeg = 120;                              // palm away from the face
+    CHECK(!PinkyPinchMeant(s));
+    s = meant;
+    s.thumbTo[2] = 0.018;                               // the thumb on the ring and the pinky together
+    CHECK(!PinkyPinchMeant(s));
+    s = meant;
+    s.thumbTo[1] = 0.02;                                // ... or the last three
+    CHECK(!PinkyPinchMeant(s));
+    s = meant;
+    s.curls[1] = s.curls[2] = 0.85f;                    // a fist closing on the pinky
+    CHECK(!PinkyPinchMeant(s));
+    // A two-finger point, as the headset saw one (2026-09-27): the thumb across the ring and pinky is no pinky pinch.
+    s = meant;
+    s.palmToHeadDeg = 49;
+    s.curls[1] = 0.12f, s.curls[2] = 0.11f, s.curls[3] = 0.64f;
+    s.thumbTo[1] = 0.113, s.thumbTo[2] = 0.013, s.thumbTo[3] = 0.013;
+    CHECK(!PinkyPinchMeant(s));
+
+    // As a button: on after 60 ms held, off after 120 ms gone; a flicker shorter than that changes nothing.
+    GestureClick click;
+    CHECK(!click.Update(true, 0.00));
+    CHECK(!click.Update(false, 0.03));                  // a 30 ms flicker
+    CHECK(!click.Update(true, 0.10));
+    CHECK(click.Update(true, 0.17));                    // held 70 ms
+    CHECK(click.Update(false, 0.20));
+    CHECK(click.Update(true, 0.25));                    // back within 120 ms: still held
+    CHECK(click.Update(false, 0.30));
+    CHECK(!click.Update(false, 0.43));                  // gone 130 ms
 }
 
 static double QuatNorm(const vr::HmdQuaternionf_t& q) {
@@ -353,6 +440,33 @@ static void TestPoseFilter() {
 }
 
 // Grab, tap to hold: short press latches until the next press, long press only while held.
+// The black button: a tap reaches the app as a click on release (long enough to be seen), a hold fires the
+// long press once and never reaches the app.
+static void TestLongPress() {
+    LongPress lp(0.8, 0.06);
+    bool fired = false, anyFired = false, anyDown = false;
+    // a 0.15 s tap: nothing while held, then down for 0.06 s from the release
+    double t = 0;
+    for (; t < 0.15; t += 0.011) { anyDown |= lp.Update(true, t, fired); anyFired |= fired; }
+    CHECK(!anyDown && !anyFired);
+    CHECK(lp.Update(false, t, fired) && !fired);
+    CHECK(lp.Update(false, t + 0.03, fired));
+    CHECK(!lp.Update(false, t + 0.07, fired));
+    // a 1.5 s hold: fires once at 0.8 s, never down
+    int fires = 0;
+    anyDown = false;
+    const double t0 = 1.0;
+    for (t = t0; t < t0 + 1.5; t += 0.011) { anyDown |= lp.Update(true, t, fired); fires += fired; }
+    CHECK(fires == 1 && !anyDown);
+    CHECK(!lp.Update(false, t, fired) && !fired);
+    // pressed again right after a click: a new press, held back again
+    lp.Update(true, 3.0, fired);
+    CHECK(lp.Update(false, 3.1, fired));
+    CHECK(lp.Update(true, 3.12, fired));                 // still the click's time
+    CHECK(!lp.Update(true, 3.2, fired));                 // then held back as a new press
+    CHECK(lp.Update(false, 3.3, fired));
+}
+
 static void TestTapHold() {
     TapHold g(0.2);
     double t = 0;
@@ -471,6 +585,125 @@ static void TestImuFusionPrior() {
     CHECK(!st.calibrated && st.priorResidualDeg > 25.0);
 }
 
+// Resync. Calibrated on one heading; then the IMU's heading jumps by 110° (the glove switched off and on) —
+// after a 6 s silence (resynced by itself), or with no gap and Resync() asked for (the bridge's button, a triple
+// tap). Either way the output is on the hand again within a second of the change; the mounting and the lag carry
+// over. Without the resync, the gate refuses the headset until its escape.
+static void TestImuFusionResync() {
+    const Quat toVr{ std::sqrt(0.5), -std::sqrt(0.5), 0, 0 };
+    const Quat mount = QuatFromEulerXYZDeg(20, -30, 10);
+    auto yaw = [](double deg) {
+        const double a = deg * kPi / 180.0;
+        return Quat{ std::cos(a / 2), 0, std::sin(a / 2), 0 };
+    };
+    auto hand = [](double t) { return QuatFromEulerXYZDeg(-40 + 1.5 * std::sin(3 * t), 15, 5 * std::sin(2 * t)); };
+    auto angle = [](const Quat& a, const Quat& b) {
+        const double d = std::fabs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);
+        return 2.0 * std::acos(std::min(1.0, d)) * 180.0 / kPi;
+    };
+    // mode 0: an IMU gap of 6 s; 1: no gap, Resync() at the change; 2: no gap, no resync. Returns the seconds after
+    // the change until the output stays within 5° of the hand (-1: never).
+    auto run = [&](int mode, ImuFusion::Status& st) {
+        ImuFusion f;
+        f.Reset();
+        f.SetPrior({ mount, 0.03, 0 });
+        const double change = 3.0, gap = mode == 0 ? 6.0 : 0.0, resumed = change + gap;
+        double tImu = 0, tOpt = 0, goodSince = -1;
+        Quat q;
+        Vec3 w;
+        for (double t = 0; t < resumed + 6.0; t += 0.001) {
+            while (tImu <= t) {
+                if (tImu < change || tImu >= resumed) {
+                    const Quat y = yaw(tImu < change ? -70.0 : 40.0);
+                    f.AddImu(tImu, Normalize(Conj(y * toVr) * hand(tImu) * Conj(mount)));
+                }
+                tImu += 0.01;
+            }
+            if (mode == 1 && t >= change && t < change + 0.001) f.Resync();
+            if (tOpt > t) continue;
+            f.Observe(t, hand(t - 0.03), true);
+            tOpt += 1.0 / 90;
+            if (t < resumed) continue;
+            const bool good = f.Orientation(t, q, w) && angle(q, hand(t)) < 5.0;
+            if (!good) goodSince = -1;
+            else if (goodSince < 0) goodSince = t;
+        }
+        st = f.GetStatus();
+        return goodSince < 0 ? -1.0 : goodSince - resumed;
+    };
+    ImuFusion::Status st;
+    const double afterGap = run(0, st);
+    CHECK(st.resyncs == 1 && st.calibrated);
+    CHECK(afterGap >= 0 && afterGap < 1.0);
+    const double asked = run(1, st);
+    CHECK(st.resyncs == 1 && st.calibrated);
+    CHECK(asked >= 0 && asked < 1.0);
+    const double without = run(2, st);
+    CHECK(st.resyncs == 0);
+    CHECK(without < 0 || without > asked + 1.0);
+    std::printf("  IMU fusion after a 110 deg heading jump: right again after %.2f s (gap, resynced by itself), "
+                "%.2f s (Resync asked for), %.2f s without (-1: not within 6 s)\n", afterGap, asked, without);
+}
+
+// Off the hand. Calibrated; then the glove lies on the floor, switched on, for 60 s while the headset watches the bare
+// hand move about: found off the hand within ~3 s, no output and nothing learned meanwhile (no pairs, no escapes).
+// Put back on: the IMU turns with the hand again, it resyncs, and the output is right within ~2 s.
+static void TestImuFusionOffHand() {
+    const double alpha = -70.0 * kPi / 180.0;
+    const Quat yaw{ std::cos(alpha / 2), 0, std::sin(alpha / 2), 0 };
+    const Quat toVr{ std::sqrt(0.5), -std::sqrt(0.5), 0, 0 };
+    const Quat mount = QuatFromEulerXYZDeg(20, -30, 10);
+    auto hand = [](double t) {
+        return QuatFromEulerXYZDeg(-40 + 25 * std::sin(1.2 * t), 15 + 10 * std::sin(0.8 * t), 5 * std::sin(t));
+    };
+    auto angle = [](const Quat& a, const Quat& b) {
+        const double d = std::fabs(a.w * b.w + a.x * b.x + a.y * b.y + a.z * b.z);
+        return 2.0 * std::acos(std::min(1.0, d)) * 180.0 / kPi;
+    };
+    ImuFusion f;
+    f.Reset();
+    f.SetPrior({ mount, 0.03, 0 });
+    const double off = 5.0, on = 65.0;
+    const Quat lying = hand(off);                               // where the glove was put down
+    double tImu = 0, tOpt = 0, foundOffAt = -1, goodSince = -1;
+    size_t pairsWhileOff = 0, escapesBefore = 0;
+    bool outputWhileOff = false;
+    Quat q;
+    Vec3 w;
+    for (double t = 0; t < on + 6.0; t += 0.001) {
+        while (tImu <= t) {
+            const Quat h = tImu >= off && tImu < on ? lying : hand(tImu);
+            f.AddImu(tImu, Normalize(Conj(yaw * toVr) * h * Conj(mount)));
+            tImu += 0.01;
+        }
+        if (tOpt > t) continue;
+        f.Observe(t, hand(t - 0.03), true);
+        tOpt += 1.0 / 90;
+        const ImuFusion::Status st = f.GetStatus();
+        const bool out = f.Orientation(t, q, w);
+        if (t < off) { escapesBefore = st.escapes; continue; }
+        if (t < on) {
+            if (st.offHand && foundOffAt < 0) foundOffAt = t - off;
+            if (foundOffAt >= 0) {
+                outputWhileOff = outputWhileOff || out;
+                pairsWhileOff = std::max(pairsWhileOff, st.pairs);
+            }
+            continue;
+        }
+        const bool good = out && angle(q, hand(t)) < 5.0;
+        if (!good) goodSince = -1;
+        else if (goodSince < 0) goodSince = t;
+    }
+    const ImuFusion::Status st = f.GetStatus();
+    CHECK(foundOffAt >= 0 && foundOffAt < 3.0);
+    CHECK(!outputWhileOff);
+    CHECK(st.escapes == escapesBefore);                         // no escape toward the bare hand
+    CHECK(st.offHandTimes == 1 && st.resyncs == 1 && !st.offHand && st.calibrated);
+    CHECK(goodSince >= on && goodSince - on < 2.0);
+    std::printf("  IMU fusion off the hand: found after %.2f s; back on, right again after %.2f s\n", foundOffAt,
+                goodSince - on);
+}
+
 // The gate. A hand turning slowly, calibrated from an exact prior; then the headset flips the palm (180°) for 1.5 s:
 // the output stays on the hand. Then the glove slips on the hand by 35°: the headset, in full view, is refused
 // until the escape (3 s), then followed. The same slip seen only from the edge of the view (trust 0.3): never.
@@ -542,9 +775,12 @@ int main(int argc, char** argv) {
     TestSpread();
     TestPoseFilter();
     TestTapHold();
+    TestLongPress();
     TestSplitList();
     TestImuFusion();
     TestImuFusionPrior();
+    TestImuFusionResync();
+    TestImuFusionOffHand();
     TestImuFusionGate();
     TestGestures();
     if (g_failures) {
