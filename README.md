@@ -126,11 +126,22 @@ Then:
      `<Resonite>\BepInEx\core`), it lists that folder too. A Gale user's game folder also has a
      `Renderer\BepInEx`: that's Gale's loader, not where its plugins go.
    - **CyberFingerMod and ProximityGrab** are ResoniteModLoader mods, and go into `<Resonite>\rml_mods` either
-     way (under Gale, RML starts through the ResoniteModLoaderLoader package). Without a config of its own,
-     CyberFingerMod gets one with `GamepadBindings` off.
+     way. Under Gale, RML starts through the ResoniteModLoaderLoader package, or through
+     `-LoadAssembly Libraries/ResoniteModLoader.dll` in Resonite's Steam launch options, never both (see the
+     gotcha below). Without a config of its own, CyberFingerMod gets one with `GamepadBindings` off.
    - It installs neither the loaders nor MoreFluxActions' dependencies (BepisLoader, BepInExRenderer,
      BepisResoniteWrapper, BepInExResoniteShim, InterprocessLib, RenderiteHook, and for RML mods under Gale
-     ResoniteModLoaderLoader). It checks for them, and lists what's missing to add in Gale.
+     ResoniteModLoaderLoader, unless the launch options load RML). It checks for them, and lists what's missing
+     or disabled to add in Gale.
+   - **Gotcha: RML loaded twice.** Resonite stops as it starts, its window left on the renderer, and the log in
+     `<Resonite>\Logs` says `An item with the same key has already been added. Key: ResoniteModLoader`. RML is
+     being loaded twice: Gale launches Resonite through Steam, which adds its launch options, so a
+     `-LoadAssembly Libraries/ResoniteModLoader.dll` there (RML's own setup, or a tool that writes the launch
+     options) and ResoniteModLoaderLoader in the Gale profile each load it. Keep one: disable
+     ResoniteModLoaderLoader in Gale, or remove `-LoadAssembly …` from *Steam → Resonite → Properties → Launch
+     Options*. Keeping `-LoadAssembly` also loads RML when you start Resonite from Steam without Gale. The
+     installer warns when it finds both. (Launching through Steam is Gale's default. If you set Gale to start the
+     game directly, Steam's launch options don't apply, and ResoniteModLoaderLoader is what loads RML.)
    - Uninstalling removes the copies. The mods are also in `<install folder>\ResoniteMods`, laid out as they
      install, to copy by hand into another mod manager's profile.
 
@@ -161,8 +172,8 @@ Then:
 | Grab (grip) | `/input/grab` (tap to hold) | Grab: a quick tap holds until the next press, a longer press grabs while held | same |
 | Joystick (+ push) | `/input/thumbstick` | Move (L), turn (R); push: jump | Axis, secondary (push) |
 | MENU — context / rotary-dial button | `/input/b` (B/Y) | Action menu (L/R) | Context menu |
-| Start/Select (black wrist button) | `/input/a` (A/X) | Quick menu (L), Safe Mode (R) | Dash |
-| Black wrist button held (≥ 0.8 s) | `/input/a_hold` | Gesture toggle (L) | FluxAction1 (L), FluxAction2 (R), with the MoreFluxActions mod |
+| Start/Select (black wrist button) | `/input/a` (A/X) | Quick menu (L), main menu (R) | Dash |
+| Black wrist button held (≥ 0.8 s) | `/input/a_hold` | Gesture toggle (L), Safe Mode (R) | FluxAction1 (L), FluxAction2 (R), with the MoreFluxActions mod |
 | Left pink wrist button (power key, a short press) | `/input/pink` (left) | SteamVR dashboard (the dashboard's binding) | same |
 | Right pink wrist button (power key, a short press) | `/input/pink` (right), with the bridge's right pink on *SteamVR* | Mute | FluxAction42 (Resonite's mute, with the mod's `MuteToggleAction` at its default, 42) |
 | C, D, E (some hardware revisions and models only) | `/input/c`, `/input/d`, `/input/e` | unbound | FluxAction3/4 (C, L/R), 5/6 (D), 7/8 (E), with the mod |
@@ -268,16 +279,27 @@ tuning constants are in the firmware's `src/haptics.h`. Click a hand panel's HAP
 
 ## Application support
 
-- **VRChat** — a binding that emulates an Oculus Touch controller, laid out by what VRChat does with each Touch
-  control ([docs.vrchat.com/docs/touch](https://docs.vrchat.com/docs/touch)): stick press jump, the menu button
-  the action menu, the black button the quick menu (left) and Safe Mode (right), the left black button held the
-  gesture toggle; trigger, grip (tap to hold) and sticks as on Touch. Mute is the right pink button, done by the
-  bridge (the Windows microphone). VRChat's
+- **VRChat** — a binding that emulates an Oculus Touch controller, without its model: stick press jump, the menu
+  button the action menu, the black button the quick menu (left) and the main menu (right), held the gesture
+  toggle (left) and Safe Mode (right); trigger, grip (tap to hold) and sticks as on Touch. VRChat runs CyberFinger
+  in its generic controller mode all the same (its log: `can use Oculus Touch controller = False`), where Touch's
+  menu actions do nothing, so the binding uses VRChat's own *Quick Menu*, *Action Menu* and *Main Menu* actions.
+  With the Touch model simulated, VRChat would draw a Quest controller next to each hand while its menus are open.
+  Mute is the right pink button: VRChat's own, with the bridge's right pink on *SteamVR* (the default). VRChat's
   [driver guide](https://creators.vrchat.com/platforms/pc/steamvr-drivers/) asks drivers not to emulate other
   controllers: the emulation is only the default binding's choice, and a binding without it works too. At the
   default skeletal tracking level *Full*, VRChat also turns on its hand-gesture
   controls; `skeletal_tracking_level` = `partial` keeps them off. Check the fingers with *Settings → Controls →
   Accurate* hands. VRChat comes second for now: the defaults are tuned for Resonite.
+  Suggested VRChat settings, as its hand-tracking gestures read the same fingers CyberFinger passes on:
+  - *Main Menu → Audio & Voice → Microphone Behaviour*: **Toggle**. The right pink button sends one short press;
+    with *Push to Talk* the microphone would open only for that moment.
+  - *Main Menu → Tracking & IK → Finger Tracking*: finger walking (moving with a thumb and middle finger pinch)
+    and *Jump Gesture* **off**. The stick moves and jumps; on, a pinch or a hand pose does too.
+  - *Main Menu → User Interface → General UI Settings → One Handed Movement [VR]*: **off**, moving on the left
+    stick and turning on the right, as the binding lays them out.
+  - *Main Menu → Controls → SteamVR*: *Avatars Use Finger Tracking* **on**, and *Finger Tracking Exclusive Mode*
+    **off**: on, VRChat ignores SteamVR drivers' inputs while hand tracking is active.
 - **Resonite** — native binding that emulates an Oculus Touch controller. Resonite picks its controller mode
   from the render model of the devices it registers as hands, and only its Touch mode has a dash button, so
   CyberFinger shows itself to Resonite as a Touch controller: the black button (A) opens the dash, B the context

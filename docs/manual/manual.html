@@ -269,6 +269,7 @@
       <li><a href="#playing">In VR</a></li>
       <li><a href="#resonite">Resonite</a></li>
       <li><a href="#fluxactions">ProtoFlux actions</a></li>
+      <li><a href="#vrchat">VRChat</a></li>
       <li><a href="#dashboard">SteamVR dashboard</a></li>
       <li><a href="#mic">Microphone and vibration</a></li>
       <li><a href="#power">Power and charging</a></li>
@@ -438,7 +439,7 @@
           </tbody>
         </table>
       </div>
-      <p>To change a binding, open SteamVR's controller bindings while Resonite is running and edit the CyberFinger defaults for Resonite. VRChat has its own CyberFinger defaults too, laid out like a Touch controller's: press a stick to jump, the Menu button opens the action menu, the black button opens the quick menu on the left and switches Safe Mode on the right, and holding the left black button turns your hand gestures on or off. Mute is the right pink button, as everywhere.</p>
+      <p>To change a binding, open SteamVR's controller bindings while Resonite is running and edit the CyberFinger defaults for Resonite. VRChat has its own CyberFinger defaults: see <a href="#vrchat">VRChat</a>.</p>
       <h3 id="grabbing">Grabbing with your hand</h3>
       <p>With the <a href="https://github.com/SciCortex/ProximityGrab">ProximityGrab</a> mod (a ResoniteModLoader mod: put <code>ProximityGrab.dll</code> in Resonite's <code>rml_mods</code> folder), make a fist to grab what's near your hand, without the laser, and pinch your index finger and thumb to pick something up precisely at your fingertips. The grab button grabs as before. The mod sees the gestures itself, so leave the pinch and fist gestures unbound in SteamVR's bindings; the CyberFinger defaults bind neither. To switch it off for a while, use the Grabbing item in the context menu.</p>
       <h3>Switching between CyberFinger and the Quest controllers</h3>
@@ -472,6 +473,43 @@
       <p>The impulses run on your own client, as dynamic impulses do. Whatever your ProtoFlux changes is seen by everyone as usual.</p>
     </section>
 
+    <section id="vrchat">
+      <h2>VRChat</h2>
+      <p>CyberFinger's default bindings for VRChat load on their own.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Control</th><th>In VRChat</th></tr></thead>
+          <tbody>
+            <tr><td><span class="dot">2</span> Trigger</td><td>Use and interact</td></tr>
+            <tr><td><span class="dot">3</span> Grab</td><td>Grab. A quick tap holds on until you press again.</td></tr>
+            <tr><td><span class="dot">1</span> Joystick</td><td>Move (left) and turn (right); push to jump</td></tr>
+            <tr><td><span class="dot">4</span> Menu</td><td>Action menu</td></tr>
+            <tr><td><span class="dot">6</span> Black button</td><td>Quick menu on the left, main menu on the right (when you let go)</td></tr>
+            <tr><td><span class="dot">6</span> Black button, held</td><td>Hand gestures on or off on the left, Safe Mode on the right</td></tr>
+            <tr><td><span class="dot">5</span> C, D, E</td><td>Free, to bind yourself</td></tr>
+            <tr><td><span class="dot">8</span> Pink button</td><td>Left: SteamVR dashboard. Right: mute (see <a href="#mic">Microphone</a>).</td></tr>
+            <tr><td>Your fingers</td><td>Shown on your avatar, from the headset's hand tracking</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>Suggested VRChat settings</h3>
+      <p>VRChat's hand-tracking gestures read the same fingers CyberFinger passes on from the headset, so they react to your hands while you play with the buttons. These settings keep the two apart:</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Setting</th><th>Set to</th><th>Why</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Microphone Behaviour</strong><br>Main Menu &gt; Audio &amp; Voice &gt; Microphone</td><td class="default">Toggle</td><td>The right pink button sends one short press. With <b>Push to Talk</b>, your microphone would only be open for that moment.</td></tr>
+            <tr><td><strong>Finger walking</strong> (moving with a thumb and middle finger pinch)<br>Main Menu &gt; Tracking &amp; IK &gt; Finger Tracking</td><td class="default">off</td><td>You move with the stick. On, a pinch walks you around.</td></tr>
+            <tr><td><strong>Jump Gesture</strong><br>Main Menu &gt; Tracking &amp; IK &gt; Finger Tracking</td><td class="default">off</td><td>You jump by pushing the stick. On, a hand pose makes you jump.</td></tr>
+            <tr><td><strong>One Handed Movement [VR]</strong><br>Main Menu &gt; User Interface &gt; General UI Settings</td><td class="default">off</td><td>Keeps moving on the left stick and turning on the right, as the CyberFinger bindings lay them out.</td></tr>
+            <tr><td><strong>Avatars Use Finger Tracking</strong><br>Main Menu &gt; Controls &gt; SteamVR</td><td class="default">on</td><td>Your avatar's fingers follow yours.</td></tr>
+            <tr><td><strong>Finger Tracking Exclusive Mode</strong><br>Main Menu &gt; Controls &gt; SteamVR</td><td class="default">off</td><td>On, VRChat ignores the inputs of SteamVR drivers while hand tracking is active, and CyberFinger's buttons could go dead.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>To switch all of VRChat's hand gestures off at once, set CyberFinger's <b>Skeletal tracking level</b> to <b>Partial</b> (see <a href="#settings">Settings</a>). To change a binding, open SteamVR's controller bindings while VRChat is running and edit the CyberFinger defaults for VRChat.</p>
+    </section>
+
     <section id="dashboard">
       <h2>SteamVR dashboard</h2>
       <div class="table-wrap">
@@ -492,7 +530,7 @@
     <section id="mic">
       <h2>Microphone and vibration</h2>
       <h3>Microphone on/off</h3>
-      <p>Press the right CyberFinger's pink button to mute your microphone in the game, and press it again to unmute. The game's microphone icon shows the state. The bridge must be running in VR Mode, with <b>Right pink button</b> on <b>SteamVR</b> (the default), which leaves the button to the game. In VRChat it is VRChat's mute straight away. In Resonite, which has no mute of its own for controllers, it presses FluxAction42, which the MoreFluxActions mod turns into Resonite's mute, like the dash's mute button. That's its <b>MuteToggleAction</b> setting, 42 by default; set it to 0 in your mod manager's config editor if you'd rather use FluxAction42 for something else.</p>
+      <p>Press the right CyberFinger's pink button to mute your microphone in the game, and press it again to unmute. The game's microphone icon shows the state. The bridge must be running in VR Mode, with <b>Right pink button</b> on <b>SteamVR</b> (the default), which leaves the button to the game. In VRChat it is VRChat's mute, with VRChat's <b>Microphone Behaviour</b> on <b>Toggle</b> (see <a href="#vrchat">VRChat</a>). In Resonite, which has no mute of its own for controllers, it presses FluxAction42, which the MoreFluxActions mod turns into Resonite's mute, like the dash's mute button. That's its <b>MuteToggleAction</b> setting, 42 by default; set it to 0 in your mod manager's config editor if you'd rather use FluxAction42 for something else.</p>
       <p>To mute every app at once instead, Discord included, set <b>Right pink button</b> to <b>mic mute</b>. It mutes Windows' default microphone (SteamVR can make the headset's microphone the Windows default), and the CyberFinger confirms on its motor. Games then don't show you as muted: they just hear silence.</p>
       <p>To use the button in Resonite for something else, set <b>Right pink button</b> to <b>FluxAction</b> at the top of CyberFinger Bridge and pick a number from 1 to 42 (42 at first). The button then presses and releases that <a href="#fluxactions">Flux Action</a>, without vibrating, and leaves the microphone alone. Only the microphone toggle confirms on the motor. The bridge remembers the choice.</p>
       <h3>Vibration</h3>

@@ -206,7 +206,7 @@
           "mode": "button",
           "inputs": {
             "click": {
-              "output": "/actions/global/in/stick_click"
+              "output": "/actions/global/in/action_menu"
             }
           }
         },
@@ -215,7 +215,7 @@
           "mode": "button",
           "inputs": {
             "click": {
-              "output": "/actions/global/in/stick_click"
+              "output": "/actions/global/in/action_menu"
             }
           }
         },
@@ -242,21 +242,21 @@
           "mode": "button",
           "inputs": {
             "click": {
-              "output": "/actions/global/in/menu"
-            }
-          }
-        },
-        {
-          "path": "/user/hand/left/input/a",
-          "mode": "button",
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/udon_menu"
+              "output": "/actions/global/in/quick_menu"
             }
           }
         },
         {
           "path": "/user/hand/right/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/global/in/main_menu"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/a_hold",
           "mode": "button",
           "inputs": {
             "click": {
@@ -601,12 +601,12 @@
   },
   "category": "steamvr_input",
   "controller_type": "cyberfinger",
-  "description": "Emulates an Oculus Touch controller. Stick press: jump. Menu button: action menu. Black button: quick menu (left), Safe Mode (right); left held: gesture toggle. Right pink button: mute (with the bridge's right pink set to SteamVR). Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. C/D/E and the hand gestures are left free for the user.",
+  "description": "Emulates an Oculus Touch controller, without its model. Stick press: jump. Menu button: action menu. Black button: quick menu (left), main menu (right); held: gesture toggle (left), Safe Mode (right). Right pink button: mute (with the bridge's right pink set to SteamVR). Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. C/D/E and the hand gestures are left free for the user.",
   "interaction_profile": "",
   "name": "CyberFinger defaults for VRChat",
   "options": {
     "simulated_controller_type": "oculus_touch",
-    "simulate_rendermodel": "full"
+    "simulate_rendermodel": "none"
   },
   "simulated_actions": []
 }

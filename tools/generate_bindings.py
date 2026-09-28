@@ -32,9 +32,9 @@ In the VRChat and Resonite defaults, grab comes from /input/grab: the grip with 
 (a press shorter than grab_tap_ms holds until the next press, a longer one grabs while held). Binding
 /input/grip instead gives the plain button.
 
-The VRChat binding emulates an Oculus Touch controller and lays the buttons out by VRChat's meaning of Touch's
-(vrchat_layout): stick press jump, menu button the action menu, black button the quick menu (left) and Safe Mode
-(right), left black button held the gesture toggle, right pink button mute. VRChat's driver
+The VRChat binding emulates an Oculus Touch controller, without its render model, and binds VRChat's own menu
+actions (vrchat_layout): stick press jump, menu button the action menu, black button the quick menu (left) and the
+main menu (right), held the gesture toggle (left) and Safe Mode (right), right pink button mute. VRChat's driver
 guide asks drivers not to emulate controllers: this is a choice of the default binding, which users can change. The
 Resonite binding emulates an Oculus Touch controller, so Resonite always runs in its Touch mode with CyberFinger
 (its only mode with a dash button), whatever the streamer; the driver hides the streamers' own emulated Touch
@@ -170,12 +170,15 @@ def index_to_cyberfinger(path):
 
 
 def vrchat_layout(bindings):
-    """The CyberFinger layout for VRChat (v1), over the Touch-derived sets, in VRChat's words
-    (docs.vrchat.com/docs/touch): the stick press jumps (Touch's A), the menu button B opens the action menu
-    (Touch's stick press), the left black button the quick menu (Touch's Y, with the Udon menu), the right one Safe
-    Mode (on Touch the four-button chord, dropped here), and the left black button held toggles gestures. The right
-    pink button is VRChat's mute, when the bridge passes it on (its right pink set to SteamVR); in its other modes
-    the bridge mutes the Windows microphone itself, or fires a FluxAction, and VRChat never sees the button."""
+    """The CyberFinger layout for VRChat (v2), over the Touch-derived sets. VRChat doesn't take the CyberFinger for a
+    Touch controller despite the emulation (its log: "can use Oculus Touch controller = False"), and runs it in its
+    generic mode, which opens the menus from their own actions: Touch's Menu (Combined) and stick press (Udon Stick
+    Click, only for worlds' scripts) do nothing there. So the menu button B opens the action menu, the left black
+    button the quick menu, the right one the main menu, and held, the left toggles gestures and the right is Safe
+    Mode (on Touch the four-button chord, dropped here). The stick press jumps (Touch's A). The right pink button is
+    VRChat's mute, when the bridge passes it on (its right pink set to SteamVR); in its other modes the bridge mutes
+    the Windows microphone itself, or fires a FluxAction, and VRChat never sees the button. The One-Hand set has no
+    menu actions of its own and keeps B on the stick press. Tested in VRChat 2026.3.2."""
     for aset in ("/actions/global", "/actions/one_hand"):
         sec = bindings.get(aset)
         if not sec:
@@ -195,13 +198,13 @@ def vrchat_layout(bindings):
                          "inputs": {"click": {"output": f"{aset}/in/{action}"}}})
 
         for side in HANDS:
-            button(side, "b", "stick_click")
+            button(side, "b", "action_menu" if aset == "/actions/global" else "stick_click")
         button("left", "a_hold", "gesture_toggle")
         button("right", "pink", "mic")
         if aset == "/actions/global":
-            button("left", "a", "menu")
-            button("left", "a", "udon_menu")
-            button("right", "a", "safe_mode")
+            button("left", "a", "quick_menu")
+            button("right", "a", "main_menu")
+            button("right", "a_hold", "safe_mode")
             sec.pop("chords", None)                    # Safe Mode has its button
         sec["sources"] = kept
     return bindings
@@ -212,11 +215,14 @@ def vrchat(steam):
                        "SteamVR", "bindings_oculus_touch.json")
     touch = load(src)
     b = header("steam.app.438100", "CyberFinger defaults for VRChat",
-               "Emulates an Oculus Touch controller. Stick press: jump. Menu button: action menu. Black button: "
-               "quick menu (left), Safe Mode (right); left held: gesture toggle. Right pink button: mute (with the "
-               "bridge's right pink set to SteamVR). Grab: a quick tap of the grip holds until the next press, "
-               "a longer press grabs while held. C/D/E and the hand gestures are left free for the user.",
-               options={"simulated_controller_type": "oculus_touch", "simulate_rendermodel": "full"})
+               "Emulates an Oculus Touch controller, without its model. Stick press: jump. Menu button: action menu. "
+               "Black button: quick menu (left), main menu (right); held: gesture toggle (left), Safe Mode (right). "
+               "Right pink button: mute (with the bridge's right pink set to SteamVR). Grab: a quick tap of the grip "
+               "holds until the next press, a longer press grabs while held. C/D/E and the hand gestures are left "
+               "free for the user.",
+               # No simulated render model: VRChat draws the controllers with its menus open, and a Touch controller
+               # would show there next to the hand
+               options={"simulated_controller_type": "oculus_touch", "simulate_rendermodel": "none"})
     b["bindings"] = convert(touch, touch_to_cyberfinger, drop_output=lambda o: "gesture" in o.lower())
     tap_to_hold_grab(b["bindings"], {"/actions/global/in/grab", "/actions/one_hand/in/grab"})
     vrchat_layout(b["bindings"])

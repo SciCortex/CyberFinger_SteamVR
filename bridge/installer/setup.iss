@@ -239,7 +239,8 @@ end;
 // Renderer\BepInEx\core included). Without a mod manager, BepisLoader is installed in the game folder itself: its
 // BepInEx\core. The Resonite plugins page lists both kinds; the user picks. ResoniteModLoader mods (CyberFingerMod,
 // ProximityGrab) always go into the game folder's rml_mods: RML loads them from there, also under Gale (where
-// ResoniteModLoaderLoader loads the game folder's RML).
+// ResoniteModLoaderLoader loads the game folder's RML, or the -LoadAssembly launch option does: Gale launches through
+// Steam, which adds the game's launch options. Never both: RML loaded twice stops Resonite as it starts).
 
 const
   ResoniteModsList = 'installed.txt';     // in {app}\ResoniteMods: every copy made, for the uninstaller
@@ -390,7 +391,7 @@ begin
 end;
 
 // True when the plugins folder holds a plugin called Name: a folder or file with it in its name (Gale names
-// the folders "<Team>-<Name>").
+// the folders "<Team>-<Name>"). One disabled in Gale doesn't count: Gale renames its files *.old.
 function HasPlugin(Plugins, Name: String): Boolean;
 var
   F: TFindRec;
@@ -399,11 +400,107 @@ begin
   if FindFirst(Plugins + '\*', F) then
   try
     repeat
-      Result := Pos(Lowercase(Name), Lowercase(F.Name)) > 0;
+      Result := (Pos(Lowercase(Name), Lowercase(F.Name)) > 0) and (CompareText(ExtractFileExt(F.Name), '.old') <> 0) and
+                not FileExists(Plugins + '\' + F.Name + '\manifest.json.old');
     until Result or not FindNext(F);
   finally
     FindClose(F);
   end;
+end;
+
+// True when a Steam user's localconfig.vdf gives Resonite launch options that load RML: in a section of its app ID,
+// a "LaunchOptions" with -LoadAssembly and ResoniteModLoader after it (RML's own setup).
+function LaunchOptionsLoadRml(FileName: String): Boolean;
+var
+  Lines: TArrayOfString;
+  Line: String;
+  I, Depth, P: Integer;
+begin
+  Result := False;
+  if not LoadStringsFromFile(FileName, Lines) then
+    Exit;
+  Depth := 0;                             // in a "2519830" section: how deep, -1 before its opening brace
+  for I := 0 to GetArrayLength(Lines) - 1 do
+  begin
+    Line := Lowercase(Trim(Lines[I]));
+    if Depth < 0 then
+    begin
+      if Line = '{' then
+        Depth := 1
+      else
+        Depth := 0;
+    end
+    else if Depth = 0 then
+    begin
+      if Line = '"2519830"' then
+        Depth := -1;
+    end
+    else if Line = '{' then
+      Depth := Depth + 1
+    else if Line = '}' then
+      Depth := Depth - 1
+    else if (Depth = 1) and (Pos('"launchoptions"', Line) = 1) then
+    begin
+      P := Pos('-loadassembly', Line);
+      if (P > 0) and (Pos('resonitemodloader', Copy(Line, P, Length(Line))) > 0) then
+      begin
+        Result := True;
+        Exit;
+      end;
+    end;
+  end;
+end;
+
+// True when Resonite's Steam launch options load RML, for the Steam user logged in, else for any user of this PC.
+function SteamLoadsRml(): Boolean;
+var
+  UserData: String;
+  User: Cardinal;
+  F: TFindRec;
+begin
+  Result := False;
+  if not RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamPath', UserData) then
+    Exit;
+  StringChangeEx(UserData, '/', '\', True);
+  UserData := UserData + '\userdata';
+  if RegQueryDWordValue(HKCU, 'Software\Valve\Steam\ActiveProcess', 'ActiveUser', User) and (User <> 0) and
+     DirExists(UserData + '\' + IntToStr(User)) then
+  begin
+    Result := LaunchOptionsLoadRml(UserData + '\' + IntToStr(User) + '\config\localconfig.vdf');
+    Exit;
+  end;
+  if FindFirst(UserData + '\*', F) then
+  try
+    repeat
+      if IsDirectory(F) then
+        Result := LaunchOptionsLoadRml(UserData + '\' + F.Name + '\config\localconfig.vdf');
+    until Result or not FindNext(F);
+  finally
+    FindClose(F);
+  end;
+end;
+
+// With Steam's launch options loading RML, the Gale profiles that load it a second time with ResoniteModLoaderLoader:
+// Resonite then stops as it starts ("An item with the same key has already been added. Key: ResoniteModLoader"), its
+// renderer window left waiting. Returns a note for the user, or ''.
+function DoubleRmlNote(): String;
+var
+  Profiles: String;
+  I: Integer;
+begin
+  Result := '';
+  if not SteamLoadsRml() then
+    Exit;
+  Profiles := '';
+  for I := 0 to ModTargets.Count - 1 do
+    if (ModTargetIsGale.Strings[I] = '1') and
+       HasPlugin(ModTargets.Strings[I] + '\BepInEx\plugins', 'ResoniteModLoaderLoader') then
+      Profiles := Profiles + #13#10 + '- ' + ModTargetNames.Strings[I];
+  if Profiles <> '' then
+    Result := #13#10#13#10 + 'Resonite''s Steam launch options load ResoniteModLoader (-LoadAssembly), and ' +
+              'ResoniteModLoaderLoader loads it again in these Gale profiles. Resonite then stops as it starts, its ' +
+              'window left on the renderer. In Gale, disable ResoniteModLoaderLoader in them, or remove -LoadAssembly ' +
+              'from the launch options (Steam: Resonite > Properties):' + Profiles;
 end;
 
 procedure AddMissing(var Missing: String; Needed: Boolean; Target, Name: String);
@@ -428,8 +525,9 @@ begin
   AddMissing(Missing, Flux, Target, 'RenderiteHook');
   if (Flux or RoleFix) and not DirExists(Target + '\Renderer\BepInEx\core') then
     Missing := Missing + ', BepInExRenderer';
-  // Under Gale, RML starts through ResoniteModLoaderLoader (else through a -LoadAssembly launch option)
-  AddMissing(Missing, RmlModSelected() and (ModTargetIsGale.Strings[I] = '1'), Target, 'ResoniteModLoaderLoader');
+  // Under Gale, RML starts through ResoniteModLoaderLoader, unless Steam's launch options load it already
+  AddMissing(Missing, RmlModSelected() and (ModTargetIsGale.Strings[I] = '1') and not SteamLoadsRml(), Target,
+             'ResoniteModLoaderLoader');
   Result := '';
   if Missing <> '' then
     Result := #13#10 + '- ' + ModTargetNames.Strings[I] + ': ' + Copy(Missing, 3, Length(Missing));
@@ -554,8 +652,8 @@ begin
                  'installed. They are in ' + ExpandConstant('{app}\ResoniteMods') + ', laid out as they install.';
     end;
     if Missing <> '' then
-      Notes := Notes + #13#10#13#10 + 'The mods need these packages, which aren''t installed yet. Add them in Gale ' +
-               '(or your mod manager), then start Resonite:' + Missing;
+      Notes := Notes + #13#10#13#10 + 'The mods need these packages, which aren''t installed or are disabled. Add ' +
+               'them in Gale (or your mod manager), then start Resonite:' + Missing;
 
     if WizardIsTaskSelected('resonite\cyberfingermod') then
     begin
@@ -567,6 +665,7 @@ begin
     if RmlModSelected() and not FileExists(GetResoniteDir() + '\Libraries\ResoniteModLoader.dll') then
       Notes := Notes + #13#10#13#10 + 'CyberFingerMod and ProximityGrab are ResoniteModLoader mods: they load once ' +
                'ResoniteModLoader is installed (https://github.com/resonite-modding-group/ResoniteModLoader).';
+    Notes := Notes + DoubleRmlNote();
 
     SaveStringToFile(ListFile, Utf8Encode(Installed.Text), False);
   finally
