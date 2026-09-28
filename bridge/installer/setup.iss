@@ -5,7 +5,7 @@
 ; staging the Resonite mods (tools\stage_resonite_mods.py).
 
 #define MyAppName "CyberFinger Bridge"
-#define MyAppVersion "2.0.0"
+#define MyAppVersion "2.1.0"
 #define MyAppPublisher "SciCortex Technologies Corp."
 #define MyAppURL "https://github.com/DrSciCortex/CyberFinger"
 #define MyAppExeName "CyberFingerBridge.exe"
