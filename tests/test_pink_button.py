@@ -88,6 +88,19 @@ class PinkButtonTest(unittest.TestCase):
         self.button.on_input(1, 0)
         self.assertEqual(self.sender.sent, [(5, True), (5, False)])
 
+    def test_steamvr_mode_leaves_it_alone(self):
+        # -1: the driver hands the button to the app's binding; the bridge neither mutes nor fires anything
+        self.action = -1
+        original = mic_mute.toggle
+        mic_mute.toggle = lambda: self.fail("the microphone was toggled in the SteamVR mode")
+        try:
+            self.press()
+            threading.Event().wait(0.1)
+        finally:
+            mic_mute.toggle = original
+        self.assertEqual(self.sender.sent, [])
+        self.assertEqual(self.haptics.requests, [])
+
     def test_left_hand_ignored(self):
         self.action = 42
         self.press(hand=0)

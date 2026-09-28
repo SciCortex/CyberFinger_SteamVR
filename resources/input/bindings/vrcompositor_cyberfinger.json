@@ -352,6 +352,18 @@
           },
           "mode": "button",
           "path": "/user/hand/right/input/system"
+        },
+        {
+          "path": "/user/hand/left/input/pink",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/system/in/ToggleDashboard"
+            },
+            "double": {
+              "output": "/actions/system/in/ToggleRoomView"
+            }
+          }
         }
       ],
       "chords": [
@@ -474,7 +486,7 @@
   },
   "category": "steamvr_input",
   "controller_type": "cyberfinger",
-  "description": "Derived from SteamVR's Index dashboard binding. Trigger: click (a light press first locks the laser, so the click lands where it points); grip: right click; stick: scroll, push = middle click; B (MENU): back; A (black button): home. The system button (the left glove's pink button) toggles the dashboard.",
+  "description": "Derived from SteamVR's Index dashboard binding. Trigger: click (a light press first locks the laser, so the click lands where it points); grip: right click; stick: scroll, push = middle click; B (MENU): back; A (black button): home. The left pink button toggles the dashboard (twice: room view); so does the system button, if a glove button is set to it.",
   "interaction_profile": "",
   "name": "CyberFinger SteamVR dashboard bindings",
   "options": {},

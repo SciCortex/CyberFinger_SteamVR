@@ -39,6 +39,8 @@ flowchart LR
 | **SteamVR driver** | [`src/`](../src/) | Two hand controllers for SteamVR: glove inputs, plus hand pose and skeleton from the headset's hand tracking, with the glove's sensors bridging short gaps. Bindings for Resonite, VRChat and other apps |
 | **Fusion Studio** | [`bridge/fusion_studio.py`](../bridge/fusion_studio.py) | Research tool: fuses camera, glove sensors and EMG into one tracked hand |
 | **MoreFluxActions** | [MoreFluxActionsMod](https://github.com/DrSciCortex/MoreFluxActionsMod) | A Resonite mod: 42 extra bindable actions that reach ProtoFlux on your avatar |
+| **SteamVRRoleFix** | [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix) | A plugin for Resonite's renderer: hands and input follow SteamVR when you switch between CyberFinger and the Quest controllers, and hand controllers aren't drawn as trackers |
+| **CyberFingerMod** | [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) | A Resonite mod: locomotion follows the controller in use after a switch (1.10+), hides the virtual keyboard, and keeps your laser where your avatar puts it with the dash open |
 
 ## Programmable buttons in Resonite
 
@@ -54,8 +56,10 @@ The CyberFinger is set up for it out of the box:
   short press still opens Resonite's dash. The driver reports the hold as a separate input, **A held**, which
   the default Resonite binding maps to Flux Action 1/2. You can rebind it like any other input. The hold time is
   the driver's `black_hold_ms` setting (800 ms).
-- **Right pink button:** mutes your microphone by default. In the bridge, set *Right pink button* to
-  **FluxAction** and pick a number (42 unless you change it). The bridge then sends it straight to the mod.
+- **Right pink button:** by default (the bridge's *Right pink button* on **SteamVR**) it reaches Resonite as
+  FluxAction42, which the mod makes Resonite's own mute (its `MuteToggleAction`, 42 by default) (in VRChat it is VRChat's
+  mute). Set it to **FluxAction** and pick a number (42 unless you change it) to send it straight to the mod
+  instead, for your own flux, or to **mic mute** to mute Windows' microphone for every app.
 - **C, D and E** (on gloves that have them): Flux Actions 3 and 4 (C, left and right), 5 and 6 (D), 7 and 8 (E).
 - **Hand gestures:** the two-finger point (index and middle out, the thumb over the other two) is Flux Action 36
   (left) and 37 (right), the thumb-pinky pinch 38 and 39, pointing with the index finger 40 and 41. They only do

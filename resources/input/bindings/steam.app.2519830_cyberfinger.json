@@ -384,6 +384,15 @@
               "output": "/actions/fluxactions/in/fluxaction41"
             }
           }
+        },
+        {
+          "path": "/user/hand/right/input/pink",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/fluxactions/in/fluxaction42"
+            }
+          }
         }
       ]
     }

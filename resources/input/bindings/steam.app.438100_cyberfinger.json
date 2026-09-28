@@ -104,7 +104,7 @@
         {
           "inputs": {
             "click": {
-              "output": "/actions/global/in/stick_click"
+              "output": "/actions/global/in/jump"
             },
             "position": {
               "output": "/actions/global/in/move"
@@ -134,24 +134,6 @@
         {
           "inputs": {
             "click": {
-              "output": "/actions/global/in/mic"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/left/input/a"
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/udon_menu"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/left/input/b"
-        },
-        {
-          "inputs": {
-            "click": {
               "output": "/actions/global/in/interact"
             }
           },
@@ -174,7 +156,7 @@
         {
           "inputs": {
             "click": {
-              "output": "/actions/global/in/stick_click"
+              "output": "/actions/global/in/jump"
             },
             "position": {
               "output": "/actions/global/in/rotate"
@@ -203,42 +185,6 @@
         },
         {
           "inputs": {
-            "click": {
-              "output": "/actions/global/in/jump"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/right/input/a"
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/udon_menu"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/right/input/b"
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/menu"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/left/input/b"
-        },
-        {
-          "inputs": {
-            "click": {
-              "output": "/actions/global/in/menu"
-            }
-          },
-          "mode": "button",
-          "path": "/user/hand/right/input/b"
-        },
-        {
-          "inputs": {
             "position": {
               "output": "/actions/global/in/scroll"
             }
@@ -254,6 +200,69 @@
           },
           "mode": "joystick",
           "path": "/user/hand/right/input/thumbstick"
+        },
+        {
+          "path": "/user/hand/left/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/global/in/stick_click"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/global/in/stick_click"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/a_hold",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/global/in/gesture_toggle"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/pink",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/global/in/mic"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/global/in/menu"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/global/in/udon_menu"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/a",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/global/in/safe_mode"
+            }
+          }
         }
       ],
       "poses": [
@@ -284,29 +293,6 @@
         {
           "output": "/actions/global/out/haptic",
           "path": "/user/hand/right/output/haptic"
-        }
-      ],
-      "chords": [
-        {
-          "inputs": [
-            [
-              "/user/hand/left/input/trigger",
-              "click"
-            ],
-            [
-              "/user/hand/right/input/trigger",
-              "click"
-            ],
-            [
-              "/user/hand/left/input/b",
-              "held"
-            ],
-            [
-              "/user/hand/right/input/b",
-              "held"
-            ]
-          ],
-          "output": "/actions/global/in/safe_mode"
         }
       ]
     },
@@ -517,7 +503,7 @@
         {
           "inputs": {
             "click": {
-              "output": "/actions/one_hand/in/stick_click"
+              "output": "/actions/one_hand/in/jump"
             },
             "position": {
               "output": "/actions/one_hand/in/move_rotate"
@@ -529,7 +515,7 @@
         {
           "inputs": {
             "click": {
-              "output": "/actions/one_hand/in/stick_click"
+              "output": "/actions/one_hand/in/jump"
             },
             "position": {
               "output": "/actions/one_hand/in/move_rotate"
@@ -573,15 +559,54 @@
           },
           "mode": "trigger",
           "path": "/user/hand/right/input/grip"
+        },
+        {
+          "path": "/user/hand/left/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/one_hand/in/stick_click"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/b",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/one_hand/in/stick_click"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/left/input/a_hold",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/one_hand/in/gesture_toggle"
+            }
+          }
+        },
+        {
+          "path": "/user/hand/right/input/pink",
+          "mode": "button",
+          "inputs": {
+            "click": {
+              "output": "/actions/one_hand/in/mic"
+            }
+          }
         }
       ]
     }
   },
   "category": "steamvr_input",
   "controller_type": "cyberfinger",
-  "description": "Derived from VRChat's Touch binding. MENU = B/Y (tap: quick menu, hold: action menu), Start/Select = A/X. Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. C/D/E and the other hand gestures are left free for the user.",
+  "description": "Emulates an Oculus Touch controller. Stick press: jump. Menu button: action menu. Black button: quick menu (left), Safe Mode (right); left held: gesture toggle. Right pink button: mute (with the bridge's right pink set to SteamVR). Grab: a quick tap of the grip holds until the next press, a longer press grabs while held. C/D/E and the hand gestures are left free for the user.",
   "interaction_profile": "",
   "name": "CyberFinger defaults for VRChat",
-  "options": {},
+  "options": {
+    "simulated_controller_type": "oculus_touch",
+    "simulate_rendermodel": "full"
+  },
   "simulated_actions": []
 }

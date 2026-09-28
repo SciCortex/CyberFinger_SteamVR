@@ -264,6 +264,9 @@ void ServerProvider::RunFrame() {
         m_resyncSeen[hand] = g.resync;
     }
 
+    // The headset's hand gesture for the system button (the Quest palm pinch) opens nothing while CyberFinger is
+    // active; forward_tap_system_button passes it on as CyberFinger's own system button instead.
+    m_tap->SetBlockHandSystem(m_active);
     for (int hand = 0; hand < 2; ++hand)
         if (m_controller[hand]) {
             m_tap->SetOwnDevice(hand, m_controller[hand]->ObjectId());

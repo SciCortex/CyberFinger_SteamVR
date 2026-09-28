@@ -82,8 +82,9 @@ struct HookSet {
     }
     static vr::EVRInputError UpdateBool(vr::IVRDriverInput* self, vr::VRInputComponentHandle_t h,
                                         bool value, double timeOffset) {
-        if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) t->OnUpdateInput(h, value ? 1.f : 0.f);
-        return orig.updateBool(self, h, value, timeOffset);
+        bool hold = false;
+        if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) hold = t->OnUpdateInput(h, value ? 1.f : 0.f);
+        return orig.updateBool(self, h, value && !hold, timeOffset);
     }
     static vr::EVRInputError CreateScalar(vr::IVRDriverInput* self, vr::PropertyContainerHandle_t c,
                                           const char* name, vr::VRInputComponentHandle_t* h,
@@ -388,15 +389,25 @@ void OpticalTap::OnCreateInput(vr::PropertyContainerHandle_t c, const char* name
     m_numInputs.store(n + 1, std::memory_order_release);
 }
 
-// Hot path: every driver's every input update passes through here.
-void OpticalTap::OnUpdateInput(vr::VRInputComponentHandle_t h, float value) {
+// Hot path: every driver's every input update passes through here. True for an update to hold back from SteamVR: a
+// hand-tracking source's system button while SetBlockHandSystem is on (its value is recorded all the same).
+bool OpticalTap::OnUpdateInput(vr::VRInputComponentHandle_t h, float value) {
     const int n = m_numInputs.load(std::memory_order_acquire);
     for (int i = 0; i < n; ++i) {
-        if (m_inputs[i].handle == h) {
-            m_inputs[i].value.store(value, std::memory_order_relaxed);
-            return;
+        InputEntry& in = m_inputs[i];
+        if (in.handle != h) continue;
+        in.value.store(value, std::memory_order_relaxed);
+        if (in.id != kTapSystem || !m_blockHandSystem.load(std::memory_order_relaxed)) return false;
+        int source = in.handSource.load(std::memory_order_relaxed);
+        if (source < 0) {
+            const std::string type = StringOf(in.container, vr::Prop_ControllerType_String);
+            if (type.empty()) return false;                     // not set yet: decide on a later update
+            source = IsHandType(type) ? 1 : 0;
+            in.handSource.store(source, std::memory_order_relaxed);
         }
+        return source == 1;
     }
+    return false;
 }
 
 void OpticalTap::OnCreateSkeleton(vr::PropertyContainerHandle_t c, const char* /*name*/, const char* skeletonPath,

@@ -135,9 +135,14 @@ public:
     // alongside while capturing, in the columns of a hand pose (kind 0). Frame loop.
     void CaptureDevicePose(uint8_t kind, uint8_t id, const vr::TrackedDevicePose_t& pose, double now);
 
+    // While on, the hand-tracking sources' system button (the Quest palm gesture) is held back from SteamVR, which
+    // would open the dashboard through the source's own binding; it's still read here (forward_tap_system_button).
+    // Frame loop: on while CyberFinger is active.
+    void SetBlockHandSystem(bool on) { m_blockHandSystem.store(on, std::memory_order_relaxed); }
+
     // ── called from the hook detours (any thread) ──────────────────────────
     void OnCreateInput(vr::PropertyContainerHandle_t c, const char* name, vr::VRInputComponentHandle_t h);
-    void OnUpdateInput(vr::VRInputComponentHandle_t h, float value);
+    bool OnUpdateInput(vr::VRInputComponentHandle_t h, float value);   // true: hold the update back from SteamVR
     void OnCreateSkeleton(vr::PropertyContainerHandle_t c, const char* name, const char* skeletonPath,
                           const char* basePosePath, vr::EVRSkeletalTrackingLevel level,
                           vr::VRInputComponentHandle_t h);
@@ -180,6 +185,7 @@ private:
         vr::PropertyContainerHandle_t container = vr::k_ulInvalidPropertyContainer;
         int id = -1;                  // TapInput
         std::atomic<float> value{ 0.f };
+        std::atomic<int> handSource{ -1 };   // its device is a hand-tracking source: -1 not known yet, 0 no, 1 yes
     };
 
     SkeletonEntry* FindSkeleton(vr::VRInputComponentHandle_t h);
@@ -239,6 +245,7 @@ private:
     void CaptureSkeleton(int hand, uint8_t kind, bool changed, const vr::VRBoneTransform_t* bones);
     std::atomic<uint32_t> m_ownDevice[2] = { vr::k_unTrackedDeviceIndexInvalid, vr::k_unTrackedDeviceIndexInvalid };
     std::atomic<bool> m_capturing{ false };
+    std::atomic<bool> m_blockHandSystem{ false };   // SetBlockHandSystem
     double m_captureEnd = 0;
     std::string m_capturePath;
     std::mutex m_captureLock;

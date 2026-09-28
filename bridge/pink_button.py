@@ -18,7 +18,8 @@ class PinkButton:
 
     action: a callable returning what the button does right now: 0 toggles the microphone on each click, confirmed
     on the glove's motor (a pulse train: muted; one buzz: live); 1..42 fires that FluxAction, pressed and released
-    with the button, without vibration (the flux it drives can ask for its own). Core Audio runs on a worker thread.
+    with the button, without vibration (the flux it drives can ask for its own); -1 leaves it to SteamVR (the driver's
+    /input/pink, for the app's binding) and does nothing here. Core Audio runs on a worker thread.
     The vibration is the bridge's alone: the firmware only plays what it's sent (VR_CMD_HAPTIC).
     haptics: a callable returning the current glove_control.HapticSender (or None)."""
 
@@ -35,7 +36,9 @@ class PinkButton:
         down = bool(buttons2 & PINK)
         if down and not self._down:
             action = self._action()
-            if action:
+            if action < 0:
+                pass                    # SteamVR's: the driver hands it to the app's binding
+            elif action:
                 self._firing = action
                 self._sender.send(action, True)
             elif self._busy.acquire(blocking=False):

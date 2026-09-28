@@ -176,7 +176,7 @@ private:
     uint8_t   m_lastBattery = 255;
 
     enum Bool { kSystem, kA, kAHold, kB, kC, kD, kE, kTriggerClick, kGripClick, kGrab, kStickClick, kIndexPoint,
-                kPinkyPinchClick, kIndexPointClick, kTwoFingerPoint, kNumBool };
+                kPinkyPinchClick, kIndexPointClick, kTwoFingerPoint, kPink, kNumBool };
     enum Scalar { kTrigger, kGrip, kStickX, kStickY, kFingerIndex, kFingerMiddle, kFingerRing, kFingerPinky,
                   kIndexPinch, kMiddlePinch, kRingPinch, kPinkyPinch, kGrasp, kNumScalar };
     vr::VRInputComponentHandle_t m_bool[kNumBool] = {};

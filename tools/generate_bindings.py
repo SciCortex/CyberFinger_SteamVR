@@ -8,7 +8,7 @@
 
 Writes into resources/input/:
 
-  bindings/steam.app.438100_cyberfinger.json   VRChat   — derived from VRChat's own Touch binding
+  bindings/steam.app.438100_cyberfinger.json   VRChat   — VRChat's own Touch binding, laid out for the glove
   bindings/steam.app.2519830_cyberfinger.json  Resonite — its "Generic" action set (unknown controllers)
   bindings/vrcompositor_cyberfinger.json       SteamVR dashboard — derived from SteamVR's Index binding
   legacy_bindings_cyberfinger.json             legacy-input apps, emulating an Index controller
@@ -32,7 +32,10 @@ In the VRChat and Resonite defaults, grab comes from /input/grab: the grip with 
 (a press shorter than grab_tap_ms holds until the next press, a longer one grabs while held). Binding
 /input/grip instead gives the plain button.
 
-The VRChat binding carries no emulation options: VRChat treats controller emulation as unsupported. The
+The VRChat binding emulates an Oculus Touch controller and lays the buttons out by VRChat's meaning of Touch's
+(vrchat_layout): stick press jump, menu button the action menu, black button the quick menu (left) and Safe Mode
+(right), left black button held the gesture toggle, right pink button mute. VRChat's driver
+guide asks drivers not to emulate controllers: this is a choice of the default binding, which users can change. The
 Resonite binding emulates an Oculus Touch controller, so Resonite always runs in its Touch mode with CyberFinger
 (its only mode with a dash button), whatever the streamer; the driver hides the streamers' own emulated Touch
 controllers (hide_other_hand_controllers), which Resonite would otherwise register instead or show as
@@ -166,17 +169,57 @@ def index_to_cyberfinger(path):
     return path
 
 
+def vrchat_layout(bindings):
+    """The CyberFinger layout for VRChat (v1), over the Touch-derived sets, in VRChat's words
+    (docs.vrchat.com/docs/touch): the stick press jumps (Touch's A), the menu button B opens the action menu
+    (Touch's stick press), the left black button the quick menu (Touch's Y, with the Udon menu), the right one Safe
+    Mode (on Touch the four-button chord, dropped here), and the left black button held toggles gestures. The right
+    pink button is VRChat's mute, when the bridge passes it on (its right pink set to SteamVR); in its other modes
+    the bridge mutes the Windows microphone itself, or fires a FluxAction, and VRChat never sees the button."""
+    for aset in ("/actions/global", "/actions/one_hand"):
+        sec = bindings.get(aset)
+        if not sec:
+            continue
+        kept = []
+        for src in sec.get("sources", []):
+            comp = src["path"].split("/")[-1]
+            if comp in ("a", "b"):
+                continue                               # re-bound below
+            click = src.get("inputs", {}).get("click")
+            if comp == "thumbstick" and click and click.get("output", "").endswith("/in/stick_click"):
+                click["output"] = aset + "/in/jump"
+            kept.append(src)
+
+        def button(side, comp, action):
+            kept.append({"path": f"/user/hand/{side}/input/{comp}", "mode": "button",
+                         "inputs": {"click": {"output": f"{aset}/in/{action}"}}})
+
+        for side in HANDS:
+            button(side, "b", "stick_click")
+        button("left", "a_hold", "gesture_toggle")
+        button("right", "pink", "mic")
+        if aset == "/actions/global":
+            button("left", "a", "menu")
+            button("left", "a", "udon_menu")
+            button("right", "a", "safe_mode")
+            sec.pop("chords", None)                    # Safe Mode has its button
+        sec["sources"] = kept
+    return bindings
+
+
 def vrchat(steam):
     src = os.path.join(steam, "steamapps", "common", "VRChat", "VRChat_Data", "StreamingAssets",
                        "SteamVR", "bindings_oculus_touch.json")
     touch = load(src)
     b = header("steam.app.438100", "CyberFinger defaults for VRChat",
-               "Derived from VRChat's Touch binding. MENU = B/Y (tap: quick menu, hold: action menu), "
-               "Start/Select = A/X. Grab: a quick tap of the grip holds "
-               "until the next press, a longer press grabs while held. C/D/E and the other hand gestures are "
-               "left free for the user.")
+               "Emulates an Oculus Touch controller. Stick press: jump. Menu button: action menu. Black button: "
+               "quick menu (left), Safe Mode (right); left held: gesture toggle. Right pink button: mute (with the "
+               "bridge's right pink set to SteamVR). Grab: a quick tap of the grip holds until the next press, "
+               "a longer press grabs while held. C/D/E and the hand gestures are left free for the user.",
+               options={"simulated_controller_type": "oculus_touch", "simulate_rendermodel": "full"})
     b["bindings"] = convert(touch, touch_to_cyberfinger, drop_output=lambda o: "gesture" in o.lower())
     tap_to_hold_grab(b["bindings"], {"/actions/global/in/grab", "/actions/one_hand/in/grab"})
+    vrchat_layout(b["bindings"])
     save(b, "bindings/steam.app.438100_cyberfinger.json")
 
 
@@ -249,6 +292,11 @@ def resonite():
             src = {"path": f"/user/hand/{h}/input/{component}", "mode": mode,
                    "inputs": {input_name: {"output": f"/actions/fluxactions/in/fluxaction{first + i}"}}}
             sources.append(src)
+    # The right pink button (with the bridge's right pink set to SteamVR): FluxAction42, which the MoreFluxActions
+    # mod's MuteToggleAction (42 by default) makes Resonite's mute (Resonite has no mute action of its own for SteamVR, and
+    # ProtoFlux can't set a user's voice mode).
+    sources.append({"path": "/user/hand/right/input/pink", "mode": "button",
+                    "inputs": {"click": {"output": "/actions/fluxactions/in/fluxaction42"}}})
     b["bindings"]["/actions/fluxactions"] = {"sources": sources}
     save(b, "bindings/steam.app.2519830_cyberfinger.json")
 
@@ -272,9 +320,15 @@ def compositor(steam):
     b = header("openvr.component.vrcompositor", "CyberFinger SteamVR dashboard bindings",
                "Derived from SteamVR's Index dashboard binding. Trigger: click (a light press first locks the "
                "laser, so the click lands where it points); grip: right click; stick: scroll, push = middle "
-               "click; B (MENU): back; A (black button): home. The system button (the left glove's pink button) "
-               "toggles the dashboard.")
+               "click; B (MENU): back; A (black button): home. The left pink button toggles the dashboard (twice: "
+               "room view); so does the system button, if a glove button is set to it.")
     b["bindings"] = convert(knuckles, index_to_cyberfinger)
+    # The left pink button: the dashboard, as the system button would (click, twice: room view). Not its hold: held
+    # 5-7 s it switches the glove off, which mustn't recenter or chord on the way. The right one is the apps'.
+    b["bindings"]["/actions/system"]["sources"].append(
+        {"path": "/user/hand/left/input/pink", "mode": "button",
+         "inputs": {"click": {"output": "/actions/system/in/ToggleDashboard"},
+                    "double": {"output": "/actions/system/in/ToggleRoomView"}}})
     # Index right-clicks with the trackpad, which the CyberFinger doesn't have: use the plain grip button
     # (/input/grip, not /input/grab: a right click must not latch).
     b["bindings"]["/actions/lasermouse"]["sources"] += [

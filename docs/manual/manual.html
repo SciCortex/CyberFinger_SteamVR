@@ -325,7 +325,7 @@
               <g><line class="lead" x1="695" y1="1131" x2="1050" y2="1185"/><line class="lead-core" x1="695" y1="1131" x2="1050" y2="1185"/><circle class="spot" cx="695" cy="1131" r="11"/><g class="badge" transform="translate(1050 1185)"><circle r="38"/><text>8</text></g></g>
             </svg>
           </div>
-          <figcaption><span>Right glove</span><span>Pink button: microphone on/off, or a Flux Action</span></figcaption>
+          <figcaption><span>Right glove</span><span>Pink button: microphone on/off, a Flux Action, or the app's mute</span></figcaption>
         </figure>
       </div>
 
@@ -340,7 +340,7 @@
             <tr><td class="num"><span class="dot">5</span></td><td><strong>C</strong><span class="where">Button row, on some hardware revisions and models only; D and E too</span></td><td>In Resonite, <a href="#fluxactions">Flux Actions</a> for your own ProtoFlux: C is 3 on the left glove and 4 on the right, D is 5 and 6, E is 7 and 8. Elsewhere, free to assign in SteamVR's controller bindings.</td></tr>
             <tr><td class="num"><span class="dot">6</span></td><td><strong>Black button</strong><span class="where">Wrist module. Press, or hold for about a second.</span></td><td>Press: Resonite's dash, home in the SteamVR dashboard. It acts when you let go. Hold: a <a href="#fluxactions">Flux Action</a> for your own ProtoFlux in Resonite (FluxAction1 left, FluxAction2 right).</td></tr>
             <tr><td class="num"><span class="dot">7</span></td><td><strong>USB-C port</strong><span class="where">Wrist module</span></td><td>Power and charging, also while you play.</td></tr>
-            <tr><td class="num"><span class="dot">8</span></td><td><strong>Pink button</strong><span class="where">Wrist module</span></td><td>Left glove: opens and closes the SteamVR dashboard. Right glove: mutes and unmutes your microphone, or fires a <a href="#fluxactions">Flux Action</a> if you choose that in the bridge. On either glove, press to switch on, hold 5–7 s to switch off.</td></tr>
+            <tr><td class="num"><span class="dot">8</span></td><td><strong>Pink button</strong><span class="where">Wrist module</span></td><td>Left glove: opens and closes the SteamVR dashboard. Right glove: mutes and unmutes your microphone, fires a <a href="#fluxactions">Flux Action</a>, or works the app's own mute, as you choose in the bridge. On either glove, press to switch on, hold 5–7 s to switch off.</td></tr>
           </tbody>
         </table>
       </div>
@@ -392,7 +392,7 @@
             <tr><td class="num"><span class="dot">B</span></td><td><strong>Start and Stop</strong></td><td>Start finds both gloves (paired in Windows and switched on) and starts forwarding them. Stop lets them go: in VR the hands then fall back to the headset's hand tracking.</td></tr>
             <tr><td class="num"><span class="dot">C</span></td><td><strong>Status</strong></td><td>What the bridge is doing: Idle, Scanning…, Connected, Stopped, or No devices found and Connection failed when a glove can't be reached (see <a href="#trouble">Troubleshooting</a>).</td></tr>
             <tr><td class="num"><span class="dot">D</span></td><td><strong>Auto-start on launch</strong></td><td>Starts in the last mode as soon as the bridge opens, handy when it starts with Windows. The window's close button only hides the bridge to the system tray, where it keeps running; exit it from the tray icon's menu.</td></tr>
-            <tr><td class="num"><span class="dot">E</span></td><td><strong>Right pink button</strong></td><td><b>mic mute</b> (the default) mutes and unmutes the Windows microphone for every app at once, confirmed on the glove's motor. <b>FluxAction</b> makes the button press a <a href="#fluxactions">Flux Action</a> in Resonite instead, the number beside it (42 unless you change it), for your own ProtoFlux; the microphone is then left alone and nothing vibrates. See <a href="#mic">Microphone and vibration</a>.</td></tr>
+            <tr><td class="num"><span class="dot">E</span></td><td><strong>Right pink button</strong></td><td><b>SteamVR</b> (the default) hands the button to the game's own controls: VRChat's mute, or Resonite's with the MoreFluxActions mod set up for it. <b>mic mute</b> mutes and unmutes the Windows microphone for every app at once, confirmed on the glove's motor. <b>FluxAction</b> makes the button press a <a href="#fluxactions">Flux Action</a> in Resonite, the number beside it (42 unless you change it), for your own ProtoFlux; the microphone is then left alone and nothing vibrates. See <a href="#mic">Microphone and vibration</a>.</td></tr>
             <tr><td class="num"><span class="dot">F</span></td><td><strong>Forward IMU to SlimeVR</strong></td><td>Only for full-body tracking with <a href="https://slimevr.dev/">SlimeVR</a>: also sends each glove's wrist sensor to the SlimeVR server on this PC as a forearm tracker, and the back-of-hand sensor (on gloves with it) as a hand tracker. <b>body IMU 1 / 2</b> chooses which wrist sensor to send: every glove has sensor 1, some revisions a second one at the same spot. Works alongside any mode.</td></tr>
             <tr><td class="num"><span class="dot">G</span></td><td><strong>Resync IMU</strong></td><td>Makes SteamVR line the gloves' back-of-hand sensors up with the headset afresh, in about half a second of the hands in view. Use it when a hand's rotation looks off, for instance after putting a glove back on differently. It usually sorts itself out (see <a href="#playing">In VR</a>); this is the manual way, like tapping the back-of-hand module three times. Only for gloves with that sensor, in VR Mode.</td></tr>
             <tr><td class="num"><span class="dot">H</span></td><td><strong>Tabs</strong></td><td><b>Buttons + IMU</b> (shown) is the gloves' live state. <b>Skeleton</b> shows the hand skeletons SteamVR tracks, fingers included, to check the hand tracking. <b>Console</b> is the bridge's log: connections, battery, the microphone, resyncs, triple taps and anything that went wrong.</td></tr>
@@ -432,12 +432,19 @@
             <tr><td><span class="dot">6</span> Black button, held</td><td>FluxAction1 on the left, FluxAction2 on the right: your own ProtoFlux, with the <a href="#fluxactions">MoreFluxActions mod</a></td></tr>
             <tr><td><span class="dot">5</span> C, D, E</td><td>Flux Actions, left and right: C 3 and 4, D 5 and 6, E 7 and 8</td></tr>
             <tr><td>Two-finger point, pinky pinch, index point</td><td>Flux Actions from hand tracking, left and right: the two-finger point 36 and 37, the thumb-pinky pinch 38 and 39, pointing 40 and 41</td></tr>
-            <tr><td><span class="dot">8</span> Pink button</td><td>Left: SteamVR dashboard. Right: microphone on/off, or a Flux Action (FluxAction42 unless you pick another).</td></tr>
+            <tr><td><span class="dot">8</span> Pink button</td><td>Left: SteamVR dashboard. Right: microphone on/off, or a Flux Action (FluxAction42 unless you pick another), or Resonite's mute (see <a href="#mic">Microphone</a>).</td></tr>
             <tr><td>Your fingers</td><td>Shown on your avatar, from the headset's hand tracking</td></tr>
           </tbody>
         </table>
       </div>
-      <p>To change a binding, open SteamVR's controller bindings while Resonite is running and edit the CyberFinger defaults for Resonite. VRChat has its own CyberFinger defaults too: Menu taps the quick menu and holds the action menu, and the black button is VRChat's mic toggle on the left and jump on the right.</p>
+      <p>To change a binding, open SteamVR's controller bindings while Resonite is running and edit the CyberFinger defaults for Resonite. VRChat has its own CyberFinger defaults too, laid out like a Touch controller's: press a stick to jump, the Menu button opens the action menu, the black button opens the quick menu on the left and switches Safe Mode on the right, and holding the left black button turns your hand gestures on or off. Mute is the right pink button, as everywhere.</p>
+      <h3>Switching between CyberFinger and the Quest controllers</h3>
+      <p>The driver switches by itself. Pick up the Quest controllers and they take over. Put them down, or switch them off, and CyberFinger takes your hands back as soon as the headset tracks them again. Resonite needs two small mods to follow every switch:</p>
+      <ul>
+        <li><a href="https://github.com/DrSciCortex/SteamVRRoleFix">SteamVRRoleFix</a>, a plugin for Resonite's renderer (it runs in BepInExRenderer, which the MoreFluxActions mod installs too). Without it, Resonite sometimes keeps reading the controllers you put down: your hands freeze and nothing you press arrives, although SteamVR's own menu still opens.</li>
+        <li><a href="https://github.com/DrSciCortex/CyberFingerMod">CyberFingerMod</a> 1.10 or later, a ResoniteModLoader mod. Leave its <b>FollowActiveController</b> setting on (the default). Without it, after switching back you can still use tools, but you can't move, turn or jump. With the CyberFinger driver, turn its <b>GamepadBindings</b> setting off.</li>
+      </ul>
+      <p>For switches that happen only when you mean them, turn off the Quest's automatic switching between hands and controllers, and choose hand tracking in its quick settings. With automatic switching on, a controller that moves on the table switches the Quest back to the controllers.</p>
     </section>
 
     <section id="fluxactions">
@@ -482,8 +489,9 @@
     <section id="mic">
       <h2>Microphone and vibration</h2>
       <h3>Microphone on/off</h3>
-      <p>Press the right glove's pink button to mute your microphone, and press it again to unmute. It mutes Windows' default microphone, so every app goes quiet at once, including Resonite, VRChat and Discord. SteamVR can make the headset's microphone the Windows default. The bridge must be running in VR Mode.</p>
-      <p>To use the button in Resonite instead, set <b>Right pink button</b> to <b>FluxAction</b> at the top of CyberFinger Bridge and pick a number from 1 to 42 (42 at first). The button then presses and releases that <a href="#fluxactions">Flux Action</a>, without vibrating, and leaves the microphone alone. Only the microphone toggle confirms on the motor. The bridge remembers the choice.</p>
+      <p>Press the right glove's pink button to mute your microphone in the game, and press it again to unmute. The game's microphone icon shows the state. The bridge must be running in VR Mode, with <b>Right pink button</b> on <b>SteamVR</b> (the default), which leaves the button to the game. In VRChat it is VRChat's mute straight away. In Resonite, which has no mute of its own for controllers, it presses FluxAction42, which the MoreFluxActions mod turns into Resonite's mute, like the dash's mute button. That's its <b>MuteToggleAction</b> setting, 42 by default; set it to 0 in your mod manager's config editor if you'd rather use FluxAction42 for something else.</p>
+      <p>To mute every app at once instead, Discord included, set <b>Right pink button</b> to <b>mic mute</b>. It mutes Windows' default microphone (SteamVR can make the headset's microphone the Windows default), and the glove confirms on its motor. Games then don't show you as muted: they just hear silence.</p>
+      <p>To use the button in Resonite for something else, set <b>Right pink button</b> to <b>FluxAction</b> at the top of CyberFinger Bridge and pick a number from 1 to 42 (42 at first). The button then presses and releases that <a href="#fluxactions">Flux Action</a>, without vibrating, and leaves the microphone alone. Only the microphone toggle confirms on the motor. The bridge remembers the choice.</p>
       <h3>Vibration</h3>
       <p>Gloves with a vibration motor (some hardware revisions have one) buzz when an app asks for it, for example when you touch a button or grab something. The glove also confirms the microphone button:</p>
       <div class="patterns">
@@ -578,6 +586,9 @@
         <div><dt>Resonite shows stiff hands or asks for a binding</dt><dd>In SteamVR's controller bindings for Resonite, choose the CyberFinger defaults.</dd></div>
         <div><dt>A hand points the wrong way after you took the glove off</dt><dd>On gloves with the joint IMU, it should sort itself out within a second or two of moving the hand in view. If it doesn't, tap the module on the back of that hand three times, firmly (a glove with a motor answers with two short pulses), or press <b>Resync IMU</b> in CyberFinger Bridge.</dd></div>
         <div><dt>Holding the black button does nothing in Resonite</dt><dd>Install the MoreFluxActions mod, with its renderer part, and put a receiver tagged <code>FluxAction1.Pressed</code> (left) or <code>FluxAction2.Pressed</code> (right) under your avatar. The bridge's hand panel lights <b>HOLD</b> beside ST/SE when the hold is recognised.</dd></div>
+        <div><dt>After switching back from the Quest controllers, my hands freeze in Resonite</dt><dd>Install <a href="https://github.com/DrSciCortex/SteamVRRoleFix">SteamVRRoleFix</a>, then restart Resonite. See <a href="#resonite">Switching between CyberFinger and the Quest controllers</a>.</dd></div>
+        <div><dt>After switching back, tools work in Resonite but I can't move or jump</dt><dd>Install <a href="https://github.com/DrSciCortex/CyberFingerMod">CyberFingerMod</a> 1.10 or later, with FollowActiveController on.</dd></div>
+        <div><dt>CyberFinger doesn't take over again after I put the controllers down</dt><dd>The headset is still in controller mode, and sends no hand tracking. Switch the controllers off, or put them where they can't move, or pick hand tracking in the Quest's quick settings.</dd></div>
         <div><dt>Muting doesn't silence my app</dt><dd>The app records from a microphone other than the Windows default. Choose the default microphone in the app, or make the headset's microphone the Windows default.</dd></div>
       </dl>
     </section>

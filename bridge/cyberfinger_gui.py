@@ -689,6 +689,9 @@ class VRMode:
         self.target = ("127.0.0.1", port)
         self.seq = [0, 0]
         self.resync = [0, 0]     # CFG2's resync count per hand: a new value resyncs the driver's IMU fusion
+        # The right pink button goes on to SteamVR (/input/pink, for the apps' bindings) only when the bridge leaves
+        # it to them; otherwise the bridge acts on it (mic mute, a FluxAction) and SteamVR never sees it.
+        self.right_pink_to_steamvr = False
 
     def resync_imu(self, hands=(0, 1)):
         """Ask the driver to resync the IMU fusion of these hands (with their next CFG2 packets)."""
@@ -700,8 +703,11 @@ class VRMode:
         joy_x, joy_y = cf_protocol.stick_to_int16(state.joy_x_float, -state.joy_y_float,
                                                   self.STICK_DEADZONE)
         self.seq[hand] += 1
+        buttons2 = state.buttons2
+        if hand == 1 and not self.right_pink_to_steamvr:
+            buttons2 &= ~glove_report.PINK
         pkt = cf_protocol.pack_glove(hand, self.seq[hand], state.buttons, state.trigger,
-                                     joy_x, joy_y, state.battery, buttons2=state.buttons2,
+                                     joy_x, joy_y, state.battery, buttons2=buttons2,
                                      resync=self.resync[hand])
         try:
             self.sock.sendto(pkt, self.target)
@@ -2273,8 +2279,8 @@ class CyberFingerApp:
         pink_label = ttk.Label(pink_frame, text="Right pink button:", style="Status.TLabel")
         pink_label.pack(side=tk.LEFT)
         Tooltip(pink_label, TIPS["pink"])
-        self.pink_mode_var = tk.StringVar(value=self._config.get("right_pink", "mic"))
-        for label, value in (("mic mute", "mic"), ("FluxAction", "flux")):
+        self.pink_mode_var = tk.StringVar(value=self._config.get("right_pink", "steamvr"))
+        for label, value in (("SteamVR", "steamvr"), ("mic mute", "mic"), ("FluxAction", "flux")):
             radio = ttk.Radiobutton(pink_frame, text=label, style="Small.TRadiobutton",
                                     variable=self.pink_mode_var, value=value, command=self._on_pink_changed)
             radio.pack(side=tk.LEFT)
@@ -2379,13 +2385,16 @@ class CyberFingerApp:
             n = 0
         if 1 <= n <= flux_actions.COUNT:
             self._config["right_pink_flux"] = n
-        flux = self.pink_mode_var.get() == "flux"
-        self._config["right_pink"] = "flux" if flux else "mic"
+        mode = self.pink_mode_var.get()
+        mode = mode if mode in ("mic", "flux", "steamvr") else "steamvr"
+        flux = mode == "flux"
+        self._config["right_pink"] = mode
         self._save_config()
         self.pink_flux_box.state(["!disabled"] if flux else ["disabled"])
         n = self._saved_pink_flux()
-        self._pink_flux = n if flux else 0
-        self.right_panel.pink_label = f"PINK→FA{n}" if flux else None
+        self._pink_flux = n if flux else (-1 if mode == "steamvr" else 0)
+        self.vr_mode.right_pink_to_steamvr = mode == "steamvr"
+        self.right_panel.pink_label = f"PINK→FA{n}" if flux else ("PINK→VR" if mode == "steamvr" else None)
 
     def _current_tab(self):
         try:
@@ -2797,8 +2806,12 @@ TIPS = {
             "mic mute: mutes and unmutes Windows' default microphone, so every app goes quiet at once (Resonite, "
             "VRChat, Discord). The glove confirms: pulses when muted, one buzz when live (gloves with a motor).\n\n"
             "FluxAction: presses a FluxAction in Resonite instead, for your own ProtoFlux (needs the MoreFluxActions "
-            "mod). The microphone is left alone, and nothing vibrates. Remembered across restarts.\n\n"
-            "(The left pink button always opens the SteamVR dashboard.)",
+            "mod). The microphone is left alone, and nothing vibrates.\n\n"
+            "SteamVR (the default): hands the button to SteamVR (the right glove's Pink input), for the app's own "
+            "binding: VRChat's mute, with its microphone icon; in Resonite FluxAction42, which mutes with the "
+            "MoreFluxActions mod (its MuteToggleAction, 42 by default). The bridge does nothing with it.\n\n"
+            "Remembered across restarts.\n\n"
+            "(The left pink button opens the SteamVR dashboard.)",
     "pink_flux": "Which FluxAction (1-42) the right pink button presses, with FluxAction chosen. 42 by default: the "
                  "CyberFinger bindings leave it free.\n\nIn Resonite, a Dynamic Impulse Receiver tagged "
                  "FluxAction42.Pressed (or .Released) under your avatar reacts to it. Sent straight to the mod, "

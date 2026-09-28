@@ -85,6 +85,12 @@
       "binding_image_point": [ 695, 1131 ],
       "order": 10
     },
+    "/input/pink": {
+      "type": "button",
+      "click": true,
+      "binding_image_point": [ 695, 1131 ],
+      "order": 11
+    },
     "/input/index_pinch": {
       "type": "trigger",
       "value": true,

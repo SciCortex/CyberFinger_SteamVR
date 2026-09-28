@@ -88,6 +88,10 @@ vr::EVRInitError CyberFingerController::Activate(uint32_t objectId) {
 
     auto* in = vr::VRDriverInput();
     in->CreateBooleanComponent(c, "/input/system/click", &m_bool[kSystem]);
+    // The pink buttons, a plain input for bindings: the left one toggles the dashboard through the dashboard's binding
+    // (vrcompositor_cyberfinger.json, so it can be rebound), the right one is apps' (mute), which the bridge passes on
+    // only in its SteamVR mode (otherwise it mutes the microphone or fires a FluxAction itself).
+    in->CreateBooleanComponent(c, "/input/pink/click", &m_bool[kPink]);
     in->CreateBooleanComponent(c, "/input/a/click", &m_bool[kA]);
     in->CreateBooleanComponent(c, "/input/a_hold/click", &m_bool[kAHold]);   // A's long press (LongPress.h)
     in->CreateBooleanComponent(c, "/input/b/click", &m_bool[kB]);
@@ -524,12 +528,11 @@ void CyberFingerController::SubmitInputs(const GloveState& g, bool fresh, bool l
     in->UpdateBooleanComponent(m_bool[kC], (b & kBtnC) != 0, 0);
     in->UpdateBooleanComponent(m_bool[kD], (b & kBtnD) != 0, 0);
     in->UpdateBooleanComponent(m_bool[kE], (b & kBtnE) != 0, 0);
-    // System (the SteamVR dashboard): the left glove's pink button, a glove button mapped to it, and the headset's
-    // palm-pinch gesture if forwarded (off by default). The right pink button is the bridge's (the microphone).
-    const bool pink = fresh && !Right() && (g.buttons2 & kBtn2Pink) != 0;
-    const bool system = (b & m_cfg.maskSystem) != 0 || pink ||
-                        (live && m_cfg.forwardTapSystem && tap.systemClick);
+    // System: a glove button mapped to it (system_button), and the headset's palm-pinch gesture if forwarded (off by
+    // default). The left pink button opens the dashboard as /input/pink, through the dashboard's binding.
+    const bool system = (b & m_cfg.maskSystem) != 0 || (live && m_cfg.forwardTapSystem && tap.systemClick);
     in->UpdateBooleanComponent(m_bool[kSystem], system, 0);
+    in->UpdateBooleanComponent(m_bool[kPink], fresh && (g.buttons2 & kBtn2Pink) != 0, 0);
     for (int f = 0; f < 4; ++f) {
         in->UpdateScalarComponent(m_scalar[kFingerIndex + f], curls[f + 1], 0);
         in->UpdateScalarComponent(m_scalar[kIndexPinch + f], gestures.pinch[f], 0);

@@ -21,13 +21,17 @@ mod for Resonite) and where each is documented. The user manual is in [docs/manu
     is republished the moment the streamer submits it, with its own timing, so apps get the same stream as
     from the streamer's hands;
   - **NO_POSE** — nothing tracks the hand: the pose is reported invalid, buttons keep working.
-- **The pink wrist buttons** (firmware 1.3.3+): the left one opens the SteamVR dashboard, the right one mutes
-  and unmutes the Windows microphone (the bridge, in VR mode), confirmed on the glove's motor. The bridge's
-  "Right pink button" option can make it a FluxAction instead (1–42, default 42), sent straight to the
-  MoreFluxActions mod over loopback UDP (`bridge/flux_actions.py`).
+- **The pink wrist buttons** (firmware 1.3.3+), `/input/pink` on each hand: the left one opens the SteamVR dashboard
+  (through the dashboard's binding, so it can be rebound). The right one is the bridge's "Right pink button"
+  option: *SteamVR* (the default) passes the button to SteamVR for the app's binding (VRChat's own mute;
+  FluxAction42 in Resonite, which the MoreFluxActions mod makes Resonite's mute: its `MuteToggleAction`, 42 by default);
+  *mic mute* mutes and unmutes the Windows microphone for every app, confirmed on the glove's motor;
+  *FluxAction* fires one (1–42, default 42) straight to the MoreFluxActions mod over loopback UDP
+  (`bridge/flux_actions.py`). In the last two the bridge keeps the button to itself, so nothing acts twice.
 - **Buttons only.** Actions come from the glove's buttons. The standard hand-tracking gestures (pinches,
-  grasp, index point) are exposed for binding but unassigned by default, and the Quest left-palm pinch no
-  longer opens the dashboard (`forward_tap_system_button` brings it back): they fired too easily.
+  grasp, index point) are exposed for binding but unassigned by default. The Quest left-palm pinch doesn't open
+  the dashboard: while CyberFinger is active the driver holds the headset hands' system button back from SteamVR
+  (`forward_tap_system_button` passes it on as CyberFinger's own instead). It fired too easily.
 - **Haptics** requested by apps reach the glove's motor through the bridge (firmware 1.3.3+, CFV1BP boards: the
   hardware revisions with a motor). Without one, the requests are simply ignored.
 - **Apps:** VRChat and Resonite get native bindings; every other app sees an Index controller (SteamVR
@@ -114,7 +118,8 @@ Then:
    (`python bridge/fusion_studio.py`, *▶ Start glove*). Put the gloves in "VR mode".
 3. Check what the driver sees: `python bridge/tools/cf_driver_probe.py` (stop the bridge's glove link first —
    both listen on UDP 27016). With your hands in view it shows `PASSTHROUGH`, `skeleton live 31 bones`, and
-   `[SYSTEM pressed]` when you press the left pink button; haptic requests are printed as they arrive.
+   `[SYSTEM pressed]` when the headset's hand makes its system gesture (the Quest palm pinch); haptic requests
+   are printed as they arrive.
    `--fake-hand right` drives the right hand from a synthetic fused stream to test the FUSED path.
 
 ## Controls
@@ -123,12 +128,12 @@ Then:
 |---|---|---|---|
 | Primary (trigger, analog + click) | `/input/trigger` | Use / interact | Primary |
 | Grab (grip) | `/input/grab` (tap to hold) | Grab: a quick tap holds until the next press, a longer press grabs while held | same |
-| Joystick (+ push) | `/input/thumbstick` | Move (L), turn (R) | Axis, secondary (push) |
-| MENU — context / rotary-dial button | `/input/b` (B/Y) | Menu: tap quick menu, hold action menu | Context menu |
-| Start/Select (black wrist button) | `/input/a` (A/X) | Mic (L), jump (R) | Dash |
-| Black wrist button held (≥ 0.8 s) | `/input/a_hold` | unbound | FluxAction1 (L), FluxAction2 (R), with the MoreFluxActions mod |
-| Left pink wrist button (power key, a short press) | `/input/system` (left) | SteamVR dashboard | SteamVR dashboard |
-| Right pink wrist button (power key, a short press) | — (the bridge) | Windows microphone mute | same, or a FluxAction (bridge option) |
+| Joystick (+ push) | `/input/thumbstick` | Move (L), turn (R); push: jump | Axis, secondary (push) |
+| MENU — context / rotary-dial button | `/input/b` (B/Y) | Action menu (L/R) | Context menu |
+| Start/Select (black wrist button) | `/input/a` (A/X) | Quick menu (L), Safe Mode (R) | Dash |
+| Black wrist button held (≥ 0.8 s) | `/input/a_hold` | Gesture toggle (L) | FluxAction1 (L), FluxAction2 (R), with the MoreFluxActions mod |
+| Left pink wrist button (power key, a short press) | `/input/pink` (left) | SteamVR dashboard (the dashboard's binding) | same |
+| Right pink wrist button (power key, a short press) | `/input/pink` (right), with the bridge's right pink on *SteamVR* | Mute | FluxAction42 (Resonite's mute, with the mod's `MuteToggleAction` at its default, 42) |
 | C, D, E (some hardware revisions and models only) | `/input/c`, `/input/d`, `/input/e` | unbound | FluxAction3/4 (C, L/R), 5/6 (D), 7/8 (E), with the mod |
 | Pinches, grasp, index point, two-finger point (hand tracking) | `/input/index_pinch` … `/input/index_point`, `/input/two_finger_point` | unbound | Two-finger point FluxAction36/37 (L/R), pinky pinch 38/39, index point 40/41, with the mod (their `/click`s); the rest unbound |
 
@@ -149,7 +154,8 @@ release it, and can't be held in an app; `black_hold_ms` = 0 gives the plain but
 
 In the SteamVR dashboard: the trigger clicks (a light press first locks the laser, so the click lands where it
 points), the grip right-clicks, the stick scrolls (push: middle click), B goes back, A (black button) goes
-home. The left pink button toggles the dashboard.
+home. The left pink button toggles the dashboard (twice: room view); rebind it in SteamVR's binding UI, under
+the dashboard's bindings.
 
 **Grab, tap to hold.** SteamVR's binding modes either toggle on every press or follow the button, so the driver
 does this itself: `/input/grab` is the grip button with a latch. A press shorter than `grab_tap_ms` (200 ms)
@@ -231,9 +237,14 @@ tuning constants are in the firmware's `src/haptics.h`. Click a hand panel's HAP
 
 ## Application support
 
-- **VRChat** — native binding, no controller emulation (VRChat's
+- **VRChat** — a binding that emulates an Oculus Touch controller, laid out by what VRChat does with each Touch
+  control ([docs.vrchat.com/docs/touch](https://docs.vrchat.com/docs/touch)): stick press jump, the menu button
+  the action menu, the black button the quick menu (left) and Safe Mode (right), the left black button held the
+  gesture toggle; trigger, grip (tap to hold) and sticks as on Touch. Mute is the right pink button, done by the
+  bridge (the Windows microphone). VRChat's
   [driver guide](https://creators.vrchat.com/platforms/pc/steamvr-drivers/) asks drivers not to emulate other
-  controllers). At the default skeletal tracking level *Full*, VRChat also turns on its hand-gesture
+  controllers: the emulation is only the default binding's choice, and a binding without it works too. At the
+  default skeletal tracking level *Full*, VRChat also turns on its hand-gesture
   controls; `skeletal_tracking_level` = `partial` keeps them off. Check the fingers with *Settings → Controls →
   Accurate* hands. VRChat comes second for now: the defaults are tuned for Resonite.
 - **Resonite** — native binding that emulates an Oculus Touch controller. Resonite picks its controller mode
@@ -249,6 +260,15 @@ tuning constants are in the firmware's `src/haptics.h`. Click a hand panel's HAP
   them Resonite draws rigid canned hands at a Touch offset. Resonite builds the hand from the *Generic* set's
   pose (`/pose/raw`) and the skeleton (*WithoutController*, model space), undoing its Touch offset for the
   hand, and ignores the tracking level. Precision grab is left to Resonite-side logic reading the skeleton.
+  **Switching between CyberFinger and the Quest controllers** needs two Resonite mods. Resonite's renderer picks
+  up a hand's device only when that device connects, and only if it holds the hand's role at that moment; its
+  engine binds locomotion to the controller it registered last.
+  [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix), a BepInExRenderer plugin, makes the renderer
+  follow SteamVR's hand roles, so hands and input don't freeze on the idle device. It also keeps hand controllers
+  waiting for their hand from being drawn as trackers.
+  [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) 1.10+ (`FollowActiveController`) rebinds
+  locomotion to the controller in use; with this driver, set its `GamepadBindings` off. Each take-back from the
+  controllers also restarts the IMU fusion as from cold (from the saved calibration).
   **Programmable buttons:** with the [MoreFluxActions](https://github.com/DrSciCortex/MoreFluxActionsMod) mod,
   the binding's *Flux Actions* set maps the black button's hold (`/input/a_hold`) to FluxAction1 (left) and
   FluxAction2 (right), C/D/E to 3–8, the two-finger point to 36/37 and the pinky pinch and index point to 38–41
@@ -278,7 +298,7 @@ Settings live in `resources/settings/default.vrsettings` (section `driver_cyberf
 | `optical_tap` / `optical_tap_hook` | `true` / `true` | Use the headset's hand tracking; capture its skeleton with the hook |
 | `tap_serial_left` / `_right` | `Hand_Left` / `Hand_Right` | Serial substrings of the headset hand devices (Steam Link: `VRLINKQ_Hand_Left`); `a\|b` lists |
 | `tap_controller_types` | `svl_hand_interaction_augmented\|vd_hand_controller` | Controller types of headset hand devices (Steam Link, Virtual Desktop) |
-| `forward_tap_system_button` | `false` | Also forward the headset hand's system button (Quest left-palm pinch) to the dashboard; the left pink button always opens it |
+| `forward_tap_system_button` | `false` | Also forward the headset hand's system button (Quest left-palm pinch) to the dashboard; the left pink button opens it anyway (through the dashboard's binding) |
 | `black_hold_ms` | `800` | Held this long, the black button is `/input/a_hold` instead of A (Resonite: FluxAction1 left, FluxAction2 right, with the MoreFluxActions mod); A then reports on release. 0 = no long press |
 | `grab_tap_to_hold` | `true` | `/input/grab`'s tap to hold (live); off, the grab follows the grip button |
 | `grab_tap_ms` | `200` | With tap to hold: a press shorter than this holds until the next press |
@@ -357,11 +377,22 @@ hand every 10 s.
   names the source.
 - **Buttons don't register** — the bridge must run in VR mode; the log shows
   `StudioLink: first glove packet (CFG2)`.
+- **Resonite: hands freeze, or no input, after switching back from the Quest controllers** — install
+  [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix). The driver log should show the take-back
+  (`hand tracking is back: taking the hand again`). With the plugin, its `BepInEx/LogOutput.log` shows
+  `registering device …` when it stepped in.
+- **Resonite: tools work after switching back, but you can't move or jump** — install
+  [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) 1.10+ with `FollowActiveController` on. The
+  Resonite log shows `rebinding locomotion to it` at each switch.
+- **CyberFinger doesn't take the hands back from the controllers** — the status line shows `pose=0 skel=0`: the
+  headset is still in controller mode and sends no hand tracking. Switch the controllers off, or keep them still,
+  or turn off the Quest's automatic switching and pick hand tracking yourself.
 - **The left pink button doesn't open the dashboard** — it needs firmware 1.3.3+ (the bridge log shows
-  `L PINK`); the probe should show `[SYSTEM pressed]` for the left hand.
-- **The right pink button doesn't mute** — the bridge must be in VR mode, with "Right pink button" on mic
-  mute; its log shows `Mic: muted` / `Mic: live`. It mutes Windows' default recording device (and the default
-  communications one).
+  `L PINK`), and the dashboard's binding must be CyberFinger's (SteamVR's binding UI, the dashboard's bindings).
+- **The right pink button doesn't mute** — the bridge must be in VR mode. On *mic mute*, its log shows
+  `Mic: muted` / `Mic: live`: it mutes Windows' default recording device (and the default communications one).
+  On *SteamVR*, the app's binding mutes: in Resonite that needs the MoreFluxActions mod with `MuteToggleAction`
+  at 42, its default (its log shows `FluxAction42: muted`), and Resonite's binding the CyberFinger default.
 
 ## Architecture
 
