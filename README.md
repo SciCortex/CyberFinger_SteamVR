@@ -66,11 +66,21 @@ so it needs no Visual C++ redistributable.
 
 ### The installer
 
-`tools\build_installer.cmd` builds the driver, the bridge app (`bridge\build.bat`, PyInstaller) and
-packages both with Inno Setup 6.3+ into `bridge\dist\installer\CyberFingerBridge_Setup_<version>.exe`.
-Run it where `python` is the bridge's Python with PyInstaller installed (e.g. `conda activate cybrgui`).
-Inno Setup is found in its default folders, or set `INNO_ISCC` to `ISCC.exe`. The ViGEmBus installer is
-bundled when `bridge\installer\ViGEmBus_1.22.0_x64_x86_arm64.exe` is present.
+`tools\build_installer.cmd` builds the driver, the bridge app (`bridge\build.bat`, PyInstaller) and the
+Resonite mods, and packages them with Inno Setup 6.3+ into
+`bridge\dist\installer\CyberFingerBridge_Setup_<version>.exe`. Run it where `python` is the bridge's Python with
+PyInstaller installed (e.g. `conda activate cybrgui`). Inno Setup is found in its default folders, or set
+`INNO_ISCC` to `ISCC.exe`. The ViGEmBus installer is bundled when
+`bridge\installer\ViGEmBus_1.22.0_x64_x86_arm64.exe` is present.
+
+The Resonite mods are built by `tools\stage_resonite_mods.py` into `bridge\installer\resonite_mods\`, each from a
+fresh shallow clone of its GitHub repository (default branch), made anew on every run under
+`out\resonite_mods_src\`: the installer gets what is pushed, not what's in local checkouts. `VERSIONS.txt` there
+records the commits. They
+compile against Resonite's assemblies, so this needs git, the .NET SDK and Resonite installed. On a PC without
+Resonite, stage them on one that has it (`python tools\stage_resonite_mods.py`), copy
+`bridge\installer\resonite_mods\` over and set `CF_RESONITE_MODS=keep`; or set `CF_RESONITE_MODS=skip` to build
+the installer without them.
 
 ### Linux
 
@@ -106,7 +116,23 @@ Then:
    [MoreFluxActions](https://github.com/DrSciCortex/MoreFluxActionsMod) with its renderer part,
    [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix),
    [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) 1.10+ and
-   [ProximityGrab](https://github.com/SciCortex/ProximityGrab).
+   [ProximityGrab](https://github.com/SciCortex/ProximityGrab). The installer's *Install CyberFinger mods for
+   Resonite* option does it, with a box for each mod:
+   - **MoreFluxActions and SteamVRRoleFix** are BepInEx plugins, and load from the BepInEx that Resonite starts
+     with. With [Gale](https://github.com/Kesomannen/gale), that's the profile's (Gale starts Resonite with
+     `--bepinex-target <profile>\BepInEx`), so the installer lists your Gale profiles, the last used one ticked,
+     and copies them into `%APPDATA%\com.kesomannen.gale\resonite\profiles\<profile>\BepInEx\plugins` and
+     `…\Renderer\BepInEx\plugins`. With BepisLoader installed in the Resonite folder itself (no mod manager:
+     `<Resonite>\BepInEx\core`), it lists that folder too. A Gale user's game folder also has a
+     `Renderer\BepInEx`: that's Gale's loader, not where its plugins go.
+   - **CyberFingerMod and ProximityGrab** are ResoniteModLoader mods, and go into `<Resonite>\rml_mods` either
+     way (under Gale, RML starts through the ResoniteModLoaderLoader package). Without a config of its own,
+     CyberFingerMod gets one with `GamepadBindings` off.
+   - It installs neither the loaders nor MoreFluxActions' dependencies (BepisLoader, BepInExRenderer,
+     BepisResoniteWrapper, BepInExResoniteShim, InterprocessLib, RenderiteHook, and for RML mods under Gale
+     ResoniteModLoaderLoader). It checks for them, and lists what's missing to add in Gale.
+   - Uninstalling removes the copies. The mods are also in `<install folder>\ResoniteMods`, laid out as they
+     install, to copy by hand into another mod manager's profile.
 
 ## Switching it off
 

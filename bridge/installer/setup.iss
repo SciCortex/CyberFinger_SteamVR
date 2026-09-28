@@ -1,7 +1,8 @@
 ; ── CyberFinger Bridge + SteamVR driver installer ──
 ; Inno Setup 6.3+ script
 ; Build everything with tools\build_installer.cmd, or compile with: iscc setup.iss (from installer/ directory)
-; after building the SteamVR driver (tools\build_driver.cmd) and the bridge (bridge\build.bat).
+; after building the SteamVR driver (tools\build_driver.cmd) and the bridge (bridge\build.bat), and optionally
+; staging the Resonite mods (tools\stage_resonite_mods.py).
 
 #define MyAppName "CyberFinger Bridge"
 #define MyAppVersion "2.0.0"
@@ -11,6 +12,7 @@
 #define ViGEmSetup "ViGEmBus_1.22.0_x64_x86_arm64.exe"
 #define HaveViGEm FileExists(AddBackslash(SourcePath) + ViGEmSetup)
 #define DriverSource AddBackslash(SourcePath) + "..\..\out\build\x64-Release\driver\cyberfinger"
+#define HaveResoniteMods DirExists(AddBackslash(SourcePath) + "resonite_mods")
 
 #if !FileExists(DriverSource + "\bin\win64\driver_cyberfinger.dll")
   #error The SteamVR driver is not built. Run tools\build_driver.cmd first.
@@ -20,6 +22,9 @@
 #endif
 #if !HaveViGEm
   #pragma message "ViGEmBus installer not found next to setup.iss: building without it (Gamepad mode users install ViGEmBus themselves)."
+#endif
+#if !HaveResoniteMods
+  #pragma message "resonite_mods not found next to setup.iss (tools\stage_resonite_mods.py): building without the Resonite mods."
 #endif
 
 [Setup]
@@ -49,6 +54,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "steamvrdriver"; Description: "Install the CyberFinger SteamVR driver (controllers + hand skeleton)"; GroupDescription: "SteamVR:"
+#if HaveResoniteMods
+Name: "resonite"; Description: "Install CyberFinger mods for Resonite"; GroupDescription: "Resonite:"; Check: ResoniteFound
+Name: "resonite\morefluxactions"; Description: "MoreFluxActions: Flux Actions 1-42 for your ProtoFlux, and the right pink button's mute"; Check: ResoniteFound
+Name: "resonite\steamvrrolefix"; Description: "SteamVRRoleFix: hands and buttons follow switches to the Quest controllers and back"; Check: ResoniteFound
+Name: "resonite\cyberfingermod"; Description: "CyberFingerMod: movement follows the controller in use, the laser stays where your avatar puts it"; Check: ResoniteFound
+Name: "resonite\proximitygrab"; Description: "ProximityGrab: grab with a fist, precision grab with a pinch"; Check: ResoniteFound
+#endif
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 #if HaveViGEm
 Name: "installvigem"; Description: "Install ViGEmBus driver (required for Gamepad mode)"; GroupDescription: "Drivers:"; Flags: checkedonce
@@ -64,6 +76,17 @@ Source: "..\assets\icon.png"; DestDir: "{app}"; Flags: ignoreversion
 
 ; SteamVR driver folder (registered with SteamVR below)
 Source: "{#DriverSource}\*"; DestDir: "{app}\SteamVR\cyberfinger"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: steamvrdriver
+
+#if HaveResoniteMods
+; Resonite mods (tools\stage_resonite_mods.py), laid out as installed: kept here, and copied into the game and its
+; mod profiles at the end of setup (InstallResoniteMods). Also the files to copy by hand for another mod manager.
+Source: "resonite_mods\VERSIONS.txt"; DestDir: "{app}\ResoniteMods"; Flags: ignoreversion; Tasks: resonite
+Source: "resonite_mods\BepInEx\plugins\DrSciCortex-MoreFluxActions\*"; DestDir: "{app}\ResoniteMods\BepInEx\plugins\DrSciCortex-MoreFluxActions"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: resonite\morefluxactions
+Source: "resonite_mods\Renderer\BepInEx\plugins\DrSciCortex-MoreFluxActions\*"; DestDir: "{app}\ResoniteMods\Renderer\BepInEx\plugins\DrSciCortex-MoreFluxActions"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: resonite\morefluxactions
+Source: "resonite_mods\Renderer\BepInEx\plugins\DrSciCortex-SteamVRRoleFix\*"; DestDir: "{app}\ResoniteMods\Renderer\BepInEx\plugins\DrSciCortex-SteamVRRoleFix"; Flags: ignoreversion recursesubdirs createallsubdirs; Tasks: resonite\steamvrrolefix
+Source: "resonite_mods\rml_mods\CyberFingerMod.dll"; DestDir: "{app}\ResoniteMods\rml_mods"; Flags: ignoreversion; Tasks: resonite\cyberfingermod
+Source: "resonite_mods\rml_mods\ProximityGrab.dll"; DestDir: "{app}\ResoniteMods\rml_mods"; Flags: ignoreversion; Tasks: resonite\proximitygrab
+#endif
 
 #if HaveViGEm
 ; ViGEmBus installer — bundled into the setup, extracted on demand
@@ -93,6 +116,10 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 
 [UninstallRun]
 Filename: "{code:GetVRPathReg}"; Parameters: "removedriver ""{app}\SteamVR\cyberfinger"""; Flags: runhidden waituntilterminated skipifdoesntexist; RunOnceId: "UnregisterSteamVRDriver"; Tasks: steamvrdriver
+
+[UninstallDelete]
+; The list of the Resonite mods' copies, which the uninstaller removes first (UninstallResoniteMods)
+Type: files; Name: "{app}\ResoniteMods\installed.txt"
 
 [Code]
 // ── SteamVR ────────────────────────────────────────────────────────────────
@@ -170,7 +197,7 @@ begin
     Result := 'vrpathreg.exe';            // not found: the run entry fails harmlessly
 end;
 
-function IsSteamVRRunning(): Boolean;
+function IsProcessRunning(Name: String): Boolean;
 var
   Locator, Service, Items: Variant;
 begin
@@ -178,11 +205,16 @@ begin
   try
     Locator := CreateOleObject('WbemScripting.SWbemLocator');
     Service := Locator.ConnectServer('.', 'root\CIMV2');
-    Items := Service.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE Name = ''vrserver.exe''');
+    Items := Service.ExecQuery('SELECT ProcessId FROM Win32_Process WHERE Name = ''' + Name + '''');
     Result := Items.Count > 0;
   except
     Result := False;
   end;
+end;
+
+function IsSteamVRRunning(): Boolean;
+begin
+  Result := IsProcessRunning('vrserver.exe');
 end;
 
 // SteamVR holds the driver DLL and reads the registration at startup: it must be closed.
@@ -200,6 +232,398 @@ begin
   end;
 end;
 
+// ── Resonite mods ──────────────────────────────────────────────────────────
+// BepInEx plugins (MoreFluxActions, SteamVRRoleFix) load from the BepInEx that Resonite starts with. With Gale,
+// that's the profile's: Gale starts Resonite with --bepinex-target <profile>\BepInEx and points the renderer's
+// doorstop at <profile>\Renderer\BepInEx (the game folder then holds only the doorstop and a loader, a
+// Renderer\BepInEx\core included). Without a mod manager, BepisLoader is installed in the game folder itself: its
+// BepInEx\core. The Resonite plugins page lists both kinds; the user picks. ResoniteModLoader mods (CyberFingerMod,
+// ProximityGrab) always go into the game folder's rml_mods: RML loads them from there, also under Gale (where
+// ResoniteModLoaderLoader loads the game folder's RML).
+
+const
+  ResoniteModsList = 'installed.txt';     // in {app}\ResoniteMods: every copy made, for the uninstaller
+
+var
+  ResoniteLookedUp: Boolean;
+  ResoniteDir: String;                    // Resonite's install folder, or ''
+  ModTargets, ModTargetNames: TStringList; // folders with BepisLoader (Gale profiles, the game), and their names
+  ModTargetIsGale: TStringList;           // '1' for a Gale profile
+  ModTargetDefault: Integer;              // the Gale profile last used, or -1
+  TargetPage: TInputOptionWizardPage;
+
+// Resonite's install folder, or ''.
+function FindResonite(): String;
+var
+  SteamPath, Candidate, Line: String;
+  Lines: TArrayOfString;
+  I, P: Integer;
+begin
+  Result := '';
+  if RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 2519830',
+                         'InstallLocation', Candidate) and FileExists(Candidate + '\Resonite.exe') then
+  begin
+    Result := Candidate;
+    Exit;
+  end;
+  if RegQueryStringValue(HKCU, 'Software\Valve\Steam', 'SteamPath', SteamPath) then
+  begin
+    StringChangeEx(SteamPath, '/', '\', True);
+    // Every Steam library: the "path" entries of libraryfolders.vdf (the Steam folder is one of them)
+    if LoadStringsFromFile(SteamPath + '\steamapps\libraryfolders.vdf', Lines) then
+      for I := 0 to GetArrayLength(Lines) - 1 do
+      begin
+        Line := Trim(Lines[I]);
+        if Pos('"path"', Line) <> 1 then
+          Continue;
+        Delete(Line, 1, 6);
+        P := Pos('"', Line);
+        if P = 0 then
+          Continue;
+        Delete(Line, 1, P);
+        P := Pos('"', Line);
+        if P = 0 then
+          Continue;
+        Candidate := Copy(Line, 1, P - 1);
+        StringChangeEx(Candidate, '\\', '\', True);
+        Candidate := Candidate + '\steamapps\common\Resonite';
+        if FileExists(Candidate + '\Resonite.exe') then
+        begin
+          Result := Candidate;
+          Exit;
+        end;
+      end;
+  end;
+  Candidate := ExpandConstant('{commonpf32}\Steam\steamapps\common\Resonite');
+  if FileExists(Candidate + '\Resonite.exe') then
+    Result := Candidate;
+end;
+
+function GetResoniteDir(): String;
+begin
+  if not ResoniteLookedUp then
+  begin
+    ResoniteDir := FindResonite();
+    ResoniteLookedUp := True;
+  end;
+  Result := ResoniteDir;
+end;
+
+function ResoniteFound(): Boolean;
+begin
+  Result := GetResoniteDir() <> '';
+end;
+
+function IsDirectory(const F: TFindRec): Boolean;
+begin
+  Result := ((F.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0) and (F.Name <> '.') and (F.Name <> '..');
+end;
+
+// Finds the places BepInEx plugins can go: every Gale profile with BepisLoader, and the game folder if BepisLoader
+// is installed there. The Gale profile Resonite started with last (newest BepInEx log) is the default.
+procedure FindModTargets();
+var
+  F, LogFile: TFindRec;
+  Profiles: String;
+  NewestHigh, NewestLow: Cardinal;
+begin
+  if ModTargets <> nil then
+    Exit;
+  ModTargets := TStringList.Create;
+  ModTargetNames := TStringList.Create;
+  ModTargetIsGale := TStringList.Create;
+  ModTargetDefault := -1;
+  NewestHigh := 0;
+  NewestLow := 0;
+  Profiles := ExpandConstant('{userappdata}\com.kesomannen.gale\resonite\profiles');
+  if FindFirst(Profiles + '\*', F) then
+  try
+    repeat
+      if IsDirectory(F) and DirExists(Profiles + '\' + F.Name + '\BepInEx\core') then
+      begin
+        ModTargets.Add(Profiles + '\' + F.Name);
+        ModTargetNames.Add('Gale profile "' + F.Name + '"');
+        ModTargetIsGale.Add('1');
+        if FindFirst(Profiles + '\' + F.Name + '\BepInEx\LogOutput.log', LogFile) then
+        begin
+          if (LogFile.LastWriteTimeHigh > NewestHigh) or
+             ((LogFile.LastWriteTimeHigh = NewestHigh) and (LogFile.LastWriteTimeLow > NewestLow)) then
+          begin
+            NewestHigh := LogFile.LastWriteTimeHigh;
+            NewestLow := LogFile.LastWriteTimeLow;
+            ModTargetDefault := ModTargets.Count - 1;
+          end;
+          FindClose(LogFile);
+        end;
+      end;
+    until not FindNext(F);
+  finally
+    FindClose(F);
+  end;
+  if (ModTargetDefault < 0) and (ModTargets.Count > 0) then
+    ModTargetDefault := 0;
+  if ModTargetDefault >= 0 then
+    ModTargetNames.Strings[ModTargetDefault] := ModTargetNames.Strings[ModTargetDefault] + ' (last used)';
+  if ResoniteFound() and DirExists(GetResoniteDir() + '\BepInEx\core') then
+  begin
+    ModTargets.Add(GetResoniteDir());
+    ModTargetNames.Add('The Resonite folder (BepInEx installed there, without a mod manager)');
+    ModTargetIsGale.Add('0');
+  end;
+end;
+
+function BepInExModSelected(): Boolean;
+begin
+  Result := WizardIsTaskSelected('resonite\morefluxactions') or WizardIsTaskSelected('resonite\steamvrrolefix');
+end;
+
+function RmlModSelected(): Boolean;
+begin
+  Result := WizardIsTaskSelected('resonite\cyberfingermod') or WizardIsTaskSelected('resonite\proximitygrab');
+end;
+
+// True for a target the user ticked on the Resonite plugins page.
+function TargetChosen(I: Integer): Boolean;
+begin
+  Result := (TargetPage <> nil) and TargetPage.Values[I];
+end;
+
+// True when the plugins folder holds a plugin called Name: a folder or file with it in its name (Gale names
+// the folders "<Team>-<Name>").
+function HasPlugin(Plugins, Name: String): Boolean;
+var
+  F: TFindRec;
+begin
+  Result := False;
+  if FindFirst(Plugins + '\*', F) then
+  try
+    repeat
+      Result := Pos(Lowercase(Name), Lowercase(F.Name)) > 0;
+    until Result or not FindNext(F);
+  finally
+    FindClose(F);
+  end;
+end;
+
+procedure AddMissing(var Missing: String; Needed: Boolean; Target, Name: String);
+begin
+  if Needed and not HasPlugin(Target + '\BepInEx\plugins', Name) then
+    Missing := Missing + ', ' + Name;
+end;
+
+// The packages the chosen mods need that target I lacks, as a line, or ''.
+function MissingPackages(I: Integer): String;
+var
+  Target, Missing: String;
+  Flux, RoleFix: Boolean;
+begin
+  Target := ModTargets.Strings[I];
+  Flux := WizardIsTaskSelected('resonite\morefluxactions');
+  RoleFix := WizardIsTaskSelected('resonite\steamvrrolefix');
+  Missing := '';
+  AddMissing(Missing, Flux, Target, 'BepisResoniteWrapper');
+  AddMissing(Missing, Flux, Target, 'BepInExResoniteShim');
+  AddMissing(Missing, Flux, Target, 'InterprocessLib');
+  AddMissing(Missing, Flux, Target, 'RenderiteHook');
+  if (Flux or RoleFix) and not DirExists(Target + '\Renderer\BepInEx\core') then
+    Missing := Missing + ', BepInExRenderer';
+  // Under Gale, RML starts through ResoniteModLoaderLoader (else through a -LoadAssembly launch option)
+  AddMissing(Missing, RmlModSelected() and (ModTargetIsGale.Strings[I] = '1'), Target, 'ResoniteModLoaderLoader');
+  Result := '';
+  if Missing <> '' then
+    Result := #13#10 + '- ' + ModTargetNames.Strings[I] + ': ' + Copy(Missing, 3, Length(Missing));
+end;
+
+// Copies the folder Src into Dst, creating it and replacing files.
+function CopyTree(Src, Dst: String): Boolean;
+var
+  F: TFindRec;
+begin
+  Result := ForceDirectories(Dst);
+  if Result and FindFirst(Src + '\*', F) then
+  try
+    repeat
+      if IsDirectory(F) then
+        Result := CopyTree(Src + '\' + F.Name, Dst + '\' + F.Name) and Result
+      else if (F.Attributes and FILE_ATTRIBUTE_DIRECTORY) = 0 then
+        Result := CopyFile(Src + '\' + F.Name, Dst + '\' + F.Name, False) and Result;
+    until not FindNext(F);
+  finally
+    FindClose(F);
+  end;
+end;
+
+procedure Remember(Installed: TStringList; Path: String);
+begin
+  if Installed.IndexOf(Path) < 0 then
+    Installed.Add(Path);
+end;
+
+// Replaces the plugin folder Rel (e.g. Renderer\BepInEx\plugins\DrSciCortex-SteamVRRoleFix) in Target with ours.
+procedure InstallPlugin(Rel, Target: String; Installed: TStringList; var Failed: String);
+var
+  Dest: String;
+begin
+  Dest := Target + '\' + Rel;
+  if DirExists(Dest) then
+    DelTree(Dest, True, True, True);
+  if CopyTree(ExpandConstant('{app}\ResoniteMods\') + Rel, Dest) then
+    Remember(Installed, Dest)
+  else
+    Failed := Failed + #13#10 + Dest;
+end;
+
+procedure InstallRmlMod(Name: String; Installed: TStringList; var Failed: String);
+var
+  Dest: String;
+begin
+  Dest := GetResoniteDir() + '\rml_mods\' + Name;
+  if ForceDirectories(ExtractFileDir(Dest)) and
+     CopyFile(ExpandConstant('{app}\ResoniteMods\rml_mods\') + Name, Dest, False) then
+    Remember(Installed, Dest)
+  else
+    Failed := Failed + #13#10 + Dest;
+end;
+
+// Without a config of its own, CyberFingerMod starts with GamepadBindings off: with this driver CyberFinger is a
+// SteamVR controller, not a gamepad. An existing config is left alone. Returns a note for the user, or ''.
+function SetUpCyberFingerModConfig(): String;
+var
+  FileName: String;
+  Raw: AnsiString;
+begin
+  Result := '';
+  FileName := GetResoniteDir() + '\rml_config\CyberFingerMod.json';
+  if FileExists(FileName) then
+  begin
+    if LoadStringFromFile(FileName, Raw) and (Pos('"GamepadBindings": true', Raw) > 0) then
+      Result := #13#10#13#10 + 'CyberFingerMod''s GamepadBindings setting is on. With the SteamVR driver, turn it off ' +
+                '(in Resonite''s mod settings, or in ' + FileName + ').';
+    Exit;
+  end;
+  if ForceDirectories(ExtractFileDir(FileName)) then
+    SaveStringToFile(FileName, '{' + #13#10 + '  "version": "1.0.0",' + #13#10 + '  "values": {' + #13#10 +
+                     '    "GamepadBindings": false' + #13#10 + '  }' + #13#10 + '}' + #13#10, False);
+end;
+
+procedure InstallResoniteMods();
+var
+  ListFile, Target, Failed, Notes, Missing: String;
+  Raw: AnsiString;
+  Installed: TStringList;
+  I, Chosen: Integer;
+begin
+  ListFile := ExpandConstant('{app}\ResoniteMods\') + ResoniteModsList;
+  Failed := '';
+  Notes := '';
+  Missing := '';
+  Chosen := 0;
+  Installed := TStringList.Create;
+  try
+    // Copies from an earlier setup stay listed, so that the uninstaller removes those too
+    if LoadStringFromFile(ListFile, Raw) then
+      Installed.Text := Utf8Decode(Raw);
+
+    FindModTargets();
+    if BepInExModSelected() then
+    begin
+      for I := 0 to ModTargets.Count - 1 do
+      begin
+        if not TargetChosen(I) then
+          Continue;
+        Chosen := Chosen + 1;
+        Target := ModTargets.Strings[I];
+        if WizardIsTaskSelected('resonite\morefluxactions') then
+        begin
+          InstallPlugin('BepInEx\plugins\DrSciCortex-MoreFluxActions', Target, Installed, Failed);
+          if DirExists(Target + '\Renderer\BepInEx\core') then
+            InstallPlugin('Renderer\BepInEx\plugins\DrSciCortex-MoreFluxActions', Target, Installed, Failed);
+        end;
+        if WizardIsTaskSelected('resonite\steamvrrolefix') and DirExists(Target + '\Renderer\BepInEx\core') then
+          InstallPlugin('Renderer\BepInEx\plugins\DrSciCortex-SteamVRRoleFix', Target, Installed, Failed);
+        Missing := Missing + MissingPackages(I);
+      end;
+      if ModTargets.Count = 0 then
+        Notes := 'No BepisLoader was found, neither in a Gale profile nor in the Resonite folder, so MoreFluxActions ' +
+                 'and SteamVRRoleFix were not installed. Set up Gale with BepisLoader and BepInExRenderer ' +
+                 '(https://modding.resonite.net/getting-started/installation/), then run this setup again. They are ' +
+                 'also in ' + ExpandConstant('{app}\ResoniteMods') + ', laid out as they install, to copy by hand.'
+      else if Chosen = 0 then
+        Notes := 'No Gale profile or Resonite folder was chosen, so MoreFluxActions and SteamVRRoleFix were not ' +
+                 'installed. They are in ' + ExpandConstant('{app}\ResoniteMods') + ', laid out as they install.';
+    end;
+    if Missing <> '' then
+      Notes := Notes + #13#10#13#10 + 'The mods need these packages, which aren''t installed yet. Add them in Gale ' +
+               '(or your mod manager), then start Resonite:' + Missing;
+
+    if WizardIsTaskSelected('resonite\cyberfingermod') then
+    begin
+      InstallRmlMod('CyberFingerMod.dll', Installed, Failed);
+      Notes := Notes + SetUpCyberFingerModConfig();
+    end;
+    if WizardIsTaskSelected('resonite\proximitygrab') then
+      InstallRmlMod('ProximityGrab.dll', Installed, Failed);
+    if RmlModSelected() and not FileExists(GetResoniteDir() + '\Libraries\ResoniteModLoader.dll') then
+      Notes := Notes + #13#10#13#10 + 'CyberFingerMod and ProximityGrab are ResoniteModLoader mods: they load once ' +
+               'ResoniteModLoader is installed (https://github.com/resonite-modding-group/ResoniteModLoader).';
+
+    SaveStringToFile(ListFile, Utf8Encode(Installed.Text), False);
+  finally
+    Installed.Free;
+  end;
+  if Failed <> '' then
+    SuppressibleMsgBox('Some Resonite mod files could not be copied (is Resonite running?):' + Failed, mbError, MB_OK, IDOK);
+  if Notes <> '' then
+    SuppressibleMsgBox(Trim(Notes), mbInformation, MB_OK, IDOK);
+end;
+
+// Removes the copies InstallResoniteMods made: our plugin folders and the RML mods it copied.
+procedure UninstallResoniteMods();
+var
+  Raw: AnsiString;
+  Paths: TStringList;
+  Path: String;
+  I: Integer;
+begin
+  if not LoadStringFromFile(ExpandConstant('{app}\ResoniteMods\') + ResoniteModsList, Raw) then
+    Exit;
+  Paths := TStringList.Create;
+  try
+    Paths.Text := Utf8Decode(Raw);
+    for I := 0 to Paths.Count - 1 do
+    begin
+      Path := Trim(Paths.Strings[I]);
+      if Pos('DrSciCortex-', ExtractFileName(Path)) = 1 then
+        DelTree(Path, True, True, True)
+      else if CompareText(ExtractFileName(ExtractFileDir(Path)), 'rml_mods') = 0 then
+        DeleteFile(Path);
+    end;
+  finally
+    Paths.Free;
+  end;
+end;
+
+function IsResoniteRunning(): Boolean;
+begin
+  Result := IsProcessRunning('Resonite.exe') or IsProcessRunning('Renderite.Host.exe') or
+            IsProcessRunning('Renderite.Renderer.exe');
+end;
+
+// Resonite holds its mods' files while running.
+function WaitForResoniteClosed(): Boolean;
+begin
+  Result := True;
+  while IsResoniteRunning() do
+  begin
+    if SuppressibleMsgBox('Resonite is running. Please quit Resonite, then click Retry.',
+                          mbError, MB_RETRYCANCEL, IDCANCEL) = IDCANCEL then
+    begin
+      Result := False;
+      Exit;
+    end;
+  end;
+end;
+
 function InitializeSetup(): Boolean;
 begin
   Result := WaitForSteamVRClosed();
@@ -208,7 +632,96 @@ end;
 function InitializeUninstall(): Boolean;
 begin
   Result := WaitForSteamVRClosed();
+  if Result and FileExists(ExpandConstant('{app}\ResoniteMods\') + ResoniteModsList) then
+    Result := WaitForResoniteClosed();
 end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usUninstall then
+    UninstallResoniteMods();
+end;
+
+#if HaveResoniteMods
+procedure InitializeWizard();
+var
+  I: Integer;
+begin
+  if not ResoniteFound() then
+    Exit;
+  FindModTargets();
+  if ModTargets.Count = 0 then
+    Exit;
+  TargetPage := CreateInputOptionPage(wpSelectTasks, 'Resonite plugins',
+    'Where should MoreFluxActions and SteamVRRoleFix go?',
+    'These are BepInEx plugins, and load from the BepInEx that Resonite starts with. Gale gives each profile its own: ' +
+    'tick the profiles you play with. Without a mod manager, BepInEx is installed in the Resonite folder itself.' +
+    #13#10#13#10 + 'CyberFingerMod and ProximityGrab go into Resonite''s rml_mods folder either way.',
+    False, False);
+  for I := 0 to ModTargets.Count - 1 do
+  begin
+    TargetPage.Add(ModTargetNames.Strings[I] + '   ' + ModTargets.Strings[I]);
+    TargetPage.Values[I] := (I = ModTargetDefault) or (ModTargetIsGale.Strings[I] = '0');
+  end;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (TargetPage <> nil) and (PageID = TargetPage.ID) and not BepInExModSelected();
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+begin
+  Result := True;
+  if (CurPageID = wpReady) and WizardIsTaskSelected('resonite') then
+    Result := WaitForResoniteClosed();
+end;
+
+procedure AddMemoPart(var Memo: String; Part, NewLine: String);
+begin
+  if Part = '' then
+    Exit;
+  if Memo <> '' then
+    Memo := Memo + NewLine + NewLine;
+  Memo := Memo + Part;
+end;
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo,
+                         MemoGroupInfo, MemoTasksInfo: String): String;
+var
+  Part, Where: String;
+  I: Integer;
+begin
+  Result := '';
+  AddMemoPart(Result, MemoUserInfoInfo, NewLine);
+  AddMemoPart(Result, MemoDirInfo, NewLine);
+  AddMemoPart(Result, MemoTypeInfo, NewLine);
+  AddMemoPart(Result, MemoComponentsInfo, NewLine);
+  AddMemoPart(Result, MemoGroupInfo, NewLine);
+  AddMemoPart(Result, MemoTasksInfo, NewLine);
+  if WizardIsTaskSelected('resonite') then
+  begin
+    FindModTargets();
+    Part := 'Resonite mods go into:';
+    if BepInExModSelected() then
+    begin
+      Where := '';
+      for I := 0 to ModTargets.Count - 1 do
+        if TargetChosen(I) then
+          Where := Where + NewLine + Space + Space + ModTargets.Strings[I];
+      if ModTargets.Count = 0 then
+        Where := NewLine + Space + Space + 'skipped: no BepisLoader found, in a Gale profile or the Resonite folder'
+      else if Where = '' then
+        Where := NewLine + Space + Space + 'nowhere: no Gale profile or Resonite folder chosen';
+      Part := Part + NewLine + Space + 'MoreFluxActions, SteamVRRoleFix (BepInEx):' + Where;
+    end;
+    if RmlModSelected() then
+      Part := Part + NewLine + Space + 'CyberFingerMod, ProximityGrab (ResoniteModLoader):' + NewLine + Space + Space +
+              GetResoniteDir() + '\rml_mods';
+    AddMemoPart(Result, Part, NewLine);
+  end;
+end;
+#endif
 
 // ── Leftovers of the proof-of-concept driver ───────────────────────────────
 // Its README had users copy the driver into SteamVR\drivers\cyberfinger and add TrackingOverrides for
@@ -381,6 +894,10 @@ begin
                        'Install SteamVR, start it once, then run:' + #13#10 +
                        'vrpathreg adddriver "' + ExpandConstant('{app}\SteamVR\cyberfinger') + '"',
                        mbInformation, MB_OK, IDOK);
+#if HaveResoniteMods
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('resonite') then
+    InstallResoniteMods();
+#endif
 end;
 
 // ── ViGEmBus ───────────────────────────────────────────────────────────────
@@ -419,4 +936,4 @@ begin
 end;
 
 [Messages]
-WelcomeLabel2=This will install [name] on your computer.%n%n{#MyAppName} connects CyberFinger BLE controllers to your PC as SteamVR controllers or an Xbox 360 gamepad. It includes the CyberFinger SteamVR driver, which you can switch off in SteamVR Settings > Startup/Shutdown > Manage Add-ons. An existing installation is upgraded in place.%n%nPlease quit SteamVR before continuing.
+WelcomeLabel2=This will install [name] on your computer.%n%n{#MyAppName} connects CyberFinger BLE controllers to your PC as SteamVR controllers or an Xbox 360 gamepad. It includes the CyberFinger SteamVR driver, which you can switch off in SteamVR Settings > Startup/Shutdown > Manage Add-ons, and can add the CyberFinger mods to Resonite. An existing installation is upgraded in place.%n%nPlease quit SteamVR before continuing.
