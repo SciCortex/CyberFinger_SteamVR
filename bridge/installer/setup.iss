@@ -325,7 +325,7 @@ procedure FindModTargets();
 var
   F, LogFile: TFindRec;
   Profiles: String;
-  NewestHigh, NewestLow: Cardinal;
+  NewestHigh, NewestLow: Longint;
 begin
   if ModTargets <> nil then
     Exit;
@@ -346,11 +346,12 @@ begin
         ModTargetIsGale.Add('1');
         if FindFirst(Profiles + '\' + F.Name + '\BepInEx\LogOutput.log', LogFile) then
         begin
-          if (LogFile.LastWriteTimeHigh > NewestHigh) or
-             ((LogFile.LastWriteTimeHigh = NewestHigh) and (LogFile.LastWriteTimeLow > NewestLow)) then
+          if (LogFile.LastWriteTime.dwHighDateTime > NewestHigh) or
+             ((LogFile.LastWriteTime.dwHighDateTime = NewestHigh) and
+              (LogFile.LastWriteTime.dwLowDateTime > NewestLow)) then
           begin
-            NewestHigh := LogFile.LastWriteTimeHigh;
-            NewestLow := LogFile.LastWriteTimeLow;
+            NewestHigh := LogFile.LastWriteTime.dwHighDateTime;
+            NewestLow := LogFile.LastWriteTime.dwLowDateTime;
             ModTargetDefault := ModTargets.Count - 1;
           end;
           FindClose(LogFile);
@@ -655,8 +656,8 @@ begin
   TargetPage := CreateInputOptionPage(wpSelectTasks, 'Resonite plugins',
     'Where should MoreFluxActions and SteamVRRoleFix go?',
     'These are BepInEx plugins, and load from the BepInEx that Resonite starts with. Gale gives each profile its own: ' +
-    'tick the profiles you play with. Without a mod manager, BepInEx is installed in the Resonite folder itself.' +
-    #13#10#13#10 + 'CyberFingerMod and ProximityGrab go into Resonite''s rml_mods folder either way.',
+    'tick the profiles you play with. Without a mod manager, BepInEx is installed in the Resonite folder itself.' + #13#10#13#10 +
+    'CyberFingerMod and ProximityGrab go into Resonite''s rml_mods folder either way.',
     False, False);
   for I := 0 to ModTargets.Count - 1 do
   begin
