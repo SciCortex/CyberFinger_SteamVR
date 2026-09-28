@@ -265,7 +265,8 @@ tuning constants are in the firmware's `src/haptics.h`. Click a hand panel's HAP
   engine binds locomotion to the controller it registered last.
   [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix), a BepInExRenderer plugin, makes the renderer
   follow SteamVR's hand roles, so hands and input don't freeze on the idle device. It also keeps hand controllers
-  waiting for their hand from being drawn as trackers.
+  waiting for their hand from being drawn as trackers, and (0.3+) clears the inputs of the device switched away
+  from, so no button stays held.
   [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) 1.10+ (`FollowActiveController`) rebinds
   locomotion to the controller in use; with this driver, set its `GamepadBindings` off. Each take-back from the
   controllers also restarts the IMU fusion as from cold (from the saved calibration).
@@ -381,6 +382,10 @@ hand every 10 s.
   [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix). The driver log should show the take-back
   (`hand tracking is back: taking the hand again`). With the plugin, its `BepInEx/LogOutput.log` shows
   `registering device …` when it stepped in.
+- **Resonite: with the Quest controllers, X/A doesn't open the dash, and a double X toggles UI edit mode** — a
+  button held on the other device at the switch is still held for Resonite. Update
+  [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix) to 0.3+ and restart Resonite; its log shows
+  `is no longer read: cleared its inputs (…)` when it releases one.
 - **Resonite: tools work after switching back, but you can't move or jump** — install
   [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) 1.10+ with `FollowActiveController` on. The
   Resonite log shows `rebinding locomotion to it` at each switch.
