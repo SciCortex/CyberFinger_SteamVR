@@ -1,11 +1,20 @@
 @echo off
-REM Build the full CyberFinger installer: SteamVR driver + bridge app, packaged with Inno Setup 6.3+.
+REM Build the full CyberFinger installer: SteamVR driver + bridge app + Resonite mods, packaged with Inno Setup 6.3+.
 REM Run it where "python" is the bridge's Python with PyInstaller installed (e.g. conda activate cybrgui).
 REM Output: bridge\dist\installer\CyberFingerBridge_Setup_<version>.exe
 setlocal
 set "ROOT=%~dp0.."
 
 call "%~dp0build_driver.cmd" < NUL || goto :fail
+
+REM The Resonite mods for the installer's "Resonite mods" option, built into bridge\installer\resonite_mods. They
+REM compile against Resonite's assemblies. On a PC without Resonite: CF_RESONITE_MODS=keep packages that folder as
+REM it is (staged on another PC and copied over), CF_RESONITE_MODS=skip builds the installer without the mods.
+if /i "%CF_RESONITE_MODS%"=="keep" goto :modsdone
+if exist "%ROOT%\bridge\installer\resonite_mods" rmdir /s /q "%ROOT%\bridge\installer\resonite_mods"
+if /i "%CF_RESONITE_MODS%"=="skip" goto :modsdone
+python "%ROOT%\tools\stage_resonite_mods.py" || goto :fail
+:modsdone
 
 pushd "%ROOT%\bridge"
 call build.bat < NUL

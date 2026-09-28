@@ -51,3 +51,6 @@ __pycache__/
 # Bridge build outputs (bridge/build.bat)
 bridge/dist/
 bridge/assets/icon.ico
+
+# Resonite mods staged for the installer (tools/stage_resonite_mods.py)
+bridge/installer/resonite_mods/
