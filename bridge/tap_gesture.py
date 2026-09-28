@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Triple tap on the glove's joint IMU (the module on the back of the hand), like SlimeVR's reset tap: the bridge
+"""Triple tap on the CyberFinger's joint IMU (the module on the back of the hand), like SlimeVR's reset tap: the bridge
 then asks the driver to resync its IMU fusion.
 
 A tap is a spike in the accelerometer: the change between two consecutive samples (~8 ms apart) far beyond what the

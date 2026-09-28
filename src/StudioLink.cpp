@@ -160,11 +160,11 @@ void StudioLink::OnDatagram(const uint8_t* data, int size) {
     std::memcpy(&magic, data, sizeof(magic));
     const double now = NowSeconds();
 
-    if (magic == kMagicGlove && size >= int(sizeof(GlovePacket))) {
-        GlovePacket p;
+    if (magic == kMagicCyberFinger && size >= int(sizeof(CyberFingerPacket))) {
+        CyberFingerPacket p;
         std::memcpy(&p, data, sizeof(p));
         if (p.h.version != kVersion || p.h.hand > 1) return;
-        GloveState g;
+        CyberFingerState g;
         g.valid = true;
         g.time = now;
         g.buttons = p.buttons;
@@ -177,18 +177,18 @@ void StudioLink::OnDatagram(const uint8_t* data, int size) {
         g.battery = p.battery_pct;
         {
             std::lock_guard<std::mutex> lk(m_lock);
-            m_glove[p.h.hand] = g;
+            m_cyberFinger[p.h.hand] = g;
         }
-        ++m_glovePackets;
+        ++m_cyberFingerPackets;
         if (!m_loggedFirst[0][p.h.hand]) {
             m_loggedFirst[0][p.h.hand] = true;
-            DriverLog("StudioLink: first glove packet (CFG2) for %s hand\n", p.h.hand ? "right" : "left");
+            DriverLog("StudioLink: first CyberFinger packet (CFG2) for %s hand\n", p.h.hand ? "right" : "left");
         }
-    } else if (magic == kMagicLegacy && size >= int(sizeof(LegacyGlovePacket))) {
-        LegacyGlovePacket p;
+    } else if (magic == kMagicLegacy && size >= int(sizeof(LegacyCyberFingerPacket))) {
+        LegacyCyberFingerPacket p;
         std::memcpy(&p, data, sizeof(p));
         if (p.hand > 1) return;
-        GloveState g;
+        CyberFingerState g;
         g.valid = true;
         g.time = now;
         g.buttons = m_legacy5bit ? FromLegacy5Bit(p.buttons) : p.buttons;
@@ -200,12 +200,12 @@ void StudioLink::OnDatagram(const uint8_t* data, int size) {
         g.battery = p.battery_pct;
         {
             std::lock_guard<std::mutex> lk(m_lock);
-            m_glove[p.hand] = g;
+            m_cyberFinger[p.hand] = g;
         }
-        ++m_glovePackets;
+        ++m_cyberFingerPackets;
         if (!m_loggedFirst[1][p.hand]) {
             m_loggedFirst[1][p.hand] = true;
-            DriverLog("StudioLink: first legacy glove packet (CFGP) for %s hand\n", p.hand ? "right" : "left");
+            DriverLog("StudioLink: first legacy CyberFinger packet (CFGP) for %s hand\n", p.hand ? "right" : "left");
         }
     } else if (magic == kMagicHandState && size >= int(sizeof(HandStatePacket))) {
         HandStateSample s;
@@ -230,15 +230,15 @@ void StudioLink::OnDatagram(const uint8_t* data, int size) {
         if (m_imuSink) m_imuSink(p, now);
         if (!m_loggedFirst[3][p.h.hand]) {
             m_loggedFirst[3][p.h.hand] = true;
-            DriverLog("StudioLink: first glove IMU packet (CFIM) for %s hand, slots 0x%x\n",
+            DriverLog("StudioLink: first CyberFinger IMU packet (CFIM) for %s hand, slots 0x%x\n",
                       p.h.hand ? "right" : "left", unsigned(p.present));
         }
     }
 }
 
-GloveState StudioLink::Glove(int hand) const {
+CyberFingerState StudioLink::CyberFinger(int hand) const {
     std::lock_guard<std::mutex> lk(m_lock);
-    return m_glove[hand & 1];
+    return m_cyberFinger[hand & 1];
 }
 
 HandStateSample StudioLink::HandState(int hand) const {

@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(ROOT, "bridge"))
 import tap_gesture  # noqa: E402
 
 G = tap_gesture.ACCEL_LSB_PER_G
-DT = 0.0077                                    # the glove's report interval
+DT = 0.0077                                    # the CyberFinger's report interval
 
 
 def signal(seconds, taps=(), noise_g=0.01, sway_g=0.0, seed=1):

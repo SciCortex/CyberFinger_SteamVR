@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""The right glove's pink button in VR mode: the Windows microphone's mute, or one of the MoreFluxActions mod's
+"""The right CyberFinger's pink button in VR mode: the Windows microphone's mute, or one of the MoreFluxActions mod's
 FluxActions in Resonite. (The left pink button is SteamVR's system button, handled by the driver.)"""
 
 import threading
@@ -10,18 +10,18 @@ import threading
 import mic_mute
 from flux_actions import FluxActionSender
 
-PINK = 0x01                      # glove_report.PINK
+PINK = 0x01                      # cyberfinger_report.PINK
 
 
 class PinkButton:
     """on_input from the BLE thread with each report's extension buttons.
 
     action: a callable returning what the button does right now: 0 toggles the microphone on each click, confirmed
-    on the glove's motor (a pulse train: muted; one buzz: live); 1..42 fires that FluxAction, pressed and released
+    on the CyberFinger's motor (a pulse train: muted; one buzz: live); 1..42 fires that FluxAction, pressed and released
     with the button, without vibration (the flux it drives can ask for its own); -1 leaves it to SteamVR (the driver's
     /input/pink, for the app's binding) and does nothing here. Core Audio runs on a worker thread.
     The vibration is the bridge's alone: the firmware only plays what it's sent (VR_CMD_HAPTIC).
-    haptics: a callable returning the current glove_control.HapticSender (or None)."""
+    haptics: a callable returning the current cyberfinger_control.HapticSender (or None)."""
 
     def __init__(self, log, haptics=lambda: None, action=lambda: 0, hand=1, sender=None):
         self._log, self._haptics, self._action, self._hand = log, haptics, action, hand

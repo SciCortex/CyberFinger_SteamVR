@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Tests for bridge/glove_report.py: every firmware revision of the VR input report.
+"""Tests for bridge/cyberfinger_report.py: every firmware revision of the VR input report.
 python -m unittest discover -s tests"""
 
 import os
@@ -12,7 +12,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bridge"))
-import glove_report as gr  # noqa: E402
+import cyberfinger_report as gr  # noqa: E402
 
 Q1 = (0.70710677, 0.70710677, 0.0, 0.0)
 Q2 = (0.0, 0.0, 1.0, 0.0)
@@ -61,7 +61,7 @@ def extended(present, buttons2):
     return bytes(pkt) + bytes([buttons2])
 
 
-class GloveReportTest(unittest.TestCase):
+class CyberFingerReportTest(unittest.TestCase):
     def assertQuat(self, got, want):
         for g, w in zip(got, want):
             self.assertAlmostEqual(g, w, places=6)

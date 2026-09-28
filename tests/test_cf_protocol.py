@@ -18,7 +18,7 @@ class ProtocolTest(unittest.TestCase):
     def test_sizes_match_protocol_h(self):
         self.assertEqual(cfp.HEADER.size, 24)
         self.assertEqual(cfp.BONE.size, 32)
-        self.assertEqual(cfp.GLOVE_SIZE, 34)
+        self.assertEqual(cfp.CYBERFINGER_SIZE, 34)
         self.assertEqual(cfp.HAND_STATE_SIZE, 1140)
         self.assertEqual(cfp.TAP_SIZE, 1056)
         self.assertEqual(cfp.CONTEXT_SIZE, 2200)
@@ -27,23 +27,23 @@ class ProtocolTest(unittest.TestCase):
 
     def test_magics(self):
         self.assertEqual(cfp.MAGIC_LEGACY, 0x50474643)       # the value the old driver used for 'CFGP'
-        self.assertEqual(struct.pack("<I", cfp.MAGIC_GLOVE), b"CFG2")
+        self.assertEqual(struct.pack("<I", cfp.MAGIC_CYBERFINGER), b"CFG2")
 
-    def test_glove(self):
-        pkt = cfp.pack_glove(1, 3, cfp.BTN_MENU, 300, 100, -200, 150)
-        self.assertEqual(len(pkt), cfp.GLOVE_SIZE)
+    def test_cyberfinger(self):
+        pkt = cfp.pack_cyberfinger(1, 3, cfp.BTN_MENU, 300, 100, -200, 150)
+        self.assertEqual(len(pkt), cfp.CYBERFINGER_SIZE)
         h = cfp.unpack_header(pkt)
-        self.assertEqual((h["magic"], h["hand"], h["seq"]), (cfp.MAGIC_GLOVE, 1, 3))
-        buttons, trigger, jx, jy, battery, buttons2, resync = cfp.GLOVE_BODY.unpack_from(pkt, cfp.HEADER.size)
+        self.assertEqual((h["magic"], h["hand"], h["seq"]), (cfp.MAGIC_CYBERFINGER, 1, 3))
+        buttons, trigger, jx, jy, battery, buttons2, resync = cfp.CYBERFINGER_BODY.unpack_from(pkt, cfp.HEADER.size)
         self.assertEqual((buttons, trigger, jx, jy, battery, buttons2, resync),
                          (cfp.BTN_MENU, 255, 100, -200, 100, 0, 0))
-        # the IMU fusion resync count: the byte after buttons2 (GlovePacket::resync), wrapping at 256
-        pkt = cfp.pack_glove(0, 5, 0, 0, 0, 0, 50, resync=257)
-        self.assertEqual(len(pkt), cfp.GLOVE_SIZE)
+        # the IMU fusion resync count: the byte after buttons2 (CyberFingerPacket::resync), wrapping at 256
+        pkt = cfp.pack_cyberfinger(0, 5, 0, 0, 0, 0, 50, resync=257)
+        self.assertEqual(len(pkt), cfp.CYBERFINGER_SIZE)
         self.assertEqual(pkt[cfp.HEADER.size + 8], 1)
-        # the pink button: the byte after battery_pct (Protocol.h GlovePacket::buttons2)
-        pkt = cfp.pack_glove(0, 4, 0, 0, 0, 0, 50, buttons2=cfp.GLOVE_BTN2_PINK)
-        self.assertEqual(pkt[cfp.HEADER.size + 7], cfp.GLOVE_BTN2_PINK)
+        # the pink button: the byte after battery_pct (Protocol.h CyberFingerPacket::buttons2)
+        pkt = cfp.pack_cyberfinger(0, 4, 0, 0, 0, 0, 50, buttons2=cfp.CYBERFINGER_BTN2_PINK)
+        self.assertEqual(pkt[cfp.HEADER.size + 7], cfp.CYBERFINGER_BTN2_PINK)
 
     def test_stick(self):
         self.assertEqual(cfp.stick_to_int16(0.05, 0.05, 0.12), (0, 0))

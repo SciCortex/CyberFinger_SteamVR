@@ -9,7 +9,7 @@ The driver sends to UDP 127.0.0.1:27016:
   CFOP  its context stream — HMD pose, per-hand output mode, the headset's hand tracking (~120 Hz)
 
 DriverLink listens there in a background thread. Haptic requests go to a HapticTracker (which the GUI draws)
-and to an optional on_haptic callback — the place to forward them to the glove over GATT once the firmware
+and to an optional on_haptic callback — the place to forward them to the CyberFinger over GATT once the firmware
 has an actuator. The latest context packet is kept for status displays and the Fusion Studio.
 """
 

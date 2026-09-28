@@ -4,7 +4,7 @@
 
 """T2.2 — IMU↔optical orientation fuser (complementary filter on the extrinsic).
 
-The glove's VQF already integrates the fast dynamics and gravity-locks tilt on-device
+The CyberFinger's VQF already integrates the fast dynamics and gravity-locks tilt on-device
 and only sends the fused quaternion (no raw gyro), so there is nothing fast left to
 integrate. The fused hand orientation is therefore ALWAYS
 
@@ -91,7 +91,7 @@ class OrientationFuser:
 
     def update(self, gate_type, P, q_imu, dt=1 / 22.0):
         """One frame. gate_type: the gate verdict; P: (26,3) world joints or None; q_imu:
-        glove quat (w,x,y,z). Returns the fused hand orientation quat q_hat."""
+        CyberFinger quat (w,x,y,z). Returns the fused hand orientation quat q_hat."""
         q_imu = qnorm(q_imu)
         if gate_type == "CLEAR" and P is not None:
             q_opt = self.optical_quat(P)

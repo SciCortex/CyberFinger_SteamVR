@@ -16,7 +16,7 @@ are printed as they arrive.
 closes, to exercise the FUSED path without the Fusion Studio. Stop it and the hand falls back to
 PASSTHROUGH within fused_timeout_ms.
 
-Only one program can own port 27016: stop the glove link in the CyberFinger GUI / Fusion Studio while probing.
+Only one program can own port 27016: stop the CyberFinger link in the CyberFinger GUI / Fusion Studio while probing.
 """
 
 import argparse
@@ -68,7 +68,7 @@ def main(argv=None):
     try:
         rx.bind(("127.0.0.1", args.port))
     except OSError as e:
-        print(f"cannot bind 127.0.0.1:{args.port} ({e}) - is the glove link of the CyberFinger GUI / Fusion Studio running?")
+        print(f"cannot bind 127.0.0.1:{args.port} ({e}) - is the CyberFinger link of the CyberFinger GUI / Fusion Studio running?")
         return 1
     rx.settimeout(0.5)
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

@@ -7,8 +7,8 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // StudioLink.h — UDP link to the bridge (CyberFinger GUI / Fusion Studio)
 //
-// Receives glove input (CFG2, legacy CFGP), fused hand state (CFHS) and raw
-// glove IMU data (CFIM, during captures) on the driver port; sends the context
+// Receives CyberFinger input (CFG2, legacy CFGP), fused hand state (CFHS) and raw
+// CyberFinger IMU data (CFIM, during captures) on the driver port; sends the context
 // stream (CFOP) to the bridge's port.
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -21,11 +21,11 @@
 
 namespace cf {
 
-struct GloveState {
+struct CyberFingerState {
     bool     valid = false;
     double   time = -1e9;         // arrival, NowSeconds()
-    uint8_t  buttons = 0;         // GloveButton bits (current firmware layout)
-    uint8_t  buttons2 = 0;        // GloveButton2 bits (the pink button; CFG2 only)
+    uint8_t  buttons = 0;         // CyberFingerButton bits (current firmware layout)
+    uint8_t  buttons2 = 0;        // CyberFingerButton2 bits (the pink button; CFG2 only)
     uint8_t  resync = 0;          // the bridge's IMU fusion resync count: a new value asks for ImuFusion::Resync
     bool     triggerAnalog = false;
     float    trigger = 0.f;       // 0..1, when triggerAnalog
@@ -51,12 +51,12 @@ public:
     bool Start(int listenPort, int contextPort, bool loopbackOnly, bool legacy5bit);
     void Stop();
 
-    GloveState Glove(int hand) const;
+    CyberFingerState CyberFinger(int hand) const;
     HandStateSample HandState(int hand) const;
     void SendContext(const ContextPacket& pkt);
     void SendHaptic(int hand, float durationSeconds, float frequency, float amplitude);
 
-    uint64_t GlovePackets() const { return m_glovePackets.load(); }
+    uint64_t CyberFingerPackets() const { return m_cyberFingerPackets.load(); }
     uint64_t HandStatePackets() const { return m_handStatePackets.load(); }
 
 private:
@@ -76,12 +76,12 @@ private:
     void SendRaw(const void* data, int size);
 
     mutable std::mutex m_lock;
-    GloveState      m_glove[2];
+    CyberFingerState      m_cyberFinger[2];
     HandStateSample m_handState[2];
 
     ImuSink m_imuSink;
 
-    std::atomic<uint64_t> m_glovePackets{ 0 };
+    std::atomic<uint64_t> m_cyberFingerPackets{ 0 };
     std::atomic<uint64_t> m_handStatePackets{ 0 };
     bool m_loggedFirst[4][2] = {};
 };

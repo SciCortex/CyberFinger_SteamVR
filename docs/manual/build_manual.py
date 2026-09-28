@@ -9,7 +9,7 @@
 
 The source is docs/manual/manual.html: the page body (title, styles, content), written for claude.ai's artifact
 publisher, which wraps it in a document skeleton. This script adds that skeleton, so the page renders the same when
-opened from disk. The two glove images are resources/icons' (the same pictures SteamVR's binding UI shows; the
+opened from disk. The two CyberFinger images are resources/icons' (the same pictures SteamVR's binding UI shows; the
 callouts in manual.html are placed in their pixel coordinates): manual.html refers to them there, so it shows them
 opened as it is, and the built page gets copies in img/ (or embedded). Edit manual.html, then rebuild.
 """

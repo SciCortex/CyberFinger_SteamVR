@@ -8,7 +8,7 @@
 
 Writes into resources/input/:
 
-  bindings/steam.app.438100_cyberfinger.json   VRChat   — VRChat's own Touch binding, laid out for the glove
+  bindings/steam.app.438100_cyberfinger.json   VRChat   — VRChat's own Touch binding, laid out for the CyberFinger
   bindings/steam.app.2519830_cyberfinger.json  Resonite — its "Generic" action set (unknown controllers)
   bindings/vrcompositor_cyberfinger.json       SteamVR dashboard — derived from SteamVR's Index binding
   legacy_bindings_cyberfinger.json             legacy-input apps, emulating an Index controller
@@ -19,7 +19,7 @@ Derived bindings therefore drop touch inputs, trackpad sources and VRChat's gest
 
 The driver also exposes the standard hand-tracking gestures (index/middle/ring/pinky pinch, grasp, index
 point). No app action is bound to them: the thumb-pinky pinch, once mapped like B (MENU) and to Resonite's dash,
-fired too easily. The SteamVR dashboard opens from the left glove's pink button (/input/system), not from the
+fired too easily. The SteamVR dashboard opens from the left CyberFinger's pink button (/input/system), not from the
 Quest palm pinch (the driver no longer forwards it by default).
 
 In Resonite, the MoreFluxActions mod's Flux Actions (ProtoFlux on the avatar, nothing without flux) take the
@@ -88,7 +88,7 @@ def convert(binding, path_map, drop_output=lambda out: False):
     """Re-target a binding file onto CyberFinger components.
 
     path_map(path) returns the CyberFinger path, or None to drop the source. Touch inputs are removed
-    (the glove has no capacitive sensors); sources left without inputs disappear, as do chords that
+    (the CyberFinger has no capacitive sensors); sources left without inputs disappear, as do chords that
     reference a dropped component or a touch input.
     """
     out = {}
@@ -321,10 +321,10 @@ def compositor(steam):
                "Derived from SteamVR's Index dashboard binding. Trigger: click (a light press first locks the "
                "laser, so the click lands where it points); grip: right click; stick: scroll, push = middle "
                "click; B (MENU): back; A (black button): home. The left pink button toggles the dashboard (twice: "
-               "room view); so does the system button, if a glove button is set to it.")
+               "room view); so does the system button, if a CyberFinger button is set to it.")
     b["bindings"] = convert(knuckles, index_to_cyberfinger)
     # The left pink button: the dashboard, as the system button would (click, twice: room view). Not its hold: held
-    # 5-7 s it switches the glove off, which mustn't recenter or chord on the way. The right one is the apps'.
+    # 5-7 s it switches the CyberFinger off, which mustn't recenter or chord on the way. The right one is the apps'.
     b["bindings"]["/actions/system"]["sources"].append(
         {"path": "/user/hand/left/input/pink", "mode": "button",
          "inputs": {"click": {"output": "/actions/system/in/ToggleDashboard"},

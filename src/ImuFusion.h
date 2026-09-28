@@ -5,7 +5,7 @@
  */
 #pragma once
 // ═══════════════════════════════════════════════════════════════════════════
-// ImuFusion.h — the glove's joint IMU fused with the headset's optical hand
+// ImuFusion.h — the CyberFinger's joint IMU fused with the headset's optical hand
 // orientation, driver-side (until the Fusion Studio's full fusion, which
 // replaces all of this through the FUSED mode)
 //
@@ -29,7 +29,7 @@
 // IMU's: ~3× less jitter at rest and no optical lag. While the hand is unseen
 // q_corr is frozen and the IMU carries the orientation alone.
 //
-// Cold start: M belongs to the glove and how it sits on the hand, and the lag to
+// Cold start: M belongs to the CyberFinger and how it sits on the hand, and the lag to
 // the streamer, so both carry over between sessions (the driver saves them); α
 // restarts with every IMU power-up. Given a prior M and lag, α alone is fitted
 // from the first few pairs — no spread of orientations needed — and the fusion
@@ -67,8 +67,8 @@ public:
         double maxCorrectionRate = 1.0; // rad/s: faster optical turns aren't compared (the streams disagree in
                                         // motion: Steam Link's optical rotation is a prediction; the IMU leads)
         size_t priorPairs = 5;         // pairs to fit the heading with a prior mounting
-        double maxPriorResidualDeg = 25.0; // a prior mounting that fits worse is ignored (another glove, sensor turned).
-                                           // Sessions of the same glove scatter by 8-23° (how it sits, the postures
+        double maxPriorResidualDeg = 25.0; // a prior mounting that fits worse is ignored (another CyberFinger, sensor turned).
+                                           // Sessions of the same CyberFinger scatter by 8-23° (how it sits, the postures
                                            // seen), and even that start beats waiting for a full solve.
         // Once calibrated, an optical orientation this far from the fused one is a tracking error (a flipped palm, a
         // hand at the edge of the cameras' view), not a correction; the gate narrows to half as the view's trust
@@ -81,17 +81,17 @@ public:
         double escapeTime = 3.0;       // s of refusing every trusted view: then it's the output that's off
         double escapeTau = 0.15;       // s: how fast the output then settles
         double minPairTrust = 0.8;     // calibration pairs only from views trusted this much (HeadsetViewTrust)
-        double resyncAfterGap = 5.0;   // s without IMU data (the glove switched off, or reconnecting), then Resync:
-                                       // a glove switched off and on has a new heading, which the gate would
+        double resyncAfterGap = 5.0;   // s without IMU data (the CyberFinger switched off, or reconnecting), then Resync:
+                                       // a CyberFinger switched off and on has a new heading, which the gate would
                                        // otherwise refuse the headset over until its escape
-        // Off the hand: the headset sees the hand turn while the IMU lies still (the glove put down, switched on).
+        // Off the hand: the headset sees the hand turn while the IMU lies still (the CyberFinger put down, switched on).
         // The fusion then learns nothing and outputs nothing (the headset alone) — no pairs, no corrections, no
         // escapes toward a bare hand — until the IMU turns with the hand again, which resyncs it. Rotation rates,
-        // not orientations, so it needs no calibration: a glove on the hand turns as fast as the hand.
+        // not orientations, so it needs no calibration: a CyberFinger on the hand turns as fast as the hand.
         // Both rates over offHandRateSpan: over the 40 ms the lag uses, the headset's jitter at rest (~1° between
         // frames) would read as 25°/s of turning; over 0.2 s as ~5°/s.
         double offHandOpticalRate = 0.25; // rad/s: the hand turning (15°/s) …
-        double offHandImuRate = 0.05;  // rad/s: … and the IMU not (3°/s; a glove lying still shows < 0.01)
+        double offHandImuRate = 0.05;  // rad/s: … and the IMU not (3°/s; a CyberFinger lying still shows < 0.01)
         double offHandRateSpan = 0.2;  // s
         double offHandAfter = 1.0;     // s of that (decaying over offHandMemory): off the hand
         double onHandAfter = 0.5;      // s of the IMU turning with the hand (rates within onHandRateMatch): back on
@@ -115,7 +115,7 @@ public:
         size_t escapes = 0;            // steady disagreements followed after all
         double corrTravelDeg = 0;      // how far the optical corrections turned the output, in all
         size_t resyncs = 0;            // Resync calls, asked for or after an IMU gap
-        bool   offHand = false;        // the glove is off the hand (the IMU still while the hand turns): no output
+        bool   offHand = false;        // the CyberFinger is off the hand (the IMU still while the hand turns): no output
         size_t offHandTimes = 0;       // times it was found off the hand
     };
 
@@ -126,7 +126,7 @@ public:
         double residualDeg = 0;
     };
 
-    // The reference gloves' calibration, the start when nothing is saved yet: the mean of three Steam Link
+    // The reference CyberFingers' calibration, the start when nothing is saved yet: the mean of three Steam Link
     // sessions (2026-09-26/27; each within 8-12° of it), the lag their middle (they measured 17-88 ms).
     static Calibration DefaultCalibration(int hand) {
         return hand ? Calibration{ { 0.4773, 0.4682, 0.5676, 0.4804 }, 0.05, 0 }
@@ -166,8 +166,8 @@ public:
         }
     }
 
-    // Start the heading over, keeping what belongs to the glove and the streamer: the mounting (this session's
-    // solve, else the prior) and the lag. For a glove whose IMU restarted (switched off and on: a new heading) or
+    // Start the heading over, keeping what belongs to the CyberFinger and the streamer: the mounting (this session's
+    // solve, else the prior) and the lag. For a CyberFinger whose IMU restarted (switched off and on: a new heading) or
     // that was off the hand (its pairs meaningless): the heading is fitted again from the next few trusted views,
     // within a second, instead of the gate refusing the headset until its escape and the stale pairs spoiling the
     // solves for a minute (pairWindow). Done by itself when the IMU resumes after resyncAfterGap. Any thread.
@@ -188,7 +188,7 @@ public:
     void AddImu(double t, Quat q) {
         std::lock_guard<std::mutex> g(m_lock);
         q = Normalize(q);
-        if (!m_imu.empty() && t > m_imu.back().t + m_p.resyncAfterGap) ResyncLocked();   // the glove was off
+        if (!m_imu.empty() && t > m_imu.back().t + m_p.resyncAfterGap) ResyncLocked();   // the CyberFinger was off
         if (!m_imu.empty()) {
             if (t <= m_imu.back().t) return;
             if (Dot4(q, m_imu.back().q) < 0) q = Neg(q);
@@ -260,7 +260,7 @@ public:
         const bool haveImu = ImuAt(t - m_st.lag, qi);
         // The gate, once calibrated: the optical orientation against the fused one (lag-aligned). Refusing every
         // trusted view for escapeTime means the output is what's off (the IMU's heading drifted over a long loss,
-        // the glove slipped on the hand): followed after all, quickly. The headset's own errors come and go (a
+        // the CyberFinger slipped on the hand): followed after all, quickly. The headset's own errors come and go (a
         // flipped palm, a glitch), and those at the edges of the view never count.
         bool escaping = false;
         if (m_st.calibrated && m_haveCorr && haveImu) {
@@ -272,7 +272,7 @@ public:
                 if (++m_refusedCount < 30 || t - m_refusedSince < m_p.escapeTime) { m_escaping = false; return; }
                 escaping = true;
                 if (!m_escaping) {
-                    // The output was off, not the headset: the pairs so far describe how the glove sat before (it
+                    // The output was off, not the headset: the pairs so far describe how the CyberFinger sat before (it
                     // was adjusted, or slipped), and would spoil the next solves for a pairWindow. Start them over.
                     ++m_st.escapes;
                     m_pairs.clear();

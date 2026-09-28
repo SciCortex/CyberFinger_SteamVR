@@ -24,7 +24,7 @@ timestamps. This reports per hand:
     same physical frame for both) and a laser 2 m along the index finger, as SteamVR shows them now and
     extrapolated 40 ms ahead; jitter and error against the hand's path, for a still, slowly moving and fast
     moving hand; the delay of the output and how often it holds the hand (occlusion);
-  - the glove IMUs, which the bridge (Fusion Studio or CyberFinger GUI) sends the driver during a capture:
+  - the CyberFinger IMUs, which the bridge (Fusion Studio or CyberFinger GUI) sends the driver during a capture:
     report rate, and against the optical rotation the timing offset and the rotation jitter while still.
 """
 
@@ -39,7 +39,7 @@ import numpy as np
 CAP_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "CyberFinger")
 KIND = {7: "headset", 8: "body tracker (SlimeVR)",
         0: "pose", 1: "skeleton WithoutController", 2: "skeleton WithController",
-        3: "CyberFinger pose", 4: "CyberFinger skel. Without", 5: "CyberFinger skel. With", 6: "glove IMU"}
+        3: "CyberFinger pose", 4: "CyberFinger skel. Without", 5: "CyberFinger skel. With", 6: "CyberFinger IMU"}
 IMU_SLOTS = ((0x1, "body 1"), (0x2, "body 2"), (0x4, "joint"))
 LASER = 2.0                     # m: laser target distance along the index finger
 CLASSES = (("still (<0.3 m/s)", 0, 0.3), ("slow (0.3-1.5)", 0.3, 1.5), ("fast (>1.5)", 1.5, 1e9))
@@ -166,10 +166,10 @@ def rotation_residuals(t, q, window=0.1):
 
 
 def compare_imu(data, v, hand):
-    """The glove IMUs against the optical rotation (source and CyberFinger), on the same clock."""
+    """The CyberFinger IMUs against the optical rotation (source and CyberFinger), on the same clock."""
     sel = (data["hand"] == hand) & (data["kind"] == 6)
     if sel.sum() < 20:
-        print("  glove IMU: not recorded (bridge not running, or an older bridge)")
+        print("  CyberFinger IMU: not recorded (bridge not running, or an older bridge)")
         return
     t_arr, vi = data["t"][sel], v[sel]
     delay = vi[:, 21]
@@ -178,7 +178,7 @@ def compare_imu(data, v, hand):
     names = [n for bit, n in IMU_SLOTS if present & bit]
     dur = ti[-1] - ti[0]
     dt = np.diff(ti)
-    print(f"  glove IMU: {len(ti) / dur:.0f} reports/s (interval median {np.median(dt) * 1e3:.1f} ms,"
+    print(f"  CyberFinger IMU: {len(ti) / dur:.0f} reports/s (interval median {np.median(dt) * 1e3:.1f} ms,"
           f" p99 {np.percentile(dt, 99) * 1e3:.0f}); slots {', '.join(names) or 'none'};"
           f" BLE arrival → driver median {np.median(delay) * 1e3:.2f} ms")
     imus = []
@@ -199,7 +199,7 @@ def compare_imu(data, v, hand):
     lo = max(ti[0], max(o[1][0] for o in optical)) + 0.1
     hi = min(ti[-1], min(o[1][-1] for o in optical)) - 0.1
     if hi - lo < 2:
-        print("  glove IMU and optical overlap < 2 s")
+        print("  CyberFinger IMU and optical overlap < 2 s")
         return
     grid = np.arange(lo, hi, 0.001)
     speeds = {name: angular_speed(ti, q, grid) for name, q in imus}
@@ -218,15 +218,15 @@ def compare_imu(data, v, hand):
                     best = (float(L), r)
         return best
 
-    # Still: neither the camera nor the glove sees the hand turning.
+    # Still: neither the camera nor the CyberFinger sees the hand turning.
     still = np.all([s < 0.3 for s in speeds.values()], axis=0)
-    print(f"  rotation vs the glove IMUs ({still.mean() * 100:.0f} % of the overlap still;"
+    print(f"  rotation vs the CyberFinger IMUs ({still.mean() * 100:.0f} % of the overlap still;"
           f" timing from the rotation rate, so no IMU calibration needed):")
     for name, t, q in optical:
         for iname, _ in imus:
             L, r = best_lag(speeds[name], speeds[iname])
             print(f"    {name:11s} trails {iname:9s} by {L * 1e3:+4.0f} ms (rate correlation {r:.2f})")
-    if len(imus) == 2:                                  # the two glove IMUs against each other (firmware filters)
+    if len(imus) == 2:                                  # the two CyberFinger IMUs against each other (firmware filters)
         L, r = best_lag(speeds["IMU body"], speeds["IMU joint"])
         print(f"    IMU body    trails IMU joint by {L * 1e3:+4.0f} ms (rate correlation {r:.2f}; same packets)")
     # Jitter at the same instants for all (the optical streams sampled at the IMU's report times), so a

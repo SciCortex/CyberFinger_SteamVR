@@ -1,8 +1,8 @@
-"""Can the glove's accelerometers carry the hand position? A check against a capture (numpy only).
+"""Can the CyberFinger's accelerometers carry the hand position? A check against a capture (numpy only).
 
     python tools/imu_position_check.py <capture.csv> [--sensor joint|body]
 
-Captures (tools/analyze_tap_capture.py --capture N, bridge running) hold the headset hand's poses and the glove
+Captures (tools/analyze_tap_capture.py --capture N, bridge running) hold the headset hand's poses and the CyberFinger
 IMUs on the driver's clock. Per hand this compares the IMU's linear acceleration (the raw accelerometer rotated
 into its own z-up world by its quaternion, gravity removed) with the optical wrist position's second derivative:
 

@@ -3963,7 +3963,7 @@
   const dotEl = document.getElementById("dot");
   const modeEl = document.getElementById("mode");
 
-  // ---- hand orientation from the glove IMUs (hand_quat / wrist_quat in /pose) ----
+  // ---- hand orientation from the CyberFinger IMUs (hand_quat / wrist_quat in /pose) ----
   // Quats arrive as [w,x,y,z] (CyberFinger order). We drive the hand's rotation
   // RELATIVE to a neutral captured with the "c" key, so the sensor mounting offset
   // cancels out. When a wrist quat is present we show hand-relative-to-wrist (so

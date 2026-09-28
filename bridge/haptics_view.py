@@ -4,7 +4,7 @@
 
 """Haptics indicator for the bridge GUIs (Tk canvas).
 
-Shows what a vibration request from SteamVR asks of the glove:
+Shows what a vibration request from SteamVR asks of the CyberFinger:
   LED        lit while the vibration is requested; brightness = amplitude, short fade afterwards
   waveform   drawn at the requested frequency (more cycles = higher frequency), height = amplitude
   bar        time left of the requested duration

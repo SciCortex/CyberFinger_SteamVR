@@ -120,7 +120,7 @@ class PinkButtonTest(unittest.TestCase):
             if self.haptics.requests:
                 break
             threading.Event().wait(0.02)
-        self.assertEqual(self.haptics.requests, [(1, 0.35, 8.0)])   # muted: the pulse train, on the right glove
+        self.assertEqual(self.haptics.requests, [(1, 0.35, 8.0)])   # muted: the pulse train, on the right CyberFinger
 
 
 if __name__ == "__main__":

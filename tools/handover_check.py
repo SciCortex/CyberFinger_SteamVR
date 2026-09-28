@@ -2,9 +2,9 @@
 
     python tools/handover_check.py <capture.csv> [--step 0.5]
 
-Needs a capture with the glove IMUs and the headset (kind 7). Per hand, on a 100 Hz grid: whether the skeleton
+Needs a capture with the CyberFinger IMUs and the headset (kind 7). Per hand, on a 100 Hz grid: whether the skeleton
 still changes (the driver's "seen" today), the pose's time offset and validity, where the hand is relative to the
-headset (angle off its forward direction, height below it), and how far the optical orientation is from the glove
+headset (angle off its forward direction, height below it), and how far the optical orientation is from the CyberFinger
 IMU's (calibrated robustly: fitted, then refitted on the samples that agree). Printed per step: the story around
 each exit and return.
 """

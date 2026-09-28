@@ -24,9 +24,9 @@ import queue
 import json
 import math
 
-import cf_protocol  # SteamVR driver wire protocol (CFG2 glove packets)
-import glove_report  # the glove's BLE input report, every firmware revision
-import glove_control  # bridge → glove commands (haptics)
+import cf_protocol  # SteamVR driver wire protocol (CFG2 CyberFinger packets)
+import cyberfinger_report  # the CyberFinger's BLE input report, every firmware revision
+import cyberfinger_control  # bridge → CyberFinger commands (haptics)
 import flux_actions   # FluxAction1..42 of the MoreFluxActions mod
 import pink_button    # the right pink button: Windows microphone mute or a FluxAction
 import tap_gesture    # a triple tap on the joint IMU: resync the driver's IMU fusion
@@ -62,8 +62,8 @@ VR_SERVICE_UUID = "0000cf00-0000-1000-8000-00805f9b34fb"
 VR_INPUT_UUID   = "0000cf01-0000-1000-8000-00805f9b34fb"
 
 # The GATT report grew with each firmware revision (12, 28, 61/79 bytes, then v1.3's variable-length IMU
-# tail); glove_report.py decodes them all.
-INPUT_REPORT_SIZE = glove_report.BASE.size   # shortest valid report
+# tail); cyberfinger_report.py decodes them all.
+INPUT_REPORT_SIZE = cyberfinger_report.BASE.size   # shortest valid report
 
 ZERO_ACCEL = (0, 0, 0)
 ACCEL_LSB_PER_G = 2048.0  # VR_ACCEL_LSB_PER_G — ±16g on every sensor
@@ -133,7 +133,7 @@ SLIME_SENSOR_BODY  = 0
 SLIME_SENSOR_JOINT = 1
 
 # The server drops a tracker after 3 s of silence, so the service thread has to
-# keep answering heartbeats even when no glove data is flowing.
+# keep answering heartbeats even when no CyberFinger data is flowing.
 SLIME_TIMEOUT = 3.0
 
 SLIME_FIRMWARE_VERSION = "CyberFinger"
@@ -276,7 +276,7 @@ def _generate_fallback_icon(color):
 class HandState:
     def __init__(self):
         self.buttons = 0
-        self.buttons2 = 0          # the extension byte's buttons (glove_report.PINK)
+        self.buttons2 = 0          # the extension byte's buttons (cyberfinger_report.PINK)
         self.joy_x = 0
         self.joy_y = 0
         self.trigger = 0
@@ -317,7 +317,7 @@ class HandState:
         return 1.0 if (self.buttons & BTN_TRIGGER) else 0.0
 
     def reset_link(self):
-        """Clear per-connection capability flags before (re)attaching a glove."""
+        """Clear per-connection capability flags before (re)attaching a CyberFinger."""
         self.imu_present = 0
         self.quat = IDENTITY_QUAT
         self.quat_body2 = IDENTITY_QUAT
@@ -358,7 +358,7 @@ class BLEManager:
         self._polling_chars = []
         self._ble_devices = []     # track opened BLE device handles
         self._gatt_services = []   # track opened GATT service handles
-        self.haptics = glove_control.HapticSender(log=app.log)   # vibration commands to the gloves
+        self.haptics = cyberfinger_control.HapticSender(log=app.log)   # vibration commands to the CyberFingers
 
     def start(self):
         self._running = True
@@ -476,8 +476,8 @@ class BLEManager:
             return
         t_rx = time.perf_counter()
 
-        # Every firmware revision's layout, including v1.3's variable-length IMU tail (glove_report.py).
-        r = glove_report.decode(data)
+        # Every firmware revision's layout, including v1.3's variable-length IMU tail (cyberfinger_report.py).
+        r = cyberfinger_report.decode(data)
         hand, buttons, joy_x, joy_y, trigger, battery, seq = (
             r.hand, r.buttons, r.joy_x, r.joy_y, r.trigger, r.battery, r.seq)
         present, quats, accels, has_accel = r.present, r.quats, r.accels, r.has_accel
@@ -624,7 +624,7 @@ class BLEManager:
         if not vr_input:
             self.app.log(f"{label}: CF01 characteristic not found")
             return None
-        # The control characteristic: haptics go there (glove_control.py)
+        # The control characteristic: haptics go there (cyberfinger_control.py)
         vr_ctrl = next((c for c in char_result.characteristics if "cf02" in str(c.uuid).lower()), None)
         if vr_ctrl is not None:
             self.haptics.attach(0 if label == "LEFT" else 1, vr_ctrl)
@@ -678,7 +678,7 @@ class BLEManager:
 # ── VR Mode (UDP forwarding) ─────────────────────────────────────────────
 
 class VRMode:
-    """Glove → SteamVR driver: per BLE report one CFG2 packet (see cf_protocol.py) and, when the glove has
+    """CyberFinger → SteamVR driver: per BLE report one CFG2 packet (see cf_protocol.py) and, when the CyberFinger has
     IMUs, one CFIM packet with their raw slots (the driver's own IMU fusion, and its captures)."""
 
     STICK_DEADZONE = 0.12
@@ -705,8 +705,8 @@ class VRMode:
         self.seq[hand] += 1
         buttons2 = state.buttons2
         if hand == 1 and not self.right_pink_to_steamvr:
-            buttons2 &= ~glove_report.PINK
-        pkt = cf_protocol.pack_glove(hand, self.seq[hand], state.buttons, state.trigger,
+            buttons2 &= ~cyberfinger_report.PINK
+        pkt = cf_protocol.pack_cyberfinger(hand, self.seq[hand], state.buttons, state.trigger,
                                      joy_x, joy_y, state.battery, buttons2=buttons2,
                                      resync=self.resync[hand])
         try:
@@ -727,9 +727,9 @@ class VRMode:
 # ── SlimeVR forwarding (runs alongside whichever mode is active) ─────────
 
 class SlimeVRTracker:
-    """One emulated SlimeVR tracker — one glove, up to two sensors.
+    """One emulated SlimeVR tracker — one CyberFinger, up to two sensors.
 
-    The server keys trackers by the MAC in the handshake, so each glove gets a
+    The server keys trackers by the MAC in the handshake, so each CyberFinger gets a
     stable synthetic MAC and its own socket. Rotation packets are pushed from
     the BLE thread via send_rotation(); a service thread owns the handshake,
     heartbeat replies and periodic sensor-info re-announcements.
@@ -919,7 +919,7 @@ class SlimeVRTracker:
 
 
 class SlimeVRForwarder:
-    """Feeds glove IMU quaternions to a SlimeVR server as two emulated trackers.
+    """Feeds CyberFinger IMU quaternions to a SlimeVR server as two emulated trackers.
 
     Runs in parallel with the active mode rather than replacing it — VR/Gamepad
     still get buttons and sticks while SlimeVR gets orientation.
@@ -1135,7 +1135,7 @@ def _write_app_manifest():
             "strings": {
                 "en_us": {
                     "name": "CyberFinger Bridge",
-                    "description": "CyberFinger glove bridge — hand skeleton display",
+                    "description": "CyberFinger bridge — hand skeleton display",
                 },
             },
         }],
@@ -2031,12 +2031,12 @@ class CyberFingerApp:
         self.active_mode = None
         self.slimevr = None              # created lazily while forwarding is on
         self.driver_link = None          # listens for the driver's haptic requests while in VR mode
-        # VR mode: the right glove's pink button mutes and unmutes the Windows microphone, or fires a FluxAction
+        # VR mode: the right CyberFinger's pink button mutes and unmutes the Windows microphone, or fires a FluxAction
         # (_pink_flux: its number, 0 for the microphone; set on the Tk thread from the options, read on the BLE one)
         self._pink_flux = 0
         self.pink_button = pink_button.PinkButton(self.log, haptics=lambda: getattr(self.ble, "haptics", None),
                                                   action=lambda: self._pink_flux)
-        # VR mode: a triple tap on a glove's joint IMU resyncs the driver's IMU fusion, like the Resync IMU button.
+        # VR mode: a triple tap on a CyberFinger's joint IMU resyncs the driver's IMU fusion, like the Resync IMU button.
         # settings.json "tap_threshold_g" tunes how hard a tap must be.
         self.triple_tap = [tap_gesture.TripleTap(threshold_g=float(self._config.get("tap_threshold_g", 1.0)))
                            for _ in range(2)]
@@ -2318,14 +2318,14 @@ class CyberFingerApp:
             radio.pack(side=tk.LEFT)
             Tooltip(radio, TIPS["body_imu"])
 
-        # The driver's IMU fusion starts its heading over (a glove switched off and on, or put back differently).
-        # A triple tap on a glove's joint IMU does the same.
+        # The driver's IMU fusion starts its heading over (a CyberFinger switched off and on, or put back differently).
+        # A triple tap on a CyberFinger's joint IMU does the same.
         resync = ttk.Button(slime_frame, text="Resync IMU", style="Console.TButton",
                             command=lambda: self._resync_imu("button"))
         resync.pack(side=tk.RIGHT)
         Tooltip(resync, TIPS["resync"])
 
-        # ── Tabs: the gloves (buttons, stick, IMU, haptics), the skeletons the VR runtime tracks, the log ──
+        # ── Tabs: the CyberFingers (buttons, stick, IMU, haptics), the skeletons the VR runtime tracks, the log ──
         style.configure("TNotebook", background=COLOR_BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
         style.configure("TNotebook.Tab", background=COLOR_BG3, foreground=COLOR_FG_DIM,
                         font=("Consolas", 10), padding=(14, 4), borderwidth=0)
@@ -2532,8 +2532,8 @@ class CyberFingerApp:
 
 
     def _on_haptic(self, h):
-        """Driver-link thread: an app asked a hand to vibrate. The hand panel shows it, and the glove gets it over
-        GATT (glove_control.py; firmware 1.3.3+ with the motor)."""
+        """Driver-link thread: an app asked a hand to vibrate. The hand panel shows it, and the CyberFinger gets it over
+        GATT (cyberfinger_control.py; firmware 1.3.3+ with the motor)."""
         hand = h["hand"]
         if not self._haptic_logged[hand]:
             self._haptic_logged[hand] = True
@@ -2543,7 +2543,7 @@ class CyberFingerApp:
 
     def _resync_imu(self, why, confirm_hand=None):
         """Any thread: ask the driver to resync both hands' IMU fusion (the heading is fitted again from the next
-        views, in about half a second). A triple tap is confirmed on that glove: two short pulses."""
+        views, in about half a second). A triple tap is confirmed on that CyberFinger: two short pulses."""
         if self.active_mode is not self.vr_mode:
             self.log("Resync IMU: only in VR mode (it's the SteamVR driver's fusion)")
             return
@@ -2551,7 +2551,7 @@ class CyberFingerApp:
         # the hand and there's nothing to resync.
         hands = [h for h, st in enumerate((self.ble.left, self.ble.right)) if st.imu_present & IMU_JOINT]
         if not hands:
-            self.log("Resync IMU: no glove with a joint IMU is connected (only some revisions have one; without it "
+            self.log("Resync IMU: no CyberFinger with a joint IMU is connected (only some revisions have one; without it "
                      "the headset alone turns the hands)")
             return
         self.vr_mode.resync_imu(hands)
@@ -2562,16 +2562,16 @@ class CyberFingerApp:
             haptics.request(confirm_hand, 0.25, 8.0, 1.0)
 
     def _test_haptic(self, hand):
-        """UI thread: the hand panel's haptics strip was clicked (VR mode): a short pulse to that glove."""
+        """UI thread: the hand panel's haptics strip was clicked (VR mode): a short pulse to that CyberFinger."""
         name = "right" if hand else "left"
         if not self.ble.haptics.available(hand):
-            self.log(f"Haptics: the {name} glove isn't connected (or has no control characteristic)")
+            self.log(f"Haptics: the {name} CyberFinger isn't connected (or has no control characteristic)")
             return
         duration, frequency, amplitude = 0.25, 0.0, 0.8
         self.ble.haptics.request(hand, duration, frequency, amplitude)
         if self.driver_link is not None:
             self.driver_link.haptics.add(hand, duration, frequency, amplitude)   # shown on the meter too
-        self.log(f"Haptics: test pulse to the {name} glove")
+        self.log(f"Haptics: test pulse to the {name} CyberFinger")
 
     def _haptic_state(self, hand):
         return self.driver_link.haptics.state(hand) if self.driver_link is not None else None
@@ -2588,7 +2588,7 @@ class CyberFingerApp:
                 if state.has_accel and state.imu_present & IMU_JOINT:
                     tap = self.triple_tap[hand]
                     if tap.feed(state.rx_perf or time.perf_counter(), state.accel_joint):
-                        self._resync_imu(f"{'right' if hand else 'left'} glove triple tap "
+                        self._resync_imu(f"{'right' if hand else 'left'} CyberFinger triple tap "
                                          f"({', '.join(f'{g:.1f}' for g in tap.sequence_g)} g)", hand)
 
         # Runs alongside the active mode, not instead of it — SlimeVR takes the
@@ -2786,28 +2786,28 @@ class Tooltip:
 
 # What each control is for (Tooltip texts).
 TIPS = {
-    "vr": "Gloves → the CyberFinger SteamVR driver, for SteamVR apps (Resonite, VRChat, the SteamVR dashboard).\n\n"
-          "The gloves become two hand controllers: their buttons, stick and trigger, with the hand pose and fingers "
-          "from the headset's hand tracking, the rotation from the glove's joint IMU (where fitted), app vibration "
+    "vr": "CyberFingers → the CyberFinger SteamVR driver, for SteamVR apps (Resonite, VRChat, the SteamVR dashboard).\n\n"
+          "The CyberFingers become two hand controllers: their buttons, stick and trigger, with the hand pose and fingers "
+          "from the headset's hand tracking, the rotation from the CyberFinger's joint IMU (where fitted), app vibration "
           "(where fitted), and the pink buttons. Needs the CyberFinger driver installed and SteamVR running.",
-    "gamepad": "Gloves → a virtual Xbox 360 controller laid out for Resonite, without SteamVR: desktop mode, or "
+    "gamepad": "CyberFingers → a virtual Xbox 360 controller laid out for Resonite, without SteamVR: desktop mode, or "
                "alongside other controllers.\n\nOnly buttons and sticks: no hand tracking, no vibration from apps, "
                "no pink-button functions. Needs the ViGEmBus driver (the vgamepad package installs it).",
-    "gamepad_vrc": "Gloves → a virtual Xbox 360 controller laid out for VRChat, without SteamVR: desktop mode, or "
+    "gamepad_vrc": "CyberFingers → a virtual Xbox 360 controller laid out for VRChat, without SteamVR: desktop mode, or "
                    "alongside other controllers.\n\nOnly buttons and sticks: no hand tracking, no vibration from "
                    "apps, no pink-button functions. Needs the ViGEmBus driver (the vgamepad package installs it).",
-    "start": "Connect to both gloves over Bluetooth and start forwarding them in the chosen mode. The gloves must be "
+    "start": "Connect to both CyberFingers over Bluetooth and start forwarding them in the chosen mode. The CyberFingers must be "
              "paired in Windows and switched on.",
-    "stop": "Stop forwarding and disconnect the gloves. In VR mode SteamVR then sees the CyberFinger controllers "
+    "stop": "Stop forwarding and disconnect the CyberFingers. In VR mode SteamVR then sees the CyberFinger controllers "
             "without input, and the headset's own hand tracking can take the hands back.",
     "autostart": "Start in the last used mode as soon as the bridge opens: handy when it starts with Windows. "
-                 "With the gloves off, it keeps looking for them.",
-    "pink": "What the right glove's pink button does in VR mode.\n\n"
+                 "With the CyberFingers off, it keeps looking for them.",
+    "pink": "What the right CyberFinger's pink button does in VR mode.\n\n"
             "mic mute: mutes and unmutes Windows' default microphone, so every app goes quiet at once (Resonite, "
-            "VRChat, Discord). The glove confirms: pulses when muted, one buzz when live (gloves with a motor).\n\n"
+            "VRChat, Discord). The CyberFinger confirms: pulses when muted, one buzz when live (CyberFingers with a motor).\n\n"
             "FluxAction: presses a FluxAction in Resonite instead, for your own ProtoFlux (needs the MoreFluxActions "
             "mod). The microphone is left alone, and nothing vibrates.\n\n"
-            "SteamVR (the default): hands the button to SteamVR (the right glove's Pink input), for the app's own "
+            "SteamVR (the default): hands the button to SteamVR (the right CyberFinger's Pink input), for the app's own "
             "binding: VRChat's mute, with its microphone icon; in Resonite FluxAction42, which mutes with the "
             "MoreFluxActions mod (its MuteToggleAction, 42 by default). The bridge does nothing with it.\n\n"
             "Remembered across restarts.\n\n"
@@ -2816,17 +2816,17 @@ TIPS = {
                  "CyberFinger bindings leave it free.\n\nIn Resonite, a Dynamic Impulse Receiver tagged "
                  "FluxAction42.Pressed (or .Released) under your avatar reacts to it. Sent straight to the mod, "
                  "not through SteamVR's bindings.",
-    "slimevr": "Also send the gloves' IMUs to a SlimeVR server on this PC, as trackers: the wrist IMU as the lower "
+    "slimevr": "Also send the CyberFingers' IMUs to a SlimeVR server on this PC, as trackers: the wrist IMU as the lower "
                "arm, the joint IMU (where fitted) as the hand.\n\nFor full-body setups with SlimeVR: it gives "
                "SlimeVR the forearms. Runs alongside any mode. Needs the SlimeVR server running.",
-    "body_imu": "Which wrist IMU SlimeVR gets. Every glove has body IMU 1; some revisions add a second chip at the "
+    "body_imu": "Which wrist IMU SlimeVR gets. Every CyberFinger has body IMU 1; some revisions add a second chip at the "
                 "same spot (2). Falls back to the other when the chosen one is missing.",
-    "resync": "Start the SteamVR driver's IMU fusion over, for both hands: it keeps how each glove sits on the hand "
+    "resync": "Start the SteamVR driver's IMU fusion over, for both hands: it keeps how each CyberFinger sits on the hand "
               "and the tracking delay, and fits the IMU's heading again from the next views of the hand (about "
-              "half a second of the hand in view).\n\nUse it when a hand's rotation is off: after taking a glove "
+              "half a second of the hand in view).\n\nUse it when a hand's rotation is off: after taking a CyberFinger "
               "off or re-seating it, or switching it off and on. The driver usually notices those by itself; this "
               "is the manual way. A triple tap on the module on the back of the hand does the same.\n\n"
-              "VR mode only, and only for gloves with the joint IMU (some revisions): without it the headset "
+              "VR mode only, and only for CyberFingers with the joint IMU (some revisions): without it the headset "
               "alone turns the hand, and there's nothing to resync.",
 }
 
@@ -2851,12 +2851,12 @@ class HandPanel:
         self.canvas.bind("<Button-1>", self._on_click)
 
     def _on_click(self, event):
-        """A click on the haptics strip (VR mode) sends a test pulse to this glove."""
+        """A click on the haptics strip (VR mode) sends a test pulse to this CyberFinger."""
         if self._haptic_shown and self._on_test_haptic and event.y > self.canvas.winfo_height() - 36:
             self._on_test_haptic()
 
     def _draw_haptics(self, c, w, h, haptic):
-        """Bottom strip: what the SteamVR driver asks this hand's glove to vibrate (None: not in VR mode). Click it
+        """Bottom strip: what the SteamVR driver asks this hand's CyberFinger to vibrate (None: not in VR mode). Click it
         for a test pulse."""
         self._haptic_shown = haptic is not None
         if haptic is None:
@@ -2924,7 +2924,7 @@ class HandPanel:
         btn_y_start = 30
         btn_spacing = 15
         # The pink button's press arrives as an ~80 ms click: shown lit a little longer, so it can be seen.
-        if state.buttons2 & glove_report.PINK:
+        if state.buttons2 & cyberfinger_report.PINK:
             self._pink_until = now + 0.3
         btn_names_bits = [
             ("TRIG", state.buttons & BTN_TRIGGER),

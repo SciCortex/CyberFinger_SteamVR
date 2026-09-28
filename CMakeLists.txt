@@ -108,7 +108,7 @@ add_test(NAME driver_tests COMMAND driver_tests "${CMAKE_SOURCE_DIR}/tests/proto
 add_executable(filter_eval tests/filter_eval.cpp)
 target_include_directories(filter_eval PRIVATE "${OPENVR_SDK}/headers" src)
 
-# Replays a capture with the glove IMUs through the driver-side IMU fusion (ImuFusion.h).
+# Replays a capture with the CyberFinger IMUs through the driver-side IMU fusion (ImuFusion.h).
 add_executable(fusion_eval tests/fusion_eval.cpp)
 target_include_directories(fusion_eval PRIVATE "${OPENVR_SDK}/headers" src)
 

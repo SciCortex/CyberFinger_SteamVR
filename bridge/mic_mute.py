@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Mute and unmute the Windows default microphone: what the right glove's pink button does by default
+"""Mute and unmute the Windows default microphone: what the right CyberFinger's pink button does by default
 (VR mode, pink_button.py).
 
 The mute is the capture endpoint's own, so it holds for every app at once (Resonite, VRChat, Discord: they record

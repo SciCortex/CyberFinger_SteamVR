@@ -4,7 +4,7 @@
 
 """T2.2 — IMU↔optical extrinsic calibration (R_off).
 
-The glove IMU reports orientation in its OWN frame (a physical mount angle + its own
+The CyberFinger IMU reports orientation in its OWN frame (a physical mount angle + its own
 gravity-aligned world with an arbitrary yaw origin). R_off is the constant rotation
 that maps IMU orientation into the optical/headset frame, so `R_off · R_imu` is the
 hand's orientation the way the camera sees it — the piece that lets the two be fused.

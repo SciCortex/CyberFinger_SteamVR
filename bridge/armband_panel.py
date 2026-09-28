@@ -19,7 +19,7 @@ Design
 * Heavy deps (numpy/matplotlib/mindrove) are imported lazily in start(), so a
   CyberFinger install without them still launches — the tab just reports what to
   ``pip install`` when you press Start.
-* The MindRove armband (Wi-Fi/UDP) and the CyberFinger gloves (BLE) are
+* The MindRove armband (Wi-Fi/UDP) and the CyberFingers (BLE) are
   independent radios, so both can stream in one process at once. Only ONE process
   may own the armband, so the 3D hand is served in-process (via --web-hand's
   server) and opened with a button, never by launching a second program.
@@ -50,7 +50,7 @@ class ArmbandTab:
 
     # Redraw the (heavy) matplotlib canvas every Nth host tick while visible.
     # The host ticks ~30 Hz; drawing every 2nd tick ≈ 15 fps keeps the EMG scope
-    # smooth while leaving CPU for the glove panels.
+    # smooth while leaving CPU for the CyberFinger panels.
     DRAW_EVERY = 2
 
     def __init__(self, parent, log=None):
@@ -196,7 +196,7 @@ class ArmbandTab:
                          "still streams and the browser 3D hand still updates.")
 
     def push_hand_orientation(self, hand_quat, wrist_quat, ok):
-        """Feed glove-IMU orientation into the web-hand /pose stream (in-process).
+        """Feed CyberFinger-IMU orientation into the web-hand /pose stream (in-process).
         hand_quat/wrist_quat are [w,x,y,z] lists (or None). Called from the host
         GUI's tick; the dashboard's _refresh never touches these keys."""
         if not self.running or self._emg is None:

@@ -4,11 +4,11 @@
 
 """CyberFinger UDP wire protocol v2 — Python side of src/Protocol.h.
 
-  CFG2  bridge → driver  glove buttons / stick / trigger, one per BLE report   (pack_glove)
+  CFG2  bridge → driver  CyberFinger buttons / stick / trigger, one per BLE report   (pack_cyberfinger)
   CFHS  bridge → driver  fused hand state: /pose/raw + 31 bones               (pack_hand_state)
   CFOP  driver → bridge  HMD pose + headset hand tracking ("optical tap")     (unpack_context)
   CFHP  driver → bridge  haptic vibration request from an application         (unpack_haptic)
-  CFIM  bridge → driver  raw glove IMU slots, one per BLE report: the driver's IMU fusion
+  CFIM  bridge → driver  raw CyberFinger IMU slots, one per BLE report: the driver's IMU fusion
                          and its captures                                       (pack_imu)
 
 Little-endian, packed; the driver listens on 127.0.0.1:27015 and sends CFOP to 127.0.0.1:27016.
@@ -30,7 +30,7 @@ def _magic(s):
     return struct.unpack("<I", s.encode("ascii"))[0]
 
 
-MAGIC_GLOVE = _magic("CFG2")
+MAGIC_CYBERFINGER = _magic("CFG2")
 MAGIC_HAND_STATE = _magic("CFHS")
 MAGIC_CONTEXT = _magic("CFOP")
 MAGIC_HAPTIC = _magic("CFHP")
@@ -41,7 +41,7 @@ MAGIC_LEGACY = _magic("CFGP")
 BTN_TRIGGER, BTN_GRIP, BTN_C, BTN_D, BTN_E, BTN_MENU, BTN_STICK, BTN_STSEL = (
     0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80)
 # CFG2 buttons2: buttons beyond the first byte
-GLOVE_BTN2_PINK = 0x01        # the pink power key (left: SteamVR's system button)
+CYBERFINGER_BTN2_PINK = 0x01        # the pink power key (left: SteamVR's system button)
 
 # CFHS flags
 HS_POSE_VALID, HS_HAS_BONES, HS_CAMERA_SEES, HS_CALIBRATED = 0x1, 0x2, 0x4, 0x8
@@ -49,7 +49,7 @@ HS_POSE_VALID, HS_HAS_BONES, HS_CAMERA_SEES, HS_CALIBRATED = 0x1, 0x2, 0x4, 0x8
 # CFOP flags
 CTX_CAPTURING = 0x1
 
-# CFIM slot bits (the glove's own layout; body 2 is the same spot as body 1, other chip)
+# CFIM slot bits (the CyberFinger's own layout; body 2 is the same spot as body 1, other chip)
 IMU_BODY1, IMU_BODY2, IMU_JOINT = 0x1, 0x2, 0x4
 
 # Driver output modes (CFOP mode_left / mode_right)
@@ -57,20 +57,20 @@ MODE_NAMES = {0: "NONE", 1: "FUSED", 2: "PASSTHROUGH", 3: "NO_POSE", 4: "RELEASE
 
 HEADER = struct.Struct("<IBBHIIQ")
 BONE = struct.Struct("<8f")
-GLOVE_BODY = struct.Struct("<BBhhBBBx")
+CYBERFINGER_BODY = struct.Struct("<BBhhBBBx")
 HAND_BODY = struct.Struct("<3f4f3f3f5f5ff5fIBBBB")
 TAP_HEAD = struct.Struct("<BBBBBBxxI3f4f3f3f")
 CONTEXT_BODY = struct.Struct("<BBBB3f4f3f3fII")
 HAPTIC_BODY = struct.Struct("<3f")
 IMU_BODY = struct.Struct("<BB2x12f9h2x")
 
-GLOVE_SIZE = HEADER.size + GLOVE_BODY.size                                       # 34
+CYBERFINGER_SIZE = HEADER.size + CYBERFINGER_BODY.size                                       # 34
 HAND_STATE_SIZE = HEADER.size + HAND_BODY.size + NUM_BONES * BONE.size           # 1140
 TAP_SIZE = TAP_HEAD.size + NUM_BONES * BONE.size                                 # 1056
 CONTEXT_SIZE = HEADER.size + CONTEXT_BODY.size + 2 * TAP_SIZE                    # 2200
 HAPTIC_SIZE = HEADER.size + HAPTIC_BODY.size                                     # 36
 IMU_SIZE = HEADER.size + IMU_BODY.size                                           # 96
-assert (GLOVE_SIZE, HAND_STATE_SIZE, TAP_SIZE, CONTEXT_SIZE, HAPTIC_SIZE, IMU_SIZE) == \
+assert (CYBERFINGER_SIZE, HAND_STATE_SIZE, TAP_SIZE, CONTEXT_SIZE, HAPTIC_SIZE, IMU_SIZE) == \
     (34, 1140, 1056, 2200, 36, 96)
 
 
@@ -95,11 +95,11 @@ def stick_to_int16(x, y, deadzone=0.0):
     return clamp(x), clamp(y)
 
 
-def pack_glove(hand, seq, buttons, trigger, joy_x, joy_y, battery, age_us=0, buttons2=0, resync=0):
-    """CFG2. joy_x/joy_y: int16, already centred, +y = up. buttons2: GLOVE_BTN2_* (the glove's extension byte).
+def pack_cyberfinger(hand, seq, buttons, trigger, joy_x, joy_y, battery, age_us=0, buttons2=0, resync=0):
+    """CFG2. joy_x/joy_y: int16, already centred, +y = up. buttons2: CYBERFINGER_BTN2_* (the CyberFinger's extension byte).
     resync: a count; each new value asks the driver to resync this hand's IMU fusion (Protocol.h
-    GlovePacket::resync)."""
-    return _header(MAGIC_GLOVE, hand, seq, age_us=age_us) + GLOVE_BODY.pack(
+    CyberFingerPacket::resync)."""
+    return _header(MAGIC_CYBERFINGER, hand, seq, age_us=age_us) + CYBERFINGER_BODY.pack(
         buttons & 0xFF, max(0, min(255, int(trigger))), int(joy_x), int(joy_y), max(0, min(100, int(battery))),
         buttons2 & 0xFF, resync & 0xFF)
 
@@ -216,7 +216,7 @@ def golden_vectors():
     """Deterministic packets (t_send_us zeroed) whose field values the C++ test checks."""
     def fixed_time(pkt):
         return pkt[:16] + struct.pack("<Q", 0) + pkt[24:]
-    glove = fixed_time(pack_glove(1, 7, BTN_MENU | BTN_TRIGGER, 200, -1000, 32767, 88, age_us=5))
+    cyberfinger = fixed_time(pack_cyberfinger(1, 7, BTN_MENU | BTN_TRIGGER, 200, -1000, 32767, 88, age_us=5))
     bones = [(0.01 * i, -0.02 * i, 0.03 * i, 1.0, 0.0, 0.0, 0.0) for i in range(NUM_BONES)]
     hand = fixed_time(pack_hand_state(0, 42, (0.1, 1.2, -0.3), (0.5, 0.5, -0.5, 0.5), lin_vel=(1, 2, 3),
                                       ang_vel=(-1, -2, -3), curl=(0.1, 0.2, 0.3, 0.4, 0.5),
@@ -233,7 +233,7 @@ def golden_vectors():
     imu = fixed_time(pack_imu(0, 1000, IMU_BODY1 | IMU_JOINT,
                               [(1, 0, 0, 0), (1, 0, 0, 0), (0.5, -0.5, 0.5, -0.5)],
                               [(10, -20, 2048), (0, 0, 0), (-7, 300, -2048)], age_us=4321))
-    return [glove, hand, bytes(ctx), haptic, imu]
+    return [cyberfinger, hand, bytes(ctx), haptic, imu]
 
 
 def write_vectors(path):

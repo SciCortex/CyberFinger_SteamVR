@@ -25,7 +25,7 @@ namespace cf {
 
 namespace {
 
-// "MENU", "STSEL", "C|D", "NONE" … → GloveButton mask.
+// "MENU", "STSEL", "C|D", "NONE" … → CyberFingerButton mask.
 uint8_t ParseButtons(const std::string& spec) {
     uint8_t mask = 0;
     std::string token;
@@ -95,7 +95,7 @@ vr::EVRInitError ServerProvider::Init(vr::IVRDriverContext* pDriverContext) {
             DriverLog("Optical tap: skeleton hook unavailable; using headset hand poses only\n");
     }
 
-    // The glove IMUs, sent by the bridge while a capture runs, go into the capture with everything else.
+    // The CyberFinger IMUs, sent by the bridge while a capture runs, go into the capture with everything else.
     // Captures record every packet; the fusion takes the joint IMU, stamped when the report reached the bridge
     // over BLE (the bridge's clock is the driver's; if it ever isn't, the arrival here).
     for (ImuFusion& f : m_imuFusion) f.Reset();
@@ -215,7 +215,7 @@ void ServerProvider::RunFrame() {
             m_imuFusionKnown = true;
             for (auto& c : m_controller)
                 if (c) c->SetImuFusionEnabled(fuse);
-            DriverLog("IMU fusion %s\n", fuse ? "on: the glove's joint IMU drives the hand orientation once calibrated"
+            DriverLog("IMU fusion %s\n", fuse ? "on: the CyberFinger's joint IMU drives the hand orientation once calibrated"
                                               : "off: orientation from the headset alone");
         }
     }
@@ -251,10 +251,10 @@ void ServerProvider::RunFrame() {
         m_controller[hand]->SetHeadPosition(hmd.bPoseIsValid != 0, head.p);
     }
 
-    // The bridge asks for an IMU fusion resync (its button, a triple tap on the glove) with a new count in CFG2: a
+    // The bridge asks for an IMU fusion resync (its button, a triple tap on the CyberFinger) with a new count in CFG2: a
     // lost packet only delays it. The first count seen from a bridge is its start, not a request.
     for (int hand = 0; hand < 2; ++hand) {
-        const GloveState g = m_link.Glove(hand);
+        const CyberFingerState g = m_link.CyberFinger(hand);
         if (!g.valid) continue;
         if (m_resyncSeen[hand] >= 0 && g.resync != m_resyncSeen[hand]) {
             m_imuFusion[hand].Resync();
@@ -271,7 +271,7 @@ void ServerProvider::RunFrame() {
         if (m_controller[hand]) {
             m_tap->SetOwnDevice(hand, m_controller[hand]->ObjectId());
             m_controller[hand]->SetSourceFiltered(FilteredSource(tap[hand].controllerType), tap[hand].controllerType);
-            m_controller[hand]->Update(m_link.Glove(hand), m_link.HandState(hand), tap[hand], now,
+            m_controller[hand]->Update(m_link.CyberFinger(hand), m_link.HandState(hand), tap[hand], now,
                                        m_active && !m_yield[hand]);
         }
 
@@ -557,10 +557,10 @@ void ServerProvider::PollCaptureRequest() {
 }
 
 // ── IMU calibration across sessions ──
-// The joint IMU's mounting belongs to the glove and how it sits, the lag to the streamer: both carry over, so
+// The joint IMU's mounting belongs to the CyberFinger and how it sits, the lag to the streamer: both carry over, so
 // the fusion starts from them and only fits the IMU's heading (new with every power-up) — within a second of
 // seeing the hand, instead of waiting for enough varied orientations for a full solve. Before anything is saved
-// it starts from the reference gloves' calibration. The file is plain text; deleting it starts afresh.
+// it starts from the reference CyberFingers' calibration. The file is plain text; deleting it starts afresh.
 namespace {
 
 std::string ImuCalibrationPath() {
@@ -617,7 +617,7 @@ void ServerProvider::SaveImuCalibration() {
         DriverLog("IMU calibration: cannot write %s\n", tmp.c_str());
         return;
     }
-    std::fprintf(f, "# CyberFinger glove IMU calibration, kept by the driver: how the joint IMU sits on each hand, and\n"
+    std::fprintf(f, "# CyberFinger IMU calibration, kept by the driver: how the joint IMU sits on each hand, and\n"
                     "# the hand-tracking source's lag, per hand and source. The IMU fusion starts from it; delete this\n"
                     "# file to start afresh.\n"
                     "# hand source mount_w mount_x mount_y mount_z lag_ms fit_deg\n");
@@ -637,7 +637,7 @@ void ServerProvider::SaveImuCalibration() {
 // Start a hand's IMU fusion over as at a cold start: from the calibration saved for its hand-tracking source (this
 // session's good solves are averaged into it), the lag measured again. For a hand taken back from the controllers:
 // the headset lost it for the whole time, the IMU's heading drifted, and handling the controllers may have moved the
-// glove on the hand. A resync would start from this session's last solve instead, which fits worse when the glove
+// CyberFinger on the hand. A resync would start from this session's last solve instead, which fits worse when the CyberFinger
 // moved (2026-09-27: 18° against the saved calibration's ~11°, and two minutes to solve again, against 23 s from cold).
 // Frame loop.
 void ServerProvider::ColdStartImu(int hand) {
@@ -664,16 +664,16 @@ void ServerProvider::UpdateImuCalibration(const TapHandSnapshot tap[2], double n
             m_imuBase[hand] = m_imuHaveBase[hand] ? it->second : ImuFusion::DefaultCalibration(hand);
             m_imuFusion[hand].SetPrior(m_imuBase[hand]);
             DriverLog("[%s] IMU fusion starts from %s (lag %.0f ms)\n", name,
-                      m_imuHaveBase[hand] ? "the calibration saved for this source" : "the reference glove's calibration",
+                      m_imuHaveBase[hand] ? "the calibration saved for this source" : "the reference CyberFinger's calibration",
                       m_imuBase[hand].lag * 1e3);
         }
-        // A new good full solve: remember it. Sessions scatter by ~15° (how the glove sits, the postures seen),
+        // A new good full solve: remember it. Sessions scatter by ~15° (how the CyberFinger sits, the postures seen),
         // so a solve near the saved calibration is averaged with it rather than replacing it.
         const ImuFusion::Status st = m_imuFusion[hand].GetStatus();
         if (st.resyncs < m_imuResyncsLogged[hand]) m_imuResyncsLogged[hand] = st.resyncs;       // after a Reset
         if (st.resyncs > m_imuResyncsLogged[hand]) {
             m_imuResyncsLogged[hand] = st.resyncs;
-            DriverLog("[%s] IMU fusion resync: the joint IMU came back after a gap (the glove switched off?)\n", name);
+            DriverLog("[%s] IMU fusion resync: the joint IMU came back after a gap (the CyberFinger switched off?)\n", name);
         }
         ImuFusion::Calibration c;
         if (m_imuSource[hand].empty() || st.solves == m_imuSavedSolves[hand] || st.residualDeg > kSaveMaxResidualDeg ||
@@ -700,7 +700,7 @@ void ServerProvider::UpdateImuCalibration(const TapHandSnapshot tap[2], double n
     }
 }
 
-// An application asked one of our hands to vibrate: pass it to the bridge, which drives the glove.
+// An application asked one of our hands to vibrate: pass it to the bridge, which drives the CyberFinger.
 void ServerProvider::OnHaptic(const vr::VREvent_HapticVibration_t& hv) {
     for (int hand = 0; hand < 2; ++hand) {
         if (!m_controller[hand] || m_controller[hand]->HapticHandle() != hv.componentHandle) continue;
@@ -768,7 +768,7 @@ void ServerProvider::LogStatus(const TapHandSnapshot tap[2], double now) {
         if (noise.windows > 0)
             std::snprintf(still, sizeof(still), "held still %d s: wrist %.1f, tips %.1f, fingers %.1f mm",
                           noise.windows, noise.wrist * 1e3, noise.tips * 1e3, noise.fingers * 1e3);
-        const GloveState g = m_link.Glove(hand);
+        const CyberFingerState g = m_link.CyberFinger(hand);
         const HandStateSample f = m_link.HandState(hand);
         const ImuFusion::Status is = m_imuFusion[hand].GetStatus();
         char imu[128] = "off";
@@ -782,7 +782,7 @@ void ServerProvider::LogStatus(const TapHandSnapshot tap[2], double now) {
         else if (m_imuFusionEnabled)
             std::snprintf(imu, sizeof(imu), "calibrating (%zu pairs)", is.pairs);
         DriverLog("[%s] status: mode=%u%s tap(src=%s pose=%d skel=%d bones=%u age=%.2fs sys=%d) "
-                  "rates(src %.0f/%.0f Hz, new data %.0f/%.0f Hz, republished %.0f/%.0f Hz) noise(%s) glove=%s fused=%s "
+                  "rates(src %.0f/%.0f Hz, new data %.0f/%.0f Hz, republished %.0f/%.0f Hz) noise(%s) CyberFinger=%s fused=%s "
                   "imu(%s)\n",
                   c->Serial().c_str(), unsigned(c->Mode()), c->Following() ? " (event)" : "",
                   tap[hand].serial.empty() ? "-" : tap[hand].serial.c_str(), int(tap[hand].poseValid),

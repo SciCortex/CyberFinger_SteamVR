@@ -18,7 +18,7 @@ namespace cf {
 namespace {
 
 constexpr double kBlendTime = 0.1;        // s, FUSED <-> PASSTHROUGH cross-fade
-constexpr double kGloveFresh = 0.25;      // s
+constexpr double kCyberFingerFresh = 0.25;      // s
 constexpr double kTapSkeletonHold = 1.0;  // s to hold the last tap skeleton when it stalls
 constexpr double kEventTimeout = 0.1;     // s without headset hand updates before the frame loop takes over
 constexpr double kOcclusion = 0.08;       // s of an unchanged source skeleton: the headset lost the hand (normal pauses reach ~60 ms)
@@ -75,7 +75,7 @@ vr::EVRInitError CyberFingerController::Activate(uint32_t objectId) {
     props->SetFloatProperty(c, vr::Prop_DeviceBatteryPercentage_Float, 1.f);
     props->SetUint64Property(c, vr::Prop_HardwareRevision_Uint64, 2);
     props->SetUint64Property(c, vr::Prop_FirmwareVersion_Uint64, 2);
-    // Status icons (tools/make_status_icons.py): grey until the glove tracks, blue while it does.
+    // Status icons (tools/make_status_icons.py): grey until the CyberFinger tracks, blue while it does.
     const std::string icon = std::string("{cyberfinger}/icons/cyberfinger_") + (right ? "right" : "left");
     const std::string iconOff = icon + "_off.png", iconReady = icon + "_ready.png";
     for (const auto prop : { vr::Prop_NamedIconPathDeviceOff_String, vr::Prop_NamedIconPathDeviceSearching_String,
@@ -145,9 +145,9 @@ void CyberFingerController::Deactivate() {
     m_objectId = vr::k_unTrackedDeviceIndexInvalid;
 }
 
-// ── fallback skeleton from the glove's buttons ─────────────────────────────
+// ── fallback skeleton from the CyberFinger's buttons ─────────────────────────────
 
-void CyberFingerController::GloveCurls(const GloveState& g, bool fresh, float curls[5]) const {
+void CyberFingerController::CyberFingerCurls(const CyberFingerState& g, bool fresh, float curls[5]) const {
     std::fill(curls, curls + 5, 0.f);
     if (!fresh) return;
     const bool trigger = (g.buttons & kBtnTrigger) != 0;
@@ -203,7 +203,7 @@ void CyberFingerController::OnTapPose(const vr::DriverPose_t& pose) {
             src.poseTimeOffset = 0;
         }
     }
-    // The orientation from the glove's joint IMU (the headset's absolute orientation, the IMU's motion and
+    // The orientation from the CyberFinger's joint IMU (the headset's absolute orientation, the IMU's motion and
     // timing): also through occlusions, where the pose filter holds the position.
     Quat qf;
     Vec3 wf;
@@ -277,7 +277,7 @@ void CyberFingerController::TakeEventRates(double seconds, double& poseRate, dou
 
 // The frame loop's version, from the per-frame snapshot: used during cross-fades, when the headset
 // hand's updates stop arriving, and to keep m_lastRaw / m_lastBones current for the next cross-fade.
-void CyberFingerController::PassthroughPose(const TapHandSnapshot& tap, const GloveState& glove, double now,
+void CyberFingerController::PassthroughPose(const TapHandSnapshot& tap, const CyberFingerState& cyberFinger, double now,
                                             Xform& raw, Vec3& lin, Vec3& ang,
                                             vr::VRBoneTransform_t* bones, float* curls) {
     const bool tapSkeleton = tap.skeletonValid && tap.boneCount >= uint32_t(eBone_Count);
@@ -317,23 +317,23 @@ void CyberFingerController::PassthroughPose(const TapHandSnapshot& tap, const Gl
         CurlsFromBones(bones, curls);
     } else {
         const float zero[5] = {};
-        GloveCurls(glove, now - glove.time < kGloveFresh && glove.valid, curls);
+        CyberFingerCurls(cyberFinger, now - cyberFinger.time < kCyberFingerFresh && cyberFinger.valid, curls);
         SynthesizeSkeleton(Right(), curls, zero, bones);
     }
 }
 
 // ── per-frame update ───────────────────────────────────────────────────────
 
-void CyberFingerController::Update(const GloveState& glove, const HandStateSample& fused,
+void CyberFingerController::Update(const CyberFingerState& cyberFinger, const HandStateSample& fused,
                                    const TapHandSnapshot& tap, double now, bool active) {
     if (m_objectId == vr::k_unTrackedDeviceIndexInvalid) return;
 
-    const bool gloveFresh = glove.valid && now - glove.time < kGloveFresh;
+    const bool cyberFingerFresh = cyberFinger.valid && now - cyberFinger.time < kCyberFingerFresh;
     const bool fusedFresh = fused.valid && now - fused.arrival < m_cfg.fusedTimeout &&
                             (fused.pkt.h.flags & kHsPoseValid) != 0;
 
     uint8_t mode = fusedFresh ? kModeFused : (tap.poseValid ? kModePassthrough : kModeNoPose);
-    if (fusedFresh || tap.poseValid || gloveFresh) m_lastData = now;
+    if (fusedFresh || tap.poseValid || cyberFingerFresh) m_lastData = now;
     if (m_cfg.disconnectAfter > 0 && now - m_lastData > m_cfg.disconnectAfter) mode = kModeReleased;
     if (!active) mode = kModeReleased;
 
@@ -360,11 +360,11 @@ void CyberFingerController::Update(const GloveState& glove, const HandStateSampl
         }
         m_appliedSeq = p.h.seq;
     } else if (mode == kModePassthrough) {
-        PassthroughPose(tap, glove, now, raw, lin, ang, bones, curls);
+        PassthroughPose(tap, cyberFinger, now, raw, lin, ang, bones, curls);
     } else {
         poseValid = false;
         const float zero[5] = {};
-        GloveCurls(glove, gloveFresh, curls);
+        CyberFingerCurls(cyberFinger, cyberFingerFresh, curls);
         SynthesizeSkeleton(Right(), curls, zero, bones);
     }
 
@@ -473,7 +473,7 @@ void CyberFingerController::Update(const GloveState& glove, const HandStateSampl
     }
 
     if (!follow) SubmitSkeleton(bones);
-    SubmitInputs(glove, gloveFresh, live, tap, curls, gestures, now);
+    SubmitInputs(cyberFinger, cyberFingerFresh, live, tap, curls, gestures, now);
 }
 
 void CyberFingerController::SubmitSkeleton(const vr::VRBoneTransform_t* bones) {
@@ -484,7 +484,7 @@ void CyberFingerController::SubmitSkeleton(const vr::VRBoneTransform_t* bones) {
     in->UpdateSkeletonComponent(m_skeleton, vr::VRSkeletalMotionRange_WithController, bones, eBone_Count);
 }
 
-void CyberFingerController::SubmitInputs(const GloveState& g, bool fresh, bool live, const TapHandSnapshot& tap,
+void CyberFingerController::SubmitInputs(const CyberFingerState& g, bool fresh, bool live, const TapHandSnapshot& tap,
                                          const float curls[5], const HandGestures& gestures, double now) {
     auto* in = vr::VRDriverInput();
     fresh = fresh && live;
@@ -528,7 +528,7 @@ void CyberFingerController::SubmitInputs(const GloveState& g, bool fresh, bool l
     in->UpdateBooleanComponent(m_bool[kC], (b & kBtnC) != 0, 0);
     in->UpdateBooleanComponent(m_bool[kD], (b & kBtnD) != 0, 0);
     in->UpdateBooleanComponent(m_bool[kE], (b & kBtnE) != 0, 0);
-    // System: a glove button mapped to it (system_button), and the headset's palm-pinch gesture if forwarded (off by
+    // System: a CyberFinger button mapped to it (system_button), and the headset's palm-pinch gesture if forwarded (off by
     // default). The left pink button opens the dashboard as /input/pink, through the dashboard's binding.
     const bool system = (b & m_cfg.maskSystem) != 0 || (live && m_cfg.forwardTapSystem && tap.systemClick);
     in->UpdateBooleanComponent(m_bool[kSystem], system, 0);

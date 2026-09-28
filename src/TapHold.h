@@ -36,7 +36,7 @@ public:
         return m_down || m_latched;
     }
 
-    // Button state unknown (glove lost, device released): let go.
+    // Button state unknown (CyberFinger lost, device released): let go.
     void Reset() { m_down = m_latched = m_endsLatch = false; }
 
 private:

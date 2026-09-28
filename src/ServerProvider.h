@@ -59,7 +59,7 @@ private:
     void SaveImuCalibration();
 
     StudioLink m_link;
-    ImuFusion m_imuFusion[2];         // the glove's joint IMU + optical orientation, per hand (fed by m_link)
+    ImuFusion m_imuFusion[2];         // the CyberFinger's joint IMU + optical orientation, per hand (fed by m_link)
     bool m_imuFusionEnabled = true;   // setting imu_fusion
     bool m_imuFusionKnown = false;
     bool m_grabTapToHold = true;      // setting grab_tap_to_hold

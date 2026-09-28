@@ -1,12 +1,12 @@
 # CyberFinger — SteamVR Driver
 
-A SteamVR driver that turns **two CyberFingers** into a pair of SteamVR hand controllers: the glove's
+A SteamVR driver that turns **two CyberFingers** into a pair of SteamVR hand controllers: the CyberFinger's
 push-stick, trigger, grip and buttons, plus a full hand skeleton and pose from the headset's hand tracking
 (Quest via Steam Link) — or from the CyberFinger Fusion Studio, which keeps the hand tracked out of view.
 
 Note: this is a *work-in-progress*, and currently alpha software.
 
-**Documentation:** [docs/README.md](docs/README.md) maps the pieces (gloves, bridge, driver, the MoreFluxActions
+**Documentation:** [docs/README.md](docs/README.md) maps the pieces (CyberFingers, bridge, driver, the MoreFluxActions
 mod for Resonite) and where each is documented. The user manual is in [docs/manual](docs/manual/).
 
 ## How it works
@@ -15,7 +15,7 @@ mod for Resonite) and where each is documented. The user manual is in [docs/manu
   (Steam Link's hand devices declare hand priority −1, CyberFinger 1000). Apps see CyberFinger, not a second
   pair of Steam Link hands.
 - **Pose and fingers**, per hand, from the first source available:
-  - **FUSED** — the Fusion Studio's fused hand (camera + glove IMUs + EMG), sent over UDP;
+  - **FUSED** — the Fusion Studio's fused hand (camera + CyberFinger IMUs + EMG), sent over UDP;
   - **PASSTHROUGH** — the headset's own hand tracking as streamed by Steam Link or Virtual Desktop,
     captured inside vrserver by observe-only hooks on the streamer's pose and skeleton updates. Each update
     is republished the moment the streamer submits it, with its own timing, so apps get the same stream as
@@ -25,14 +25,14 @@ mod for Resonite) and where each is documented. The user manual is in [docs/manu
   (through the dashboard's binding, so it can be rebound). The right one is the bridge's "Right pink button"
   option: *SteamVR* (the default) passes the button to SteamVR for the app's binding (VRChat's own mute;
   FluxAction42 in Resonite, which the MoreFluxActions mod makes Resonite's mute: its `MuteToggleAction`, 42 by default);
-  *mic mute* mutes and unmutes the Windows microphone for every app, confirmed on the glove's motor;
+  *mic mute* mutes and unmutes the Windows microphone for every app, confirmed on the CyberFinger's motor;
   *FluxAction* fires one (1–42, default 42) straight to the MoreFluxActions mod over loopback UDP
   (`bridge/flux_actions.py`). In the last two the bridge keeps the button to itself, so nothing acts twice.
-- **Buttons only.** Actions come from the glove's buttons. The standard hand-tracking gestures (pinches,
+- **Buttons only.** Actions come from the CyberFinger's buttons. The standard hand-tracking gestures (pinches,
   grasp, index point) are exposed for binding but unassigned by default. The Quest left-palm pinch doesn't open
   the dashboard: while CyberFinger is active the driver holds the headset hands' system button back from SteamVR
   (`forward_tap_system_button` passes it on as CyberFinger's own instead). It fired too easily.
-- **Haptics** requested by apps reach the glove's motor through the bridge (firmware 1.3.3+, CFV1BP boards: the
+- **Haptics** requested by apps reach the CyberFinger's motor through the bridge (firmware 1.3.3+, CFV1BP boards: the
   hardware revisions with a motor). Without one, the requests are simply ignored.
 - **Apps:** VRChat and Resonite get native bindings; every other app sees an Index controller (SteamVR
   automatic rebinding + legacy binding emulation).
@@ -102,6 +102,11 @@ Then:
    settings. **Virtual Desktop:** nothing to set; CyberFinger follows VD's hand devices (`HANDL`/`HANDR`, type
    `vd_hand_controller`).
 2. Start SteamVR. *Settings → Startup/Shutdown → Manage Add-ons* should list `cyberfinger` as on.
+3. For Resonite, install its mods (what each does is under [Application support](#application-support)):
+   [MoreFluxActions](https://github.com/DrSciCortex/MoreFluxActionsMod) with its renderer part,
+   [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix),
+   [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) 1.10+ and
+   [ProximityGrab](https://github.com/SciCortex/ProximityGrab).
 
 ## Switching it off
 
@@ -115,8 +120,8 @@ Then:
 
 1. Start SteamVR (Steam Link connected, hands visible to the headset).
 2. Start a bridge in **VR mode**: `python bridge/cyberfinger_gui.py`, or the Fusion Studio
-   (`python bridge/fusion_studio.py`, *▶ Start glove*). Put the gloves in "VR mode".
-3. Check what the driver sees: `python bridge/tools/cf_driver_probe.py` (stop the bridge's glove link first —
+   (`python bridge/fusion_studio.py`, *▶ Start CyberFinger*). Put the CyberFingers in "VR mode".
+3. Check what the driver sees: `python bridge/tools/cf_driver_probe.py` (stop the bridge's CyberFinger link first —
    both listen on UDP 27016). With your hands in view it shows `PASSTHROUGH`, `skeleton live 31 bones`, and
    `[SYSTEM pressed]` when the headset's hand makes its system gesture (the Quest palm pinch); haptic requests
    are printed as they arrive.
@@ -124,7 +129,7 @@ Then:
 
 ## Controls
 
-| Glove | SteamVR component | VRChat default | Resonite default |
+| CyberFinger | SteamVR component | VRChat default | Resonite default |
 |---|---|---|---|
 | Primary (trigger, analog + click) | `/input/trigger` | Use / interact | Primary |
 | Grab (grip) | `/input/grab` (tap to hold) | Grab: a quick tap holds until the next press, a longer press grabs while held | same |
@@ -143,8 +148,8 @@ the middle 3.5 cm away), so a thumb on the last two or three fingers doesn't cou
 closing: `pinky pinch counts` or why not, with the palm angle, curls and distances (`PinkyPinchMeant`).
 
 Everything unbound can be bound per app in SteamVR's *Controller bindings* UI, which shows the controls on a
-picture of the glove. A glove button can also be made the dashboard button with the `button_system` setting.
-Holding a pink button shows the glove's power-off notice after a moment; held about 5–7 s in all, the glove
+picture of the CyberFinger. A CyberFinger button can also be made the dashboard button with the `button_system` setting.
+Holding a pink button shows the CyberFinger's power-off notice after a moment; held about 5–7 s in all, the CyberFinger
 switches off and its screen goes dark.
 
 The black button has a long press: held for `black_hold_ms` (800 ms), it is `/input/a_hold` instead of A,
@@ -166,10 +171,10 @@ then follows the grip button.
 Gesture values come from Steam Link's own hand-tracking gestures while it tracks the hand, and from the
 hand skeleton otherwise.
 
-## Glove IMU fusion
+## CyberFinger IMU fusion
 
-With a bridge running and a glove with the joint IMU connected (some hardware revisions; the body IMU in the
-wrist module, which every glove has, isn't used here), the driver fuses the glove's joint IMU (on the back of the hand)
+With a bridge running and a CyberFinger with the joint IMU connected (some hardware revisions; the body IMU in the
+wrist module, which every CyberFinger has, isn't used here), the driver fuses the CyberFinger's joint IMU (on the back of the hand)
 with the headset's hand orientation, until the Fusion Studio's own fusion takes over (the FUSED mode bypasses it).
 While the headset sees the hand and it turns slowly, the driver learns the IMU's heading and how it sits on the
 hand, and measures how far the headset's stream trails the IMU. The hand orientation then comes from the IMU,
@@ -182,8 +187,8 @@ How the IMU sits on the hand, and the streamer's lag, carry over between session
 `%LOCALAPPDATA%\CyberFinger\imu_calibration.txt` (per hand and hand-tracking source, averaged over sessions)
 and starts from them, so only the IMU's heading, new with every power-up, is left to find. The fusion then runs
 within a second of the headset seeing the hand, even held still; the full calibration, which needs a few seconds
-of turning the hand in view, refines it after. Before anything is saved it starts from the reference gloves'
-calibration. A starting point more than 25° off (another glove, the sensor turned) is ignored, and the status
+of turning the hand in view, refines it after. Before anything is saved it starts from the reference CyberFingers'
+calibration. A starting point more than 25° off (another CyberFinger, the sensor turned) is ignored, and the status
 line says so (`the starting mount is off by … deg`); delete the file to start afresh.
 
 The headset's hand tracking isn't equally good everywhere, and the IMU is the referee. Measured against it, the
@@ -192,23 +197,23 @@ head or overhead, and very close to or far from the headset (`src/TrackingTrust.
 Steam Link). The less a view is trusted, the slower it may correct the IMU, and only trusted views calibrate it.
 And a headset orientation more than 25° from the fused one (narrower in poor views) is refused outright: palm
 flips, phantom spins and edge-of-view errors no longer turn the hand. If the headset, in full view, is refused
-for 3 s on end, it's the IMU that's off (the glove slipped on the hand), and the hand follows the headset again;
-the calibration pairs from before are dropped, since they describe how the glove sat then. The status line counts
+for 3 s on end, it's the IMU that's off (the CyberFinger slipped on the hand), and the hand follows the headset again;
+the calibration pairs from before are dropped, since they describe how the CyberFinger sat then. The status line counts
 the refused samples.
 
-Taking the glove off and putting it back needs nothing:
-- **Glove put down, switched on:** the headset sees the hand turn (over 15°/s) while the IMU lies still (under
-  3°/s). After about a second of that, the fusion treats the glove as off the hand: the headset alone gives the
+Taking the CyberFinger off and putting it back needs nothing:
+- **CyberFinger put down, switched on:** the headset sees the hand turn (over 15°/s) while the IMU lies still (under
+  3°/s). After about a second of that, the fusion treats the CyberFinger as off the hand: the headset alone gives the
   orientation, and the fusion learns nothing from the bare hand. Once the IMU turns with the hand again (their
   rotation rates within 35 % for half a second), it resyncs.
-- **Glove switched off and on:** the IMU's new heading is caught by the data gap. More than 5 s without IMU data
+- **CyberFinger switched off and on:** the IMU's new heading is caught by the data gap. More than 5 s without IMU data
   also resyncs.
 - **A resync** keeps the mounting and the lag, and fits the heading again from the next views: the fused
   orientation is back within about half a second of seeing the hand. On the recorded sessions, worn throughout,
   the off-hand test never fired.
-- **By hand:** the bridge's **Resync IMU** button, or a **triple tap** on a glove's joint IMU (the module on the
+- **By hand:** the bridge's **Resync IMU** button, or a **triple tap** on a CyberFinger's joint IMU (the module on the
   back of the hand; three firm taps, 0.1–0.5 s apart, the hand otherwise still), does the same for both hands.
-  The tapped glove answers with two short pulses. The bridge's console logs each tap's size;
+  The tapped CyberFinger answers with two short pulses. The bridge's console logs each tap's size;
   `tap_threshold_g` in its `settings.json` (default 1.0 g) sets how firm a tap must be.
 
 The resync reaches the driver as a count in CFG2's `resync` byte (see [Wire protocol](#wire-protocol-v2)).
@@ -226,9 +231,9 @@ Studio in its top bar: the LED lights while the vibration is requested (brightne
 waveform is drawn at the requested frequency, and a bar shows the time left. `cf_driver_probe.py` prints
 the requests.
 
-In VR mode the bridges forward them to the glove (`bridge/glove_control.py`): a 6-byte command on the VR
+In VR mode the bridges forward them to the CyberFinger (`bridge/cyberfinger_control.py`): a 6-byte command on the VR
 service's control characteristic (`0xCF02`, write without response; amplitude, duration, frequency), merged per
-hand while a write is in flight. Firmware 1.3.3+ drives the glove's DRV2605L and ERM coin motor with it
+hand while a write is in flight. Firmware 1.3.3+ drives the CyberFinger's DRV2605L and ERM coin motor with it
 (CFV1BP boards; others ignore it). An ERM motor can't render short clicks or high frequencies, so the firmware
 stretches every pulse to at least ~35 ms, gives any non-zero amplitude enough drive to be felt, extends a
 running vibration with each new request, and pulses the motor at the requested frequency only below 30 Hz. The
@@ -259,7 +264,11 @@ tuning constants are in the firmware's `src/haptics.h`. Click a hand panel's HAP
   let the idle one overwrite CyberFinger's pose and input every frame. A custom binding needs the skeletons in the *OculusTouch* set: without
   them Resonite draws rigid canned hands at a Touch offset. Resonite builds the hand from the *Generic* set's
   pose (`/pose/raw`) and the skeleton (*WithoutController*, model space), undoing its Touch offset for the
-  hand, and ignores the tracking level. Precision grab is left to Resonite-side logic reading the skeleton.
+  hand, and ignores the tracking level. **Grabbing with the hand** is the
+  [ProximityGrab](https://github.com/SciCortex/ProximityGrab) mod's, from the skeleton: a fist grabs what's near the hand (the grab
+  sphere, not the laser), an index-thumb pinch is a precision grab at the pinch point, and the grab button grabs
+  as before. It detects the gestures itself, so leave the pinch and fist gestures unbound in SteamVR (the defaults
+  bind neither). It can be switched off from the Grabbing context menu.
   **Switching between CyberFinger and the Quest controllers** needs two Resonite mods. Resonite's renderer picks
   up a hand's device only when that device connects, and only if it holds the hand's role at that moment; its
   engine binds locomotion to the controller it registered last.
@@ -310,11 +319,11 @@ Settings live in `resources/settings/default.vrsettings` (section `driver_cyberf
 | `pose_prediction` | `0.5` | Scale of the linear velocity SteamVR extrapolates with: 0 = no prediction (live) |
 | `pose_rotation_prediction` | `0.0` | Likewise for the angular velocity; above 0 a pointing laser jitters (live) |
 | `pose_filter_gate_cm` | `5` | A pose this far beyond plausible hand motion is treated as a glitch (live) |
-| `imu_fusion` | `true` | In PASSTHROUGH, the hand orientation from the glove's joint IMU (calibrated against the headset's, which keeps it aligned), also while the hand is out of view; needs a bridge with the glove connected (live) |
+| `imu_fusion` | `true` | In PASSTHROUGH, the hand orientation from the CyberFinger's joint IMU (calibrated against the headset's, which keeps it aligned), also while the hand is out of view; needs a bridge with the CyberFinger connected (live) |
 | `yield_to_controllers` | `true` | When a hand's headset hand tracking stops while a controller for that hand is tracked (you picked the Touch controllers up), release the hand to the controller (after ~0.5 s); take it back as soon as hand tracking is live again |
 | `hide_other_hand_controllers` | `true` | While CyberFinger holds the hands, mark other drivers' hand controllers (the Touch controllers Steam Link and Virtual Desktop emulate from hand tracking) *never tracked*, so apps skip them; the headset's hand-tracking devices the whole time CyberFinger is active (CyberFinger still reads them); undone when CyberFinger is switched off |
 | `debug_captures` | `false` | Record the hand data on request (`tools/analyze_tap_capture.py --capture N`); a debugging tool |
-| `button_a` / `button_b` / `button_system` | `STSEL` / `MENU` / `NONE` | Glove buttons for A, B and the dashboard; names: `TRIGGER GRIP C D E MENU STICK STSEL`, combine with `\|` |
+| `button_a` / `button_b` / `button_system` | `STSEL` / `MENU` / `NONE` | CyberFinger buttons for A, B and the dashboard; names: `TRIGGER GRIP C D E MENU STICK STSEL`, combine with `\|` |
 | `legacy_5bit_buttons` | `false` | Decode legacy `CFGP` packets with the pre-2026 firmware button layout |
 | `fused_timeout_ms` | `150` | Fall back from FUSED to PASSTHROUGH after this silence |
 | `disconnect_after_ms` | `0` | Report the device disconnected after this long without any data (0 = never) |
@@ -329,12 +338,12 @@ Little-endian, packed, localhost. The layouts are defined in [`src/Protocol.h`](
 
 | Packet | Direction | Port | Content |
 |---|---|---|---|
-| `CFG2` (34 B) | bridge → driver | 27015 | Glove buttons (firmware bit layout), analog trigger, centred stick (+y up), battery, the pink button (`buttons2`), the IMU fusion resync count (`resync`: a new value resyncs that hand) |
+| `CFG2` (34 B) | bridge → driver | 27015 | CyberFinger buttons (firmware bit layout), analog trigger, centred stick (+y up), battery, the pink button (`buttons2`), the IMU fusion resync count (`resync`: a new value resyncs that hand) |
 | `CFHS` (1140 B) | Fusion Studio → driver | 27015 | Fused hand: `/pose/raw` + velocities in SteamVR raw space, curls/splay, 31 bones |
 | `CFOP` (2200 B) | driver → bridge | 27016 | HMD pose, driver mode per hand, Steam Link hand pose + skeleton + system button |
 | `CFHP` (36 B) | driver → bridge | 27016 | Haptic request: hand, duration, frequency, amplitude |
-| `CFIM` (96 B) | bridge → driver | 27015 | Raw glove IMU slots (quaternions, accel) per BLE report: the driver's IMU fusion and its captures (`CFOP` header flag `0x1` marks a capture) |
-| `CFGP` (12 B) | bridge → driver | 27015 | Legacy glove packet, still accepted (stick uncentred, +y down) |
+| `CFIM` (96 B) | bridge → driver | 27015 | Raw CyberFinger IMU slots (quaternions, accel) per BLE report: the driver's IMU fusion and its captures (`CFOP` header flag `0x1` marks a capture) |
+| `CFGP` (12 B) | bridge → driver | 27015 | Legacy CyberFinger packet, still accepted (stick uncentred, +y down) |
 
 Firmware button bits: `0x01` trigger, `0x02` grip, `0x04` C, `0x08` D, `0x10` E, `0x20` MENU, `0x40` stick click,
 `0x80` Start/Select.
@@ -367,7 +376,7 @@ hand every 10 s.
   (`headset hand source …: pose filter …`). With *Debug captures* on (advanced settings), record the raw stream
   with `python tools/analyze_tap_capture.py --capture 10`: it also records what CyberFinger publishes over the
   same seconds and compares the two (wrist and a laser along the index finger: jitter, error, delay, occlusion
-  holds). With the bridge running, the glove IMUs are recorded too, on the driver's clock: their timing against
+  holds). With the bridge running, the CyberFinger IMUs are recorded too, on the driver's clock: their timing against
   the optical rotation, and rotation jitter side by side. Replay a capture through the filter offline with
   `out\build\x64-Release\filter_eval.exe <capture.csv> [name=value ...]` (e.g. `beta=10 rotPrediction=0.5`):
   it reports position and laser-target (2 m) jitter and error, as displayed 0 and 40 ms ahead, for a still,
@@ -377,7 +386,7 @@ hand every 10 s.
   relative to the wrist (`fingers`). Compare streamers or settings with it; `OpticalTap: … now follows …`
   names the source.
 - **Buttons don't register** — the bridge must run in VR mode; the log shows
-  `StudioLink: first glove packet (CFG2)`.
+  `StudioLink: first CyberFinger packet (CFG2)`.
 - **Resonite: hands freeze, or no input, after switching back from the Quest controllers** — install
   [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix). The driver log should show the take-back
   (`hand tracking is back: taking the hand again`). With the plugin, its `BepInEx/LogOutput.log` shows

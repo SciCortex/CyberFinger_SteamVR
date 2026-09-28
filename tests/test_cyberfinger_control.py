@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Tests for bridge/glove_control.py: the haptic command (firmware src/vr_gatt.h VrGattHapticCommand) and the
+"""Tests for bridge/cyberfinger_control.py: the haptic command (firmware src/vr_gatt.h VrGattHapticCommand) and the
 per-hand coalescing writer.
 python -m unittest discover -s tests"""
 
@@ -13,7 +13,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "bridge"))
-import glove_control as gc  # noqa: E402
+import cyberfinger_control as gc  # noqa: E402
 
 
 class PackTest(unittest.TestCase):
@@ -48,7 +48,7 @@ class SenderTest(unittest.TestCase):
             s.attach(1, "right-char")
             self.assertTrue(s.available(1))
             self.assertFalse(s.available(0))
-            self.assertFalse(s.request(0, 0.1, 0, 1.0))                  # the left glove isn't attached
+            self.assertFalse(s.request(0, 0.1, 0, 1.0))                  # the left CyberFinger isn't attached
             s.request(1, 0.010, 0, 0.5)                                  # goes out at once
             await asyncio.sleep(0)
             await asyncio.sleep(0)

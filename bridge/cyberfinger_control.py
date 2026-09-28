@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Bridge → glove commands on the VR GATT control characteristic (0xCF02; firmware src/vr_gatt.h).
+"""Bridge → CyberFinger commands on the VR GATT control characteristic (0xCF02; firmware src/vr_gatt.h).
 
   VR_CMD_HAPTIC  0x10   cmd u8, amplitude u8 (0..255, 0 stops), duration_ms u16 LE, frequency_hz u16 LE  (6 bytes)
 
@@ -39,7 +39,7 @@ def pack_haptic_stop():
 
 
 async def write_without_response(char, payload):
-    """Write bytes to a WinRT GattCharacteristic without waiting for the glove's response. Returns success."""
+    """Write bytes to a WinRT GattCharacteristic without waiting for the CyberFinger's response. Returns success."""
     from winrt.windows.devices.bluetooth.genericattributeprofile import GattCommunicationStatus, GattWriteOption
     from winrt.windows.storage.streams import DataWriter
     writer = DataWriter()
@@ -49,7 +49,7 @@ async def write_without_response(char, payload):
 
 
 class HapticSender:
-    """Forwards haptic requests to each glove's control characteristic. attach() from the BLE loop once the
+    """Forwards haptic requests to each CyberFinger's control characteristic. attach() from the BLE loop once the
     characteristic is found; request() from any thread."""
 
     def __init__(self, log=None):
@@ -62,7 +62,7 @@ class HapticSender:
         self._failed = set()      # hands whose failure was logged
 
     def attach(self, hand, char):
-        """BLE loop: the glove's control characteristic, found."""
+        """BLE loop: the CyberFinger's control characteristic, found."""
         self._loop = asyncio.get_running_loop()
         self._chars[hand] = char
 
@@ -75,7 +75,7 @@ class HapticSender:
         return hand in self._chars and self._loop is not None
 
     def request(self, hand, duration_s, frequency_hz, amplitude):
-        """Any thread: vibrate that hand's glove. False when it isn't reachable."""
+        """Any thread: vibrate that hand's CyberFinger. False when it isn't reachable."""
         loop = self._loop
         if loop is None or hand not in self._chars:
             return False
@@ -105,13 +105,13 @@ class HapticSender:
                 ok = await write_without_response(char, pack_haptic(duration_s, frequency_hz, amplitude))
                 if ok and hand not in self._sent:
                     self._sent.add(hand)
-                    self._log(f"Haptics: forwarding to the {name} glove")
+                    self._log(f"Haptics: forwarding to the {name} CyberFinger")
                 elif not ok and hand not in self._failed:
                     self._failed.add(hand)
-                    self._log(f"Haptics: the {name} glove refused the vibration command")
+                    self._log(f"Haptics: the {name} CyberFinger refused the vibration command")
         except Exception as e:                    # noqa: BLE001 — a BLE hiccup must not kill the loop
             if hand not in self._failed:
                 self._failed.add(hand)
-                self._log(f"Haptics: writing to the {name} glove failed: {e!r}")
+                self._log(f"Haptics: writing to the {name} CyberFinger failed: {e!r}")
         finally:
             self._busy.discard(hand)

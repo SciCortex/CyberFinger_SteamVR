@@ -59,10 +59,10 @@ static void TestProtocol(const char* path) {
     CHECK(pkts.size() == 5);
     if (pkts.size() != 5) return;
 
-    CHECK(pkts[0].size() == sizeof(GlovePacket));
-    GlovePacket g;
+    CHECK(pkts[0].size() == sizeof(CyberFingerPacket));
+    CyberFingerPacket g;
     std::memcpy(&g, pkts[0].data(), sizeof(g));
-    CHECK(g.h.magic == kMagicGlove);
+    CHECK(g.h.magic == kMagicCyberFinger);
     CHECK(g.h.version == kVersion);
     CHECK(g.h.hand == 1);
     CHECK(g.h.seq == 7);
@@ -485,7 +485,7 @@ static void TestTapHold() {
     CHECK(step(true, 0.01));
     CHECK(step(true, 0.80));
     CHECK(!step(false, 0.01));
-    CHECK(step(true, 0.01));        // latched, then the glove is lost
+    CHECK(step(true, 0.01));        // latched, then the CyberFinger is lost
     CHECK(step(false, 0.05));
     g.Reset();
     CHECK(!step(false, 0.01));
@@ -585,7 +585,7 @@ static void TestImuFusionPrior() {
     CHECK(!st.calibrated && st.priorResidualDeg > 25.0);
 }
 
-// Resync. Calibrated on one heading; then the IMU's heading jumps by 110° (the glove switched off and on) —
+// Resync. Calibrated on one heading; then the IMU's heading jumps by 110° (the CyberFinger switched off and on) —
 // after a 6 s silence (resynced by itself), or with no gap and Resync() asked for (the bridge's button, a triple
 // tap). Either way the output is on the hand again within a second of the change; the mounting and the lag carry
 // over. Without the resync, the gate refuses the headset until its escape.
@@ -645,7 +645,7 @@ static void TestImuFusionResync() {
                 "%.2f s (Resync asked for), %.2f s without (-1: not within 6 s)\n", afterGap, asked, without);
 }
 
-// Off the hand. Calibrated; then the glove lies on the floor, switched on, for 60 s while the headset watches the bare
+// Off the hand. Calibrated; then the CyberFinger lies on the floor, switched on, for 60 s while the headset watches the bare
 // hand move about: found off the hand within ~3 s, no output and nothing learned meanwhile (no pairs, no escapes).
 // Put back on: the IMU turns with the hand again, it resyncs, and the output is right within ~2 s.
 static void TestImuFusionOffHand() {
@@ -664,7 +664,7 @@ static void TestImuFusionOffHand() {
     f.Reset();
     f.SetPrior({ mount, 0.03, 0 });
     const double off = 5.0, on = 65.0;
-    const Quat lying = hand(off);                               // where the glove was put down
+    const Quat lying = hand(off);                               // where the CyberFinger was put down
     double tImu = 0, tOpt = 0, foundOffAt = -1, goodSince = -1;
     size_t pairsWhileOff = 0, escapesBefore = 0;
     bool outputWhileOff = false;
@@ -705,7 +705,7 @@ static void TestImuFusionOffHand() {
 }
 
 // The gate. A hand turning slowly, calibrated from an exact prior; then the headset flips the palm (180°) for 1.5 s:
-// the output stays on the hand. Then the glove slips on the hand by 35°: the headset, in full view, is refused
+// the output stays on the hand. Then the CyberFinger slips on the hand by 35°: the headset, in full view, is refused
 // until the escape (3 s), then followed. The same slip seen only from the edge of the view (trust 0.3): never.
 static void TestImuFusionGate() {
     const double alpha = 25.0 * kPi / 180.0;
@@ -752,7 +752,7 @@ static void TestImuFusionGate() {
     CHECK(flipErr < 3.0);
     CHECK(at2 > 25.0);
     CHECK(end < 5.0 && st.escapes >= 1);
-    std::printf("  IMU fusion gate: palm flip -> error %.1f deg; glove slip 35 deg: %.0f deg after 2 s, %.1f deg after 10 s "
+    std::printf("  IMU fusion gate: palm flip -> error %.1f deg; CyberFinger slip 35 deg: %.0f deg after 2 s, %.1f deg after 10 s "
                 "(%zu escape)\n", flipErr, at2, end, st.escapes);
     st = run(0.3, flipErr, at2, end);
     CHECK(end > 25.0 && st.escapes == 0);

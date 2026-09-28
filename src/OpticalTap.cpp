@@ -514,7 +514,7 @@ void OpticalTap::CapturePose(int hand, uint8_t kind, bool changed, const vr::Dri
     Capture(r);
 }
 
-// Glove IMU: `changed` holds the slot bits; quaternions of body 1, body 2, joint (w x y z), raw accel of each
+// CyberFinger IMU: `changed` holds the slot bits; quaternions of body 1, body 2, joint (w x y z), raw accel of each
 // (x y z), and the delay from the report's BLE arrival at the bridge to its arrival here (the bridge's clock,
 // time.perf_counter(), reads the same performance counter as NowSeconds()).
 void OpticalTap::CaptureImu(const ImuPacket& p, double arrival) {

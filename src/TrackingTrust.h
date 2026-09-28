@@ -8,7 +8,7 @@
 // TrackingTrust.h — how far the headset's hand tracking is trusted, from where
 // the hands are seen
 //
-// Measured against the glove's IMU (tools/handover_check.py; capture 2026-09-27
+// Measured against the CyberFinger's IMU (tools/handover_check.py; capture 2026-09-27
 // 02:21, Quest 3 over Steam Link): the share of samples whose optical
 // orientation is > 20° off the IMU's, 7 % overall —
 //   view:        in front and below 0-12 %; beside and behind the head (> 90°

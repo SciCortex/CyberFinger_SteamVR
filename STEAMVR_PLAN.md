@@ -25,7 +25,7 @@ What the survey of the installed SteamVR, VRChat and Resonite files settled:
 | Pink wrist button | The PMU power button (IO expander pin 4). The firmware ignores short presses (`TODO emit another button press event`) and the VR report's 8 button bits are all used: exposing it needs a firmware bit and a `CFG2` field (a reserved byte is free) |
 | Quest OS button | Handled by Horizon OS; under Steam Link it never reaches SteamVR, and a driver cannot press it |
 | Gestures | The standard hand-tracking set (pinches, grasp, index point) is exposed but unbound, except thumb-pinky pinch = MENU. Values come from Steam Link's own gestures (hooked) or from the skeleton |
-| Haptics | Driver → bridge `CFHP` (36 B, UDP 27016) → glove `VR_CMD_HAPTIC` on `0xCF02` (6 B, write without response; `bridge/glove_control.py`, firmware 1.3.3 `src/haptics.cpp`: DRV2605L real-time drive of the ERM motor). VR mode only |
+| Haptics | Driver → bridge `CFHP` (36 B, UDP 27016) → CyberFinger `VR_CMD_HAPTIC` on `0xCF02` (6 B, write without response; `bridge/cyberfinger_control.py`, firmware 1.3.3 `src/haptics.cpp`: DRV2605L real-time drive of the ERM motor). VR mode only |
 | VRChat binding | Derived from VRChat's own Touch binding (`tools/generate_bindings.py`), with touch and gesture inputs removed |
 | Resonite | Picks its controller mode from the render model of the devices it registers as hands; only its Touch mode has a dash. The default binding emulates an Oculus Touch controller, with pose and skeletons bound (in Touch mode Resonite undoes its Touch offset for the hand): black button = dash, B = context menu. The streamers' own Touch controllers are marked never tracked while CyberFinger holds the hands, or Resonite registers them instead or shows them as trackers |
 | Streamers | Steam Link streams predicted, noisy hand poses (broadband 8–40 Hz); Virtual Desktop's are clean. Both present Oculus-identity Touch controllers besides the hand devices; Steam Link creates its native controller devices (`VRLINKQ3_Controller_*`) only when they're first picked up |
@@ -50,7 +50,7 @@ Items marked *check* are hypotheses to verify.
   Confirmed live: Steam Link "way better", Virtual Desktop low-noise.
 - [ ] **Driver-side IMU fusion** until the Studio's full fusion (sEMG and more) arrives: body IMU (body 1/2) to
   steady the position, joint IMU for the orientation, and dead reckoning from the IMUs while the hands are out of
-  view. The glove IMUs are ~3× quieter than the optical rotation and lead it by ~40 ms (capture 2026-09-26).
+  view. The CyberFinger IMUs are ~3× quieter than the optical rotation and lead it by ~40 ms (capture 2026-09-26).
   **Orientation done** (2026-09-27, `src/ImuFusion.h`, setting `imu_fusion`): the bridges stream `CFIM` always;
   the driver solves the joint IMU's heading and mounting (Studio's `mount_calib` model) and the optical lag from
   slow-turning, seen samples, then drives the orientation from the IMU with a slow optical correction. Offline
@@ -62,7 +62,7 @@ Items marked *check* are hypotheses to verify.
   (`%LOCALAPPDATA%\CyberFinger\imu_calibration.txt`, averaged over sessions; built-in reference default) and
   the fusion starts from them, fitting only the heading: running 0.5–0.8 s after the hand is seen (was 4–5 s
   offline, 20–60 s live with still hands). Between sessions the solved mounting scatters 14–21°, mostly tilt,
-  not the heading ambiguity: the glove's fit, or the optical hand frame's posture bias. *Check live.*
+  not the heading ambiguity: the CyberFinger's fit, or the optical hand frame's posture bias. *Check live.*
   **Lag estimate** (2026-09-27): live it swung 30–97 ms (single windows landing on 0 or the largest shift,
   averaged in). Now the windows' correlation curves are averaged (15 s memory) and, once calibrated, the angular
   velocity vectors are compared instead of the rates (which read 10–25 ms late). Offline its correction wobble
@@ -73,14 +73,14 @@ Items marked *check* are hypotheses to verify.
   more than 20° off the IMU 68 % of the time with the hand 10–20° behind the other, 17–43 % beside/behind the
   head, lost overhead. Trust (view direction × other hand in front × distance) slows the corrections and keeps poor views
   out of the calibration; a 25° gate refuses flips and glitches, with an escape after 3 s of refusing every trusted
-  view (glove slipped). On that capture the corrections turn the output 50–64 % less, worst cases improve (p90
+  view (CyberFinger slipped). On that capture the corrections turn the output 50–64 % less, worst cases improve (p90
   15.9 → 11.0°); older captures unchanged. *Check live.*
   - [ ] Trust maps for other headsets (Quest 2, Quest Pro, Quest 3S, Steam Frame, …): a 2-minute capture each,
     `tools/handover_check.py`; then a per-headset table chosen by the headset's model.
   - [ ] The hand's own orientation to the cameras: oblique views 2–3× worse in the first capture, not consistent
     across axes yet. More data.
   - [ ] **Position through gaps and bad views: the arm chain** (`tools/arm_chain_check.py`). SlimeVR elbow tracker
-    (upper-arm Slime) + forearm (glove body IMU) + hand (joint IMU): over 5–8 s gaps 12–16 cm median off against
+    (upper-arm Slime) + forearm (CyberFinger body IMU) + hand (joint IMU): over 5–8 s gaps 12–16 cm median off against
     39–42 cm for holding the position (without the Slime, elbow held to the headset: 23–30 cm). The accelerometer
     only helps for ≤ 0.5 s. Next: fit the chain online, hand over position by the same trust and gate.
 - [ ] **Skeleton simpler than OpenVR's.** Probably the same cause as the rigid hands seen later: in Touch mode
@@ -91,7 +91,7 @@ Items marked *check* are hypotheses to verify.
 ### Devices and rendering
 
 - [ ] **Red dot at the wrist** in the SteamVR dashboard: the placeholder render model (pink sphere,
-  `tools/make_rendermodels.py`). Replace it with a glove model or make it invisible (Q5).
+  `tools/make_rendermodels.py`). Replace it with a CyberFinger model or make it invisible (Q5).
 - [ ] **Hand skeleton in the SteamVR dashboard**, as Steam Link's own hands show.
 - [x] **Vive tracker shown in Resonite.** The streamers' Touch controllers lose the hand roles to CyberFinger and
   Resonite maps role-less controllers as trackers. Fixed: marked `Prop_NeverTracked` while CyberFinger holds their
@@ -153,18 +153,18 @@ Items marked *check* are hypotheses to verify.
   republishes (the first try, republishing inside the hook chain, hung vrserver). Works: clean hands at 90 Hz,
   binding, handoff.
 
-### Studio and glove
+### Studio and CyberFinger
 
-- [x] **Second glove IMU missing** in both bridges: firmware v1.3 sends a variable-length report (absent IMU slots
-  omitted), which the bridges took for the old one-quaternion report. `bridge/glove_report.py` decodes every
+- [x] **Second CyberFinger IMU missing** in both bridges: firmware v1.3 sends a variable-length report (absent IMU slots
+  omitted), which the bridges took for the old one-quaternion report. `bridge/cyberfinger_report.py` decodes every
   revision; the Fusion Studio's wrist slot falls back to body 1 when body 2 isn't fitted.
 - [x] Firmware: the body IMU (the QMI, onboard; the ICM body is extra hardware) lagged the joint IMU by 31–38 ms.
   Its LPF (widest mode, 13.37% of ODR) sat at ~15 Hz: now 448 Hz ODR (~60 Hz), every sample read from the FIFO
   into VQF, Wire buffer 1024 (the FIFO read overran the 128-byte default: boot loop). Firmware 1.3.2-beta, both
-  gloves: 3–5 ms behind the joint IMU (capture 2026-09-27); rotation jitter at rest 0.03° → 0.04–0.06°.
+  CyberFingers: 3–5 ms behind the joint IMU (capture 2026-09-27); rotation jitter at rest 0.03° → 0.04–0.06°.
 - [ ] Phase 1b, Studio side: §7.1 split compute from drawing, §7.3 `SteamVRContextSource`, §7.4 `SteamVROutput`.
-- [x] Haptics to the glove over GATT (2026-09-27): both bridges forward the driver's requests in VR mode
-  (`glove_control.py`, coalesced per hand); firmware 1.3.3 drives the motor from the main loop (the DRV2605L
+- [x] Haptics to the CyberFinger over GATT (2026-09-27): both bridges forward the driver's requests in VR mode
+  (`cyberfinger_control.py`, coalesced per hand); firmware 1.3.3 drives the motor from the main loop (the DRV2605L
   shares I2C with the IMUs). *Check live:* the feel of the ERM constants (35 ms minimum pulse, drive 40–127).
 
 ### Release and repos
@@ -173,12 +173,12 @@ Items marked *check* are hypotheses to verify.
 - [ ] `CyberFinger_SteamVR` is a second clone of the same repository: retire it (its uncommitted copies are all in
   the branch), or replace it with a `git worktree` of `main`. No more copying files between folders.
 - [ ] Pull request `steamvr-driver-v2` → `main` (brings the Fusion Studio too, merged in PR #1).
-- [ ] Retire `origin/steamvr` (July): superseded (its variable-length IMU parser is `glove_report.py` now, its
+- [ ] Retire `origin/steamvr` (July): superseded (its variable-length IMU parser is `cyberfinger_report.py` now, its
   `vr_controller.py` and driver changes target the v1 protocol and `MergedController`). Tag it before deleting.
 - [ ] Try the installer here: upgrade 1.4.1 → 2.0.0 in place, dev registration replaced.
 - [ ] **Instruction manual:** revise and expand once the current work settles (pink buttons, haptics, the black
   button's long press and FluxActions, the IMU fusion, the arm chain). Source `docs/manual/manual.html` (labelled
-  glove images, callouts in the images' pixel coordinates); `python docs/manual/build_manual.py [--single-file]`
+  CyberFinger images, callouts in the images' pixel coordinates); `python docs/manual/build_manual.py [--single-file]`
   rebuilds the standalone page. First version published as a private claude.ai page (2026-09-27).
 - [ ] **Web version of the manual:** host it (e.g. GitHub Pages from `docs/`), link it from the README, the
   installer and the bridge.
@@ -189,9 +189,9 @@ Each hand appears to SteamVR applications as one controller in the `/user/hand/l
 
 | Channel | Source |
 |---|---|
-| 6-DoF pose | Fusion Studio wrist pose: camera while the hand is in view, glove IMUs + position model when it is not |
+| 6-DoF pose | Fusion Studio wrist pose: camera while the hand is in view, CyberFinger IMUs + position model when it is not |
 | 31-bone hand skeleton | Fusion Studio hand: camera fingers where seen, EMG regressor or recognised key posture elsewhere |
-| Inputs | The glove's controls, per hand: push-stick (x, y, click), analog trigger, grip, 2–3 buttons. No touchpad |
+| Inputs | The CyberFinger's controls, per hand: push-stick (x, y, click), analog trigger, grip, 2–3 buttons. No touchpad |
 
 Applications must not see a second pair of hands from Steam Link.
 
@@ -212,7 +212,7 @@ no hand shapes into inputs. (VRChat's own pinch controls come on at the default 
 - The driver registers two controllers, `CYBERFINGER_L`/`_R`, listens on UDP 27015, copies the pose of Steam Link's
   hand devices ([MergedController.cpp:429](src/MergedController.cpp#L429), serial match `Hand_Left`/`Hand_Right`)
   and synthesizes a skeleton from button state ([SkeletonComposer.cpp](src/SkeletonComposer.cpp)).
-- The Studio's glove connection already sends a `CFGP` button/stick packet to the driver on every BLE report
+- The Studio's CyberFinger connection already sends a `CFGP` button/stick packet to the driver on every BLE report
   (`VRMode`, [fusion_studio.py:873](bridge/fusion_studio.py#L873)).
 - The fusion (`FusionStudioApp._st_tick`, [fusion_studio.py:3012](bridge/fusion_studio.py#L3012)) already computes
   everything the driver needs: wrist position `S["wrist"]`, hand rotation `S["hand_R"]`, 26 joints in the hand frame
@@ -293,7 +293,7 @@ Quest headset ──Steam Link──► SteamVR (vrserver.exe)
    ┌───────────────▼─────────────────────────────────────────┐
    │ driver_cyberfinger                                       │
    │   OpticalTap ─────── CFOP context (UDP :27016) ──────────────────► Fusion Studio
-   │   CyberFinger L/R ◄─ CFHS fused hand + CFG2 glove (UDP :27015) ◄── (glove BLE, EMG,
+   │   CyberFinger L/R ◄─ CFHS fused hand + CFG2 CyberFinger (UDP :27015) ◄── (CyberFinger BLE, EMG,
    │   (hand roles: pose, skeleton, stick, buttons)           │          SteamVRContextSource,
    └───────────────┬─────────────────────────────────────────┘          fusion → SteamVROutput)
                    ▼
@@ -333,8 +333,8 @@ struct CfBone {               // same layout as vr::VRBoneTransform_t
     float qw, qx, qy, qz;
 };
 
-// CFG2 — glove input, Studio → driver, UDP 27015, on every BLE report
-struct CfGlove {
+// CFG2 — CyberFinger input, Studio → driver, UDP 27015, on every BLE report
+struct CfCyberFinger {
     CfHeader h;
     uint8_t  buttons;         // TRIG 0x01 GRIP 0x02 C 0x04 D 0x08 E 0x10 MENU 0x20 JCLK 0x40 STSEL 0x80
     uint8_t  trigger;         // 0..255
@@ -412,9 +412,9 @@ Component names match the Index's, so the remapping needs few rules:
 | `/input/a/click`, `/input/b/click`, `/input/system/click` | the 2–3 extra buttons through `button_map` (§14 Q1); system opens the SteamVR dashboard |
 | `/input/finger/index` … `/pinky` | fused curls |
 | `/input/skeleton/left` or `/right` | base pose `/pose/raw`, `VRSkeletalTracking_Full` (setting; D2), grip limit `nullptr` |
-| `/output/haptic` | created; forwarded to the Studio if the glove ever gets a motor |
+| `/output/haptic` | created; forwarded to the Studio if the CyberFinger ever gets a motor |
 
-There are no trackpad, touch or force components, because the glove has no such sensors; the remapping converts
+There are no trackpad, touch or force components, because the CyberFinger has no such sensors; the remapping converts
 Index bindings (§9.2). Update both motion ranges every frame, and once immediately after creating the skeleton
 component, since SteamVR otherwise treats skeletal input as inactive.
 
@@ -509,7 +509,7 @@ alignment.
 
 - Move the fusion state out of the app into `bridge/fusion_engine.py`: fusers, mount calibration, hybrid tracker,
   pose regressor, key postures, filters and last-known values. `HandFusion(right, has_emg)` is instantiated for both
-  hands. The non-EMG hand runs camera + glove IMUs + position model.
+  hands. The non-EMG hand runs camera + CyberFinger IMUs + position model.
 - Run a worker thread triggered by each `CFOP` frame (event-driven, ≤ 120 Hz) instead of Tk `after()`. The UI reads
   the latest `S`.
 - Headless, the source switches come from config.
@@ -540,7 +540,7 @@ It implements the duck-typed source contract that `_gate_v2`, `_st_tick` and the
 6. Take flags and confidences from `S` (`src_pos`, gate type, finger visibility `fc`).
 7. Pack the `CFHS` and send it.
 
-### 7.5 Glove stream
+### 7.5 CyberFinger stream
 
 `VRMode` sends `CFG2`: the full 8-bit buttons and the centred, deadzoned stick from `HandState._joy_deadzoned`.
 
@@ -760,7 +760,7 @@ Tests:
 
 ## 10. Timing
 
-- **Rates.** Glove: one packet per BLE report. Fusion: 90 Hz target (the 60 Hz Tk tick in Phase 1). `CFOP`:
+- **Rates.** CyberFinger: one packet per BLE report. Fusion: 90 Hz target (the 60 Hz Tk tick in Phase 1). `CFOP`:
   ≤ 120 Hz. Driver pose updates: at least the display rate.
 - **Added-latency budget, relative to plain Steam Link.**
 
@@ -791,7 +791,7 @@ Integration:
   curls, and compares them with what the Studio sent. They should match bone for bone.
 - The driver log (`vrserver.txt`) records mode changes, and, every 10 s, packet rates and a latency histogram (rate
   limited).
-- Soak test: a 2-hour session with headset standby cycles, Studio restarts, SteamVR restarts and glove disconnects.
+- Soak test: a 2-hour session with headset standby cycles, Studio restarts, SteamVR restarts and CyberFinger disconnects.
   Pass means no role flip-flops and no stuck poses.
 
 In-application checklists for VRChat, Resonite, and one Index-aware title (Half-Life: Alyx, or SteamVR Home).
@@ -822,7 +822,7 @@ In-application checklists for VRChat, Resonite, and one Index-aware title (Half-
 Done when:
 - in VRChat, Resonite and an Index-aware title, CyberFinger holds both hands with Steam Link's optical pose and
   skeleton, the stick and buttons work, and no duplicate hands appear;
-- the dashboard opens from the glove.
+- the dashboard opens from the CyberFinger.
 
 ### Phase 1b: fusion link (right hand fused, Stage A)
 
@@ -882,7 +882,7 @@ that is out of scope here.
 3. **Hook in distribution.** Is a vrserver hook acceptable, or should the first release be the no-hook variant?
 4. **Left-arm EMG.** Is a second armband planned? It decides how much of Phase 2's per-hand engine the left hand
    uses.
-5. **Render model.** Invisible, or a small visible glove/puck? Emulated titles show Index models regardless.
+5. **Render model.** Invisible, or a small visible CyberFinger/puck? Emulated titles show Index models regardless.
 6. **Resonite inputs.** Skeleton only for the custom grab and pinch, or also the optional pinch/grab components?
 
 ## 15. References

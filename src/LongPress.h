@@ -49,7 +49,7 @@ public:
     // The long press has fired and the button is still held (until the release, which Update reports).
     bool Held() const { return m_state == State::Fired; }
 
-    // Button state unknown (glove lost, device released): nothing pressed.
+    // Button state unknown (CyberFinger lost, device released): nothing pressed.
     void Reset() { m_state = State::Idle; }
 
 private:

@@ -6,7 +6,7 @@
 
 Custom, calibratable EMG gesture recognition whose output is a full 26-joint hand
 skeleton (the SAME representation as the Quest optical hand), so it can be drawn in
-SkeletonPanel, oriented by the glove IMU, and later fused with optical.
+SkeletonPanel, oriented by the CyberFinger IMU, and later fused with optical.
 
 Calibration (option A): while the user holds a gesture, we record BOTH the EMG
 time-domain features AND the optical 26-joint pose (wrist-relative, model space, as

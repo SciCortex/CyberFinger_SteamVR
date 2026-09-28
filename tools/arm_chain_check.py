@@ -2,13 +2,13 @@
 
     python tools/arm_chain_check.py <capture.csv>
 
-Needs a capture with the glove IMUs (bridge running), the headset and SlimeVR's elbow trackers (kinds 7, 8). Per
+Needs a capture with the CyberFinger IMUs (bridge running), the headset and SlimeVR's elbow trackers (kinds 7, 8). Per
 hand, on the frames where the headset sees the hand (the skeleton changed within 80 ms, the pose not dated in the
 past), it fits the chain
 
     hand point = elbow + R_forearm · f + R_hand · h + c
 
-R_forearm: the glove's body IMU in SteamVR's frame (its heading fitted); R_hand: the glove's joint IMU calibrated
+R_forearm: the CyberFinger's body IMU in SteamVR's frame (its heading fitted); R_hand: the CyberFinger's joint IMU calibrated
 against the headset's hand (heading and mounting, as the driver's ImuFusion does); f, h, c: constant vectors (the
 elbow → wrist in the forearm sensor's frame, the wrist → tracked point in the hand's, and a fixed offset for
 SlimeVR's elbow). The fit's residual is how well the chain explains the hand. Then simulated gaps of D seconds
@@ -102,7 +102,7 @@ def main():
         el = rows[(rows[:, 1] == hand) & (rows[:, 2] == 8)]
         im = rows[(rows[:, 1] == hand) & (rows[:, 2] == 6) & ((rows[:, 3].astype(int) & 5) == 5)]
         if len(el) < 100 or len(im) < 100 or len(o) < 100:
-            print(f"  {name}: needs the elbow tracker, both glove IMUs and the hand")
+            print(f"  {name}: needs the elbow tracker, both CyberFinger IMUs and the hand")
             continue
         dt = 0.01
         t0 = max(o[0, 0], el[0, 0], im[0, 0], hmd[0, 0]) + 0.5

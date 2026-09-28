@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-only
-"""Camera-taught MOUNTING calibration of a glove IMU (numpy only).
+"""Camera-taught MOUNTING calibration of a CyberFinger IMU (numpy only).
 
 The bridge's OrientationFuser holds a ONE-sided offset  R_hand = R_off · R_imu.  That form absorbs the sensor's mounting
 on the world side, so it is exact only at the pose where it was set and degrades as the segment rotates (measured on the

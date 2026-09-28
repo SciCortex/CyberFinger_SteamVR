@@ -83,7 +83,7 @@
             {
                 "name": "/settings/driver_cyberfinger/imu_fusion",
                 "control": "toggle",
-                "label": "Hand orientation from the glove's IMU (the headset keeps it aligned; also through occlusions)"
+                "label": "Hand orientation from the CyberFinger's IMU (the headset keeps it aligned; also through occlusions)"
             },
             {
                 "name": "/settings/driver_cyberfinger/yield_to_controllers",
@@ -136,7 +136,7 @@
             {
                 "name": "/settings/driver_cyberfinger/button_system",
                 "control": "select",
-                "label": "Glove button for the SteamVR dashboard",
+                "label": "CyberFinger button for the SteamVR dashboard",
                 "requires_restart": true,
                 "options": [
                     {

@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-only
 
-"""Decode the glove's VR input report (GATT characteristic 0xCF01), for every firmware revision.
+"""Decode the CyberFinger's VR input report (GATT characteristic 0xCF01), for every firmware revision.
 
 Each revision keeps the frozen 28-byte prefix (CyberFingerFW_ESP32/src/vr_gatt.h):
 
@@ -12,9 +12,9 @@ Each revision keeps the frozen 28-byte prefix (CyberFingerFW_ESP32/src/vr_gatt.h
              absent slots hold identity / zero
   29 .. 79   variable tail (v1.3.0 and later): imu_present, then only the slots it flags, in slot order:
              body 1 accel (its quaternion is the prefix's), body 2 quaternion + accel, joint quaternion + accel.
-             A glove with body 1 + joint sends 57 bytes.
+             A CyberFinger with body 1 + joint sends 57 bytes.
   + 1        extension byte (v1.3.3 and later, flagged by imu_present bit 7): buttons beyond the frozen 8 —
-             bit 0 the pink power key (a short press, reported as a ~80 ms click). A glove with body 1 + joint
+             bit 0 the pink power key (a short press, reported as a ~80 ms click). A CyberFinger with body 1 + joint
              sends 58 bytes.
 
 Only 79 bytes fits both tails (all three slots, with accel); there the layout whose quaternions are unit wins.

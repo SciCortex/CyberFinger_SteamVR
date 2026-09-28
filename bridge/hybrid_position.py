@@ -19,7 +19,7 @@ Measured in the position lab (leave-one-clip-out, head turned away after the los
     this method 11.3 / 12.7 / 14.6 / 16.5 / 17.8 cm   ·   learned XYZ + anchor (Learned Position tab) 20.1 / 19.7 / 22.7 /
     24.5 / 26.1   ·   FK elbow held 18.4 / 20.4 / 26.1 / 31.5 / 36.2   ·   freeze 25.9 / 27.8 / 36.0 / 43.6 / 51.4
 
-Frames (verified on recordings, see fk_position.py): WORLD = OpenXR y-up; glove quats [w,x,y,z]; `qoff` = the wrist fuser's
+Frames (verified on recordings, see fk_position.py): WORLD = OpenXR y-up; CyberFinger quats [w,x,y,z]; `qoff` = the wrist fuser's
 camera↔IMU offset so R(qoff ⊗ qw) has columns (wrist→knuckles ≈ forearm axis, side, normal) in WORLD; body frame rows
 Bm = [right, up, forward]; neck = hmd_p + hmd_R·(0, −0.10, +0.08); Wb = Bm·(wrist − neck).
 The vectorised feature code below is the SAME code the nets were trained with (train_hybrid_position.py imports it)."""

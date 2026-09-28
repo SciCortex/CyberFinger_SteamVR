@@ -10,13 +10,13 @@
 // Little-endian, packed, loopback only. Mirrored in bridge/cf_protocol.py;
 // tests/test_protocol.* keep the two in sync with golden vectors.
 //
-//   CFG2  bridge → driver  glove buttons / stick / trigger, one per BLE report
+//   CFG2  bridge → driver  CyberFinger buttons / stick / trigger, one per BLE report
 //   CFHS  bridge → driver  fused hand state (pose + 31 bones), per fusion tick
 //   CFOP  driver → bridge  HMD pose + optical tap (headset hand tracking)
 //   CFHP  driver → bridge  haptic vibration request from an application
-//   CFIM  bridge → driver  raw glove IMU slots, one per BLE report (the
+//   CFIM  bridge → driver  raw CyberFinger IMU slots, one per BLE report (the
 //                          driver's own IMU fusion, and its captures)
-//   CFGP  legacy glove packet (12 bytes, no header), still accepted
+//   CFGP  legacy CyberFinger packet (12 bytes, no header), still accepted
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include <cstdint>
@@ -28,7 +28,7 @@ constexpr uint32_t Magic(char a, char b, char c, char d) {
            (uint32_t(uint8_t(c)) << 16) | (uint32_t(uint8_t(d)) << 24);
 }
 
-constexpr uint32_t kMagicGlove     = Magic('C', 'F', 'G', '2');
+constexpr uint32_t kMagicCyberFinger     = Magic('C', 'F', 'G', '2');
 constexpr uint32_t kMagicHandState = Magic('C', 'F', 'H', 'S');
 constexpr uint32_t kMagicContext   = Magic('C', 'F', 'O', 'P');
 constexpr uint32_t kMagicHaptic    = Magic('C', 'F', 'H', 'P');
@@ -38,7 +38,7 @@ constexpr uint8_t  kVersion        = 1;
 constexpr int      kNumBones       = 31;
 
 // Firmware button bits (current "VR mode" firmware layout).
-enum GloveButton : uint8_t {
+enum CyberFingerButton : uint8_t {
     kBtnTrigger     = 0x01,
     kBtnGrip        = 0x02,
     kBtnC           = 0x04,
@@ -50,7 +50,7 @@ enum GloveButton : uint8_t {
 };
 
 // CFG2 buttons2: buttons beyond the first byte (firmware 1.3.3+, the report's extension byte).
-enum GloveButton2 : uint8_t {
+enum CyberFingerButton2 : uint8_t {
     kBtn2Pink       = 0x01,   // the pink power key, a short press as a click: left = SteamVR's system button
 };
 
@@ -67,7 +67,7 @@ enum ContextFlags : uint16_t {
     kCtxCapturing = 0x0001,   // a capture is running (informational)
 };
 
-// CFIM slot bits (the glove's own layout)
+// CFIM slot bits (the CyberFinger's own layout)
 enum ImuSlot : uint8_t {
     kImuBody1 = 0x01,
     kImuBody2 = 0x02,         // same spot as body 1, other chip
@@ -100,13 +100,13 @@ struct Bone {                 // same layout as vr::VRBoneTransform_t
     float qw, qx, qy, qz;
 };
 
-struct GlovePacket {          // 'CFG2'
+struct CyberFingerPacket {          // 'CFG2'
     Header  h;
-    uint8_t buttons;          // GloveButton bits
+    uint8_t buttons;          // CyberFingerButton bits
     uint8_t trigger;          // 0..255 analog
     int16_t joy_x, joy_y;     // centred + deadzoned by the sender, ±32767, +y = up
     uint8_t battery_pct;
-    uint8_t buttons2;         // GloveButton2 bits (0 from older bridges)
+    uint8_t buttons2;         // CyberFingerButton2 bits (0 from older bridges)
     uint8_t resync;           // a count the bridge bumps to resync this hand's IMU fusion (its button, a triple tap)
     uint8_t reserved;
 };
@@ -162,17 +162,17 @@ struct HapticPacket {         // 'CFHP', one per SteamVR vibration event for our
     float  amplitude;         // 0..1
 };
 
-struct ImuPacket {            // 'CFIM': seq = the glove report's; age_us = since that report arrived over BLE
+struct ImuPacket {            // 'CFIM': seq = the CyberFinger report's; age_us = since that report arrived over BLE
     Header  h;                // hand
     uint8_t present;          // ImuSlot bits
     uint8_t has_accel;        // accel[] filled (newer firmware)
     uint8_t reserved0[2];
-    float   quat[3][4];       // body 1, body 2, joint: w, x, y, z, as the glove fuses them
+    float   quat[3][4];       // body 1, body 2, joint: w, x, y, z, as the CyberFinger fuses them
     int16_t accel[3][3];      // raw sensor-frame acceleration per slot, firmware counts
     uint8_t reserved1[2];
 };
 
-struct LegacyGlovePacket {    // 'CFGP' (no header)
+struct LegacyCyberFingerPacket {    // 'CFGP' (no header)
     uint32_t magic;
     uint8_t  hand;
     uint8_t  buttons;
@@ -185,12 +185,12 @@ struct LegacyGlovePacket {    // 'CFGP' (no header)
 
 static_assert(sizeof(Header) == 24, "Header layout");
 static_assert(sizeof(Bone) == 32, "Bone layout");
-static_assert(sizeof(GlovePacket) == 34, "GlovePacket layout");
+static_assert(sizeof(CyberFingerPacket) == 34, "CyberFingerPacket layout");
 static_assert(sizeof(HandStatePacket) == 1140, "HandStatePacket layout");
 static_assert(sizeof(TapHand) == 1056, "TapHand layout");
 static_assert(sizeof(ContextPacket) == 2200, "ContextPacket layout");
 static_assert(sizeof(HapticPacket) == 36, "HapticPacket layout");
 static_assert(sizeof(ImuPacket) == 96, "ImuPacket layout");
-static_assert(sizeof(LegacyGlovePacket) == 12, "LegacyGlovePacket layout");
+static_assert(sizeof(LegacyCyberFingerPacket) == 12, "LegacyCyberFingerPacket layout");
 
 } // namespace cf

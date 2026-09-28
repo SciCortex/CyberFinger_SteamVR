@@ -8,7 +8,7 @@
 // CyberFingerController.h — one CyberFinger hand as a SteamVR controller
 //
 // Holds the /user/hand/left|right role (high hand-selection priority) and
-// exposes the glove's physical inputs plus a 31-bone skeleton. Per frame it
+// exposes the CyberFinger's physical inputs plus a 31-bone skeleton. Per frame it
 // picks one pose/skeleton source:
 //
 //   FUSED        CFHS from the Fusion Studio (camera + IMU + EMG)
@@ -45,7 +45,7 @@ public:
         vr::EVRSkeletalTrackingLevel trackingLevel = vr::VRSkeletalTracking_Full;
         int32_t handPriority = 1000;
         double  grabTapTime = 0.2;          // s: a shorter grip press latches /input/grab (0 = never)
-        uint8_t maskA = kBtnStartSelect;    // glove buttons driving /input/a/click
+        uint8_t maskA = kBtnStartSelect;    // CyberFinger buttons driving /input/a/click
         uint8_t maskB = kBtnMenu;           // … /input/b/click (context menu, like Touch B/Y)
         uint8_t maskSystem = 0;             // … /input/system/click (dashboard)
         bool    forwardTapSystem = false;   // headset hand's system button → ours (the left pink button does it)
@@ -67,7 +67,7 @@ public:
     vr::DriverPose_t GetPose() override { return m_pose; }
 
     // active = false reports the device disconnected (the setting "active"), releasing the hand role.
-    void Update(const GloveState& glove, const HandStateSample& fused, const TapHandSnapshot& tap, double now,
+    void Update(const CyberFingerState& cyberFinger, const HandStateSample& fused, const TapHandSnapshot& tap, double now,
                 bool active = true);
 
     // The headset hand's own updates, as they arrive (ServerProvider's republish thread).
@@ -82,7 +82,7 @@ public:
     // Whether the current source's poses need it (Steam Link's do; Virtual Desktop's are clean). Frame loop.
     void SetSourceFiltered(bool filtered, const std::string& sourceType);
 
-    // The glove's joint IMU fused with the headset's orientation (owned by ServerProvider); used in PASSTHROUGH
+    // The CyberFinger's joint IMU fused with the headset's orientation (owned by ServerProvider); used in PASSTHROUGH
     // once calibrated. The FUSED mode (the Studio's own fusion) never uses it.
     void SetImuFusion(ImuFusion* fusion) { m_imu = fusion; }
     void SetImuFusionEnabled(bool on) { m_imuEnabled.store(on, std::memory_order_relaxed); }
@@ -106,10 +106,10 @@ public:
 private:
     bool Right() const { return m_hand == 1; }
     Xform LinkToOurs();                   // tap source's /pose/raw → ours
-    void PassthroughPose(const TapHandSnapshot& tap, const GloveState& glove, double now,
+    void PassthroughPose(const TapHandSnapshot& tap, const CyberFingerState& cyberFinger, double now,
                          Xform& raw, Vec3& lin, Vec3& ang, vr::VRBoneTransform_t* bones, float* curls);
-    void GloveCurls(const GloveState& glove, bool fresh, float curls[5]) const;
-    void SubmitInputs(const GloveState& glove, bool gloveFresh, bool live, const TapHandSnapshot& tap,
+    void CyberFingerCurls(const CyberFingerState& cyberFinger, bool fresh, float curls[5]) const;
+    void SubmitInputs(const CyberFingerState& cyberFinger, bool cyberFingerFresh, bool live, const TapHandSnapshot& tap,
                       const float curls[5], const HandGestures& gestures, double now);
     void SubmitSkeleton(const vr::VRBoneTransform_t* bones);
 

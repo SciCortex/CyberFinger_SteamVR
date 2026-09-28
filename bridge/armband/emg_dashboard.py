@@ -65,7 +65,7 @@ STATUS_MAP = {
 IMU_XYZ = ["#3987e5", "#199e70", "#d95926"]
 
 # latest hand pose shared with the optional in-dashboard web-hand server.
-# hand_quat / wrist_quat (each [w,x,y,z] or None) carry glove-IMU orientation for
+# hand_quat / wrist_quat (each [w,x,y,z] or None) carry CyberFinger-IMU orientation for
 # the browser hand; imu_ok gates whether hand3d.html drives rotation from them.
 # They are written by the host GUI (CyberFinger), not by the dashboard itself.
 _WEB_POSE = {"fingers": {f: 0.0 for f in ["thumb", "index", "middle", "ring", "pinky"]},

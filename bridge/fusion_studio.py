@@ -1,8 +1,8 @@
 """CyberFinger Fusion Studio — a single-window application that fuses the headset's optical hand tracking (OpenXR),
-the glove IMUs (BLE) and the MindRove forearm EMG into one live view of the body, the arm and the whole hand, with
+the CyberFinger IMUs (BLE) and the MindRove forearm EMG into one live view of the body, the arm and the whole hand, with
 per-source switches, hand-position prediction out of view, EMG finger posture and key-posture recognition.
 
-Run:  python fusion_studio.py      (start the glove, the EMG armband and the headset camera preview from the top bar)
+Run:  python fusion_studio.py      (start the CyberFinger, the EMG armband and the headset camera preview from the top bar)
 """
 import asyncio
 import threading
@@ -18,9 +18,9 @@ import queue
 import json
 import math
 import csv
-import cf_protocol                                   # SteamVR driver wire protocol (CFG2 glove packets)
-import glove_report                                  # the glove's BLE input report, every firmware revision
-import glove_control                                 # bridge → glove commands (haptics)
+import cf_protocol                                   # SteamVR driver wire protocol (CFG2 CyberFinger packets)
+import cyberfinger_report                                  # the CyberFinger's BLE input report, every firmware revision
+import cyberfinger_control                                 # bridge → CyberFinger commands (haptics)
 import pink_button                                   # the right pink button: Windows microphone mute
 from driver_link import DriverLink                   # driver → bridge: haptic requests, driver status
 from haptics_view import describe as describe_haptic, draw_haptic_meter
@@ -126,7 +126,7 @@ except Exception:
     _ocal = None                      # a T3 failure disables ONLY the Live Calib tab, never core fusion
 VR_SERVICE_UUID = "0000cf00-0000-1000-8000-00805f9b34fb"
 VR_INPUT_UUID   = "0000cf01-0000-1000-8000-00805f9b34fb"
-INPUT_REPORT_SIZE = glove_report.BASE.size   # shortest valid report; layouts in glove_report.py
+INPUT_REPORT_SIZE = cyberfinger_report.BASE.size   # shortest valid report; layouts in cyberfinger_report.py
 ZERO_ACCEL = (0, 0, 0)
 ACCEL_LSB_PER_G = 2048.0  # VR_ACCEL_LSB_PER_G — ±16g on every sensor
 GRAVITY_MS2 = 9.80665
@@ -141,10 +141,10 @@ IMU_SLOT_LABELS = (
 )
 IDENTITY_QUAT = (1.0, 0.0, 0.0, 0.0)
 _SYNC_IMU_COLS = ["gate_type", "imu_present",
-                  "g_qw", "g_qx", "g_qy", "g_qz",       # glove BODY-1 quat [w,x,y,z]
-                  "g2_qw", "g2_qx", "g2_qy", "g2_qz",   # glove BODY-2 quat
-                  "gj_qw", "gj_qx", "gj_qy", "gj_qz",   # glove JOINT (back-of-hand) quat
-                  "g_ax", "g_ay", "g_az"]               # glove BODY accel
+                  "g_qw", "g_qx", "g_qy", "g_qz",       # CyberFinger BODY-1 quat [w,x,y,z]
+                  "g2_qw", "g2_qx", "g2_qy", "g2_qz",   # CyberFinger BODY-2 quat
+                  "gj_qw", "gj_qx", "gj_qy", "gj_qz",   # CyberFinger JOINT (back-of-hand) quat
+                  "g_ax", "g_ay", "g_az"]               # CyberFinger BODY accel
 _SYNC_EMG_COLS = [f"emg{c}" for c in range(8)] + \
                  ["arm_ax", "arm_ay", "arm_az", "arm_gx", "arm_gy", "arm_gz", "emg_present"]
 SLIME_DEFAULT_HOST = "127.0.0.1"
@@ -304,7 +304,7 @@ def _generate_fallback_icon(color):
 class HandState:
     def __init__(self):
         self.buttons = 0
-        self.buttons2 = 0          # the extension byte's buttons (glove_report.PINK)
+        self.buttons2 = 0          # the extension byte's buttons (cyberfinger_report.PINK)
         self.joy_x = 0
         self.joy_y = 0
         self.joy_cx = 0          # stick center offset (auto-captured at rest on connect)
@@ -362,7 +362,7 @@ class HandState:
         return 1.0 if (self.buttons & BTN_TRIGGER) else 0.0
 
     def reset_link(self):
-        """Clear per-connection capability flags before (re)attaching a glove."""
+        """Clear per-connection capability flags before (re)attaching a CyberFinger."""
         self.imu_present = 0
         self._joy_cal = []          # re-capture the stick center on the next connect
         self.joy_cx = self.joy_cy = 0
@@ -489,7 +489,7 @@ class BLEManager:
         self._polling_chars = []
         self._ble_devices = []     # track opened BLE device handles
         self._gatt_services = []   # track opened GATT service handles
-        self.haptics = glove_control.HapticSender(log=app.log)   # vibration commands to the gloves
+        self.haptics = cyberfinger_control.HapticSender(log=app.log)   # vibration commands to the CyberFingers
 
     def start(self):
         self._running = True
@@ -607,8 +607,8 @@ class BLEManager:
             return
         t_rx = time.perf_counter()
 
-        # Every firmware revision's layout, including v1.3's variable-length IMU tail (glove_report.py).
-        r = glove_report.decode(data)
+        # Every firmware revision's layout, including v1.3's variable-length IMU tail (cyberfinger_report.py).
+        r = cyberfinger_report.decode(data)
         hand, buttons, joy_x, joy_y, trigger, battery, seq = (
             r.hand, r.buttons, r.joy_x, r.joy_y, r.trigger, r.battery, r.seq)
         present, quats, accels, has_accel = r.present, r.quats, r.accels, r.has_accel
@@ -636,7 +636,7 @@ class BLEManager:
         state.joy_y = joy_y
         # Auto-center the stick from the first ~20 packets after connect (assumed at rest):
         # take the median as the zero point, so an offset/miswired stick (reads e.g.
-        # -16000,-16000 at rest, like the RIGHT glove) is corrected to read center.
+        # -16000,-16000 at rest, like the RIGHT CyberFinger) is corrected to read center.
         if len(state._joy_cal) < 20:
             state._joy_cal.append((joy_x, joy_y))
             if len(state._joy_cal) == 20:
@@ -717,7 +717,7 @@ class BLEManager:
     async def _read_firmware_revision(self, label, services):
         """Best-effort read of the exact flashed firmware version from the
         standard BLE Device Information Service (0x180A) → Firmware Revision
-        String (0x2A26). The glove's firmware publishes FW_VERSION_FULL_STR there
+        String (0x2A26). The CyberFinger's firmware publishes FW_VERSION_FULL_STR there
         (e.g. "1.3.1-beta+<git-hash>"). Never raises into the connect path."""
         try:
             from winrt.windows.devices.bluetooth.genericattributeprofile import \
@@ -801,7 +801,7 @@ class BLEManager:
         if not vr_input:
             self.app.log(f"{label}: CF01 characteristic not found")
             return None
-        # The control characteristic: haptics go there (glove_control.py)
+        # The control characteristic: haptics go there (cyberfinger_control.py)
         vr_ctrl = next((c for c in char_result.characteristics if "cf02" in str(c.uuid).lower()), None)
         if vr_ctrl is not None:
             self.haptics.attach(0 if label == "LEFT" else 1, vr_ctrl)
@@ -853,7 +853,7 @@ class BLEManager:
 
 
 class VRMode:
-    """Glove → SteamVR driver: per BLE report one CFG2 packet (see cf_protocol.py) and, when the glove has
+    """CyberFinger → SteamVR driver: per BLE report one CFG2 packet (see cf_protocol.py) and, when the CyberFinger has
     IMUs, one CFIM packet with their raw slots (the driver's own IMU fusion, and its captures)."""
 
     def __init__(self, port=cf_protocol.DRIVER_PORT):
@@ -867,7 +867,7 @@ class VRMode:
         jx, jy = state._joy_deadzoned()
         joy_x, joy_y = cf_protocol.stick_to_int16(jx, -jy)
         self.seq[hand] += 1
-        pkt = cf_protocol.pack_glove(hand, self.seq[hand], state.buttons, state.trigger,
+        pkt = cf_protocol.pack_cyberfinger(hand, self.seq[hand], state.buttons, state.trigger,
                                      joy_x, joy_y, state.battery, buttons2=state.buttons2)
         try:
             self.sock.sendto(pkt, self.target)
@@ -885,9 +885,9 @@ class VRMode:
 
 
 class SlimeVRTracker:
-    """One emulated SlimeVR tracker — one glove, up to two sensors.
+    """One emulated SlimeVR tracker — one CyberFinger, up to two sensors.
 
-    The server keys trackers by the MAC in the handshake, so each glove gets a
+    The server keys trackers by the MAC in the handshake, so each CyberFinger gets a
     stable synthetic MAC and its own socket. Rotation packets are pushed from
     the BLE thread via send_rotation(); a service thread owns the handshake,
     heartbeat replies and periodic sensor-info re-announcements.
@@ -1077,7 +1077,7 @@ class SlimeVRTracker:
 
 
 class SlimeVRForwarder:
-    """Feeds glove IMU quaternions to a SlimeVR server as two emulated trackers.
+    """Feeds CyberFinger IMU quaternions to a SlimeVR server as two emulated trackers.
 
     Runs in parallel with the active mode rather than replacing it — VR/Gamepad
     still get buttons and sticks while SlimeVR gets orientation.
@@ -1262,7 +1262,7 @@ def _write_app_manifest():
             "strings": {
                 "en_us": {
                     "name": "CyberFinger Bridge",
-                    "description": "CyberFinger glove bridge — hand skeleton display",
+                    "description": "CyberFinger bridge — hand skeleton display",
                 },
             },
         }],
@@ -2175,7 +2175,7 @@ class _OneEuroVec:
 
 
 class FusionStudioApp:
-    """Single-window CyberFinger Fusion Studio: optical hand tracking (Quest / OpenXR) + glove IMUs + forearm EMG fused
+    """Single-window CyberFinger Fusion Studio: optical hand tracking (Quest / OpenXR) + CyberFinger IMUs + forearm EMG fused
     into one body-and-hand view, with per-source switches. Start the three sources from the top bar."""
 
     def __init__(self):
@@ -2204,8 +2204,8 @@ class FusionStudioApp:
         self.gamepad_mode = None         # created lazily on first use
         self.vrchat_gamepad_mode = None  # created lazily on first use
         self.active_mode = None
-        self.driver_link = None          # listens for the driver's haptic requests while the glove link runs
-        # VR mode: the right glove's pink button mutes and unmutes the Windows microphone
+        self.driver_link = None          # listens for the driver's haptic requests while the CyberFinger link runs
+        # VR mode: the right CyberFinger's pink button mutes and unmutes the Windows microphone
         self.pink_button = pink_button.PinkButton(self.log, haptics=lambda: getattr(self.ble, "haptics", None))
         self._haptic_logged = [False, False]
         self.slimevr = None              # created lazily while forwarding is on
@@ -2251,7 +2251,7 @@ class FusionStudioApp:
         self._gesture = GestureSkeleton() if (HAS_GESTURE and GestureSkeleton) else None
         self._gest_rec_until = 0.0
         self._gest_base_pose = None         # last hand seen by optical → base finger shape
-        self._gest_hand = 1                 # glove/armband hand (right)
+        self._gest_hand = 1                 # CyberFinger/armband hand (right)
         self._fuser_wrist = (_OrientationFuser(right=(self._gest_hand == 1), slot="g2", tau=1.0)
                              if HAS_FUSION else None)
         self._fuser_knuckle = (_OrientationFuser(right=(self._gest_hand == 1), slot="g2", tau=1.0)
@@ -2478,7 +2478,7 @@ class FusionStudioApp:
         self._gate_last_bearing = [None, None]
         self._gate_prev_P = [None, None]
         self._gate_freeze = [0, 0]
-        self._gloves_visible = True          # Gloves is the default (first) tab
+        self._cyberfingers_visible = True          # CyberFingers is the default (first) tab
         self._cap_gesture = None
         self._cap_file = None
         self._cap_writer = None
@@ -2810,8 +2810,8 @@ class FusionStudioApp:
         except Exception:
             return [0.0] * 8 + [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] + [0]
 
-    def _glove_slot_quat(self, state, slot):
-        """Glove quaternion for a slot name (body1|body2|joint), or None if that
+    def _cyberfinger_slot_quat(self, state, slot):
+        """CyberFinger quaternion for a slot name (body1|body2|joint), or None if that
         IMU isn't present on the hand. Body 1 and Body 2 are two chips at the same
         spot (see SlimeVRForwarder._body_slot): asking for one that isn't fitted
         gives the other."""
@@ -3070,8 +3070,8 @@ class FusionStudioApp:
         chips["optical"] = ((COLOR_FG_DIM, "off") if not F["optical"] else (COLOR_GREEN, "live") if P_world is not None else (COLOR_RED, "no hand"))
         # ── IMUs through the shared fusers (same calls the other tabs make) ──
         st = (self.ble.right if h == 1 else self.ble.left) if getattr(self, "ble", None) else None
-        wq = self._glove_slot_quat(st, self._config.get("imu_wrist_slot") or "body2") if F["wrist"] else None
-        kq = self._glove_slot_quat(st, self._config.get("imu_hand_slot") or "joint") if F["knuckle"] else None
+        wq = self._cyberfinger_slot_quat(st, self._config.get("imu_wrist_slot") or "body2") if F["wrist"] else None
+        kq = self._cyberfinger_slot_quat(st, self._config.get("imu_hand_slot") or "joint") if F["knuckle"] else None
         wq = _np.asarray([float(x) for x in wq], float) if wq is not None else None
         kq = _np.asarray([float(x) for x in kq], float) if kq is not None else None
         seen_f = bool(cam_ok and gate_clear and wj is not None)
@@ -3506,7 +3506,7 @@ class FusionStudioApp:
     def _save_imu_calib(self, calw, calk):
         """Persist the IMU→optical extrinsic (R_off per sensor) so the IMU stays calibrated when
         optical is off or before the first optical frame. NOTE: includes the per-power-on yaw, so
-        after a GLOVE power-cycle (IMU yaw resets) re-run Calibrate IMU once to refresh the yaw."""
+        after a CYBERFINGER power-cycle (IMU yaw resets) re-run Calibrate IMU once to refresh the yaw."""
         try:
             d = {}
             if calw and calw.get("R_off") is not None:
@@ -3530,7 +3530,7 @@ class FusionStudioApp:
             if "R_off_knuckle" in d.files and self._fuser_knuckle is not None:
                 self._fuser_knuckle.set_R_off(_np.asarray(d["R_off_knuckle"], float))
             self.log("IMU calibration loaded from disk (works without optical; re-Calibrate "
-                     "after a glove power-cycle to refresh the yaw)")
+                     "after a CyberFinger power-cycle to refresh the yaw)")
         except Exception as e:
             self.log(f"IMU calib load failed — {e!r}")
 
@@ -3552,8 +3552,8 @@ class FusionStudioApp:
             self.log(f"[gate] cannot log event — {e!r}")
 
     def _push_hand_imu(self):
-        """Forward one glove hand's IMU orientation to the armband web-hand /pose,
-        so the browser 3D hand rotates and bends with the real hand. Which glove
+        """Forward one CyberFinger hand's IMU orientation to the armband web-hand /pose,
+        so the browser 3D hand rotates and bends with the real hand. Which CyberFinger
         IMU is the dorsal (hand) one vs the wrist one is configurable — watch the
         BODY 1 / BODY 2 / JOINT triads to see which tracks what, then set
         "imu_hand_slot" / "imu_wrist_slot" (body1|body2|joint) in settings.json.
@@ -3573,7 +3573,7 @@ class FusionStudioApp:
         # Hand (dorsal) slot: honour the config if that IMU is actually present,
         # else auto-pick the first available BODY IMU (the dorsal one), else any
         # present slot. Wrist slot: config if present, else JOINT. This means a
-        # glove that only exposes e.g. BODY 2 + JOINT (no BODY 1) just works.
+        # CyberFinger that only exposes e.g. BODY 2 + JOINT (no BODY 1) just works.
         hand_slot = self._config.get("imu_hand_slot", "")
         if not ok(hand_slot):
             hand_slot = next((s for s in ("body1", "body2", "joint") if ok(s)), None)
@@ -3744,8 +3744,8 @@ class FusionStudioApp:
 
 
     def _on_haptic(self, h):
-        """Driver-link thread: an app asked a hand to vibrate. The top bar shows it, and the glove gets it over
-        GATT (glove_control.py; firmware 1.3.3+ with the motor)."""
+        """Driver-link thread: an app asked a hand to vibrate. The top bar shows it, and the CyberFinger gets it over
+        GATT (cyberfinger_control.py; firmware 1.3.3+ with the motor)."""
         hand = h["hand"]
         if not self._haptic_logged[hand]:
             self._haptic_logged[hand] = True
@@ -3754,13 +3754,13 @@ class FusionStudioApp:
         self.ble.haptics.request(hand, h["duration_s"], h["frequency_hz"], h["amplitude"])
 
     def _draw_haptics(self):
-        """Top-bar haptics indicator, one row per hand (blank until the glove link runs)."""
+        """Top-bar haptics indicator, one row per hand (blank until the CyberFinger link runs)."""
         c = getattr(self, "haptic_canvas", None)
         if c is None:
             return
         c.delete("all")
         if self.driver_link is None:
-            c.create_text(4, 18, text="haptics: start the glove link", fill=COLOR_FG_DIM, font=("Consolas", 8), anchor=tk.W)
+            c.create_text(4, 18, text="haptics: start the CyberFinger link", fill=COLOR_FG_DIM, font=("Consolas", 8), anchor=tk.W)
             return
         now = time.perf_counter()
         w = int(c.cget("width"))
@@ -3831,8 +3831,8 @@ class FusionStudioApp:
         self.status_label = ttk.Label(bar, text="Idle", style="Status.TLabel"); self.status_label.pack(side=tk.RIGHT, padx=(0, 12))
         src_bar = ttk.Frame(self.root); src_bar.pack(fill=tk.X, padx=12, pady=(2, 4))
         g = ttk.Frame(src_bar); g.pack(side=tk.LEFT, padx=(0, 18))
-        ttk.Label(g, text="GLOVE (BLE → SteamVR)", style="Status.TLabel").pack(side=tk.LEFT, padx=(0, 6))
-        self.start_btn = ttk.Button(g, text="▶ Start glove", style="Accent.TButton", command=self._start_bridge); self.start_btn.pack(side=tk.LEFT)
+        ttk.Label(g, text="CYBERFINGER (BLE → SteamVR)", style="Status.TLabel").pack(side=tk.LEFT, padx=(0, 6))
+        self.start_btn = ttk.Button(g, text="▶ Start CyberFinger", style="Accent.TButton", command=self._start_bridge); self.start_btn.pack(side=tk.LEFT)
         self.stop_btn = ttk.Button(g, text="■ Stop", style="Stop.TButton", command=self._stop_bridge, state=tk.DISABLED); self.stop_btn.pack(side=tk.LEFT, padx=(4, 0))
         self.haptic_canvas = tk.Canvas(g, width=280, height=36, bg=COLOR_BG, highlightthickness=0)
         self.haptic_canvas.pack(side=tk.LEFT, padx=(8, 0))
@@ -3977,7 +3977,7 @@ class FusionStudioApp:
         self.root.destroy()
 
     def run(self):
-        self.log("Fusion Studio ready — start the glove, the EMG armband and the headset camera preview from the top bar")
+        self.log("Fusion Studio ready — start the CyberFinger, the EMG armband and the headset camera preview from the top bar")
         if not HAS_OPENXR:
             self.log("Headset camera: OpenXR not available (pip install pyopenxr glfw PyOpenGL)")
         if not HAS_ARMBAND:
@@ -4108,7 +4108,7 @@ class HandPanel:
         c.create_oval(joy_cx + jx - dot_r, joy_cy + jy - dot_r,
                      joy_cx + jx + dot_r, joy_cy + jy + dot_r,
                      fill=COLOR_ACCENT, outline=COLOR_ACCENT2, width=1)
-        # raw stick counts (diagnostic): what the glove actually sends, pre-deadzone
+        # raw stick counts (diagnostic): what the CyberFinger actually sends, pre-deadzone
         c.create_text(joy_cx, joy_cy + joy_r + 10, anchor=tk.N,
                       text=f"raw {state.joy_x},{state.joy_y}",
                       fill=COLOR_FG_DIM, font=("Consolas", 7))

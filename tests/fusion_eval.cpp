@@ -10,7 +10,7 @@
 //                                                          prior (default | <other capture.csv>)
 //
 // Captures (tools/analyze_tap_capture.py --capture N, with the bridge running) hold the headset hand's poses
-// and skeletons and the glove IMUs on the driver's clock. Per hand this replays them in arrival order: IMU
+// and skeletons and the CyberFinger IMUs on the driver's clock. Per hand this replays them in arrival order: IMU
 // samples into AddImu (stamped at their BLE arrival), optical poses into Observe (seen = the skeleton changed
 // within 80 ms, as the driver decides). It reports the calibration, the agreement with the optical orientation
 // while seen (the fused orientation `lag` earlier, as the optical one trails), the rotation jitter at rest,
