@@ -5,76 +5,60 @@
  */
 #pragma once
 // ═══════════════════════════════════════════════════════════════════════════
-// Utils.h — Shared utilities (logging, quaternion math, time)
+// Utils.h — logging, time and settings helpers
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include <openvr_driver.h>
-#include <string>
+#include <algorithm>
+#include <cctype>
 #include <chrono>
-#include <cmath>
+#include <cstdint>
+#include <string>
+#include <vector>
 
-namespace merged_ctrl {
+namespace cf {
+
+constexpr const char* kSettingsSection = "driver_cyberfinger";
 
 // ── Logging ────────────────────────────────────────────────────────────────
-void DriverLog(const char* fmt, ...);
 void SetDriverLog(vr::IVRDriverLog* log);
+void DriverLog(const char* fmt, ...);
 
 // ── Time ───────────────────────────────────────────────────────────────────
 inline double NowSeconds() {
     using namespace std::chrono;
-    return duration_cast<duration<double>>(
-        steady_clock::now().time_since_epoch()).count();
+    return duration_cast<duration<double>>(steady_clock::now().time_since_epoch()).count();
+}
+inline uint64_t NowMicros() {
+    using namespace std::chrono;
+    return uint64_t(duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
-// ── Quaternion helpers ─────────────────────────────────────────────────────
-struct Quat {
-    float w = 1, x = 0, y = 0, z = 0;
-};
+// ── Strings ────────────────────────────────────────────────────────────────
+inline std::string Lower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return char(std::tolower(c)); });
+    return s;
+}
 
-inline Quat Slerp(const Quat& a, const Quat& b, float t) {
-    float dot = a.w*b.w + a.x*b.x + a.y*b.y + a.z*b.z;
-    Quat b2 = b;
-    if (dot < 0.f) { dot = -dot; b2 = {-b.w, -b.x, -b.y, -b.z}; }
-    if (dot > 0.9995f) {
-        return { a.w + t*(b2.w-a.w), a.x + t*(b2.x-a.x),
-                 a.y + t*(b2.y-a.y), a.z + t*(b2.z-a.z) };
+// "a|b|c" → lower-case entries, blanks dropped.
+inline std::vector<std::string> SplitList(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (const char ch : s + "|") {
+        if (ch == '|') {
+            if (!cur.empty()) out.push_back(Lower(cur));
+            cur.clear();
+        } else if (!std::isspace(static_cast<unsigned char>(ch))) {
+            cur += ch;
+        }
     }
-    float theta = std::acos(dot);
-    float sinT = std::sin(theta);
-    float wa = std::sin((1.f-t)*theta) / sinT;
-    float wb = std::sin(t*theta) / sinT;
-    return { wa*a.w + wb*b2.w, wa*a.x + wb*b2.x,
-             wa*a.y + wb*b2.y, wa*a.z + wb*b2.z };
+    return out;
 }
 
-// ── VR Pose helpers ────────────────────────────────────────────────────────
-inline vr::DriverPose_t MakeDefaultPose() {
-    vr::DriverPose_t pose{};
-    pose.poseIsValid = false;
-    pose.result = vr::TrackingResult_Uninitialized;
-    pose.deviceIsConnected = true;
+// ── Settings (section driver_cyberfinger) ──────────────────────────────────
+std::string SettingString(const char* key, const char* def);
+float SettingFloat(const char* key, float def);
+int32_t SettingInt(const char* key, int32_t def);
+bool SettingBool(const char* key, bool def);
 
-    pose.qWorldFromDriverRotation.w = 1;
-    pose.qDriverFromHeadRotation.w = 1;
-    pose.qRotation.w = 1;
-
-    pose.vecWorldFromDriverTranslation[0] = 0;
-    pose.vecWorldFromDriverTranslation[1] = 0;
-    pose.vecWorldFromDriverTranslation[2] = 0;
-
-    pose.vecPosition[0] = 0;
-    pose.vecPosition[1] = 0;
-    pose.vecPosition[2] = 0;
-
-    return pose;
-}
-
-// ── String helpers ─────────────────────────────────────────────────────────
-std::string GetDriverSettingString(const char* section, const char* key,
-                                   const char* defaultVal);
-float GetDriverSettingFloat(const char* section, const char* key, float def);
-int32_t GetDriverSettingInt(const char* section, const char* key, int32_t def);
-bool GetDriverSettingBool(const char* section, const char* key, bool def);
-
-} // namespace merged_ctrl
-
+} // namespace cf

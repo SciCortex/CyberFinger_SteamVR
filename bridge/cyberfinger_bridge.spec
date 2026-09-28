@@ -51,6 +51,10 @@ a = Analysis(
         ('assets/icon_32x32.png', 'assets'),
         ('assets/icon_32x32_bw.png', 'assets'),
         ('assets/icon.png', 'assets'),
+        ('assets/cyberfinger_actions.json', 'assets'),
+        ('assets/cyberfinger_bindings_cyberfinger.json', 'assets'),
+        ('assets/cyberfinger_bindings_knuckles.json', 'assets'),
+        ('assets/cyberfinger_bindings_oculus_touch.json', 'assets'),
     ] + vgamepad_datas,
     hiddenimports=[
         'vgamepad',

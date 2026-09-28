@@ -10,25 +10,20 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include <openvr_driver.h>
+#include <cstring>
 #include "ServerProvider.h"
 
-static merged_ctrl::ServerProvider g_serverProvider;
+static cf::ServerProvider g_serverProvider;
 
-// ── DLL Export ─────────────────────────────────────────────────────────────
 #if defined(_WIN32)
 #  define DLLEXPORT extern "C" __declspec(dllexport)
 #else
 #  define DLLEXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
-DLLEXPORT void* HmdDriverFactory(const char* pInterfaceName,
-                                  int* pReturnCode) {
-    if (std::string(pInterfaceName) == vr::IServerTrackedDeviceProvider_Version) {
+DLLEXPORT void* HmdDriverFactory(const char* pInterfaceName, int* pReturnCode) {
+    if (std::strcmp(pInterfaceName, vr::IServerTrackedDeviceProvider_Version) == 0)
         return &g_serverProvider;
-    }
-
-    if (pReturnCode)
-        *pReturnCode = vr::VRInitError_Init_InterfaceNotFound;
+    if (pReturnCode) *pReturnCode = vr::VRInitError_Init_InterfaceNotFound;
     return nullptr;
 }
-

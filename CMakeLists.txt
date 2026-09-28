@@ -1,12 +1,16 @@
 cmake_minimum_required(VERSION 3.16)
-project(driver_cyberfinger VERSION 1.0.0 LANGUAGES CXX)
+project(driver_cyberfinger VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Static C/C++ runtime (/MT): SteamVR does not ship the VC++ 2015-2022 runtime, so a /MD driver
+# would fail to load on PCs without the redistributable.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # ── OpenVR SDK ──────────────────────────────────────────────────────────────
-# Set OPENVR_SDK to the root of your openvr checkout
+# Set OPENVR_SDK to the root of your openvr checkout (git submodule update --init)
 if(NOT DEFINED OPENVR_SDK)
     set(OPENVR_SDK "${CMAKE_SOURCE_DIR}/openvr" CACHE PATH "Path to OpenVR SDK")
 endif()
@@ -14,145 +18,110 @@ endif()
 if(NOT EXISTS "${OPENVR_SDK}/headers/openvr_driver.h")
     message(FATAL_ERROR
         "OpenVR SDK not found at ${OPENVR_SDK}. "
-        "Clone https://github.com/ValveSoftware/openvr into ${CMAKE_SOURCE_DIR}/openvr "
-        "or set -DOPENVR_SDK=<path>")
+        "Run 'git submodule update --init' or set -DOPENVR_SDK=<path>")
 endif()
 
-# ── Sources ─────────────────────────────────────────────────────────────────
+# ── MinHook (Windows): observes Steam Link's hand skeletons inside vrserver ──
+set(MINHOOK_DIR "${CMAKE_SOURCE_DIR}/third_party/minhook")
+if(WIN32)
+    if(NOT EXISTS "${MINHOOK_DIR}/include/MinHook.h")
+        message(FATAL_ERROR "MinHook not found at ${MINHOOK_DIR}. Run 'git submodule update --init'")
+    endif()
+    # Built from source here rather than via its CMake project, whose install
+    # rules would copy MinHook into the SteamVR driver folder.
+    add_library(minhook STATIC
+        "${MINHOOK_DIR}/src/buffer.c"
+        "${MINHOOK_DIR}/src/hook.c"
+        "${MINHOOK_DIR}/src/trampoline.c"
+        "${MINHOOK_DIR}/src/hde/hde64.c"
+    )
+    target_include_directories(minhook PUBLIC "${MINHOOK_DIR}/include" PRIVATE "${MINHOOK_DIR}/src")
+endif()
+
+# ── Driver ──────────────────────────────────────────────────────────────────
 set(SOURCES
     src/driver_main.cpp
     src/ServerProvider.cpp
-    src/MergedController.cpp
-    src/HandTrackingReceiver.cpp
-    src/SkeletonComposer.cpp
+    src/CyberFingerController.cpp
+    src/StudioLink.cpp
+    src/OpticalTap.cpp
+    src/SkeletonSynth.cpp
     src/Utils.cpp
 )
 
 set(HEADERS
     src/ServerProvider.h
-    src/MergedController.h
-    src/HandTrackingReceiver.h
-    src/SkeletonComposer.h
-    src/Utils.h
+    src/CyberFingerController.h
+    src/StudioLink.h
+    src/OpticalTap.h
+    src/SkeletonSynth.h
+    src/Protocol.h
+    src/MathUtil.h
     src/BoneData.h
+    src/Utils.h
 )
 
 add_library(driver_cyberfinger SHARED ${SOURCES} ${HEADERS})
 
-target_include_directories(driver_cyberfinger PRIVATE
-    "${OPENVR_SDK}/headers"
-    src
-)
+target_include_directories(driver_cyberfinger PRIVATE "${OPENVR_SDK}/headers" src)
 
-# ── Platform specifics ──────────────────────────────────────────────────────
-if(WIN32)
-    target_link_libraries(driver_cyberfinger PRIVATE
-        "${OPENVR_SDK}/lib/win64/openvr_api.lib"
-        ws2_32
-    )
-    set_target_properties(driver_cyberfinger PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/driver/cyberfinger/bin/win64"
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/driver/cyberfinger/bin/win64"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/driver/cyberfinger/bin/win64"
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/driver/cyberfinger/bin/win64"
-        LIBRARY_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/driver/cyberfinger/bin/win64"
-        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/driver/cyberfinger/bin/win64"
-    )
-elseif(UNIX)
-    find_library(OPENVR_LIB openvr_api PATHS "${OPENVR_SDK}/lib/linux64")
-    target_link_libraries(driver_cyberfinger PRIVATE
-        ${OPENVR_LIB}
-        pthread
-    )
-    set_target_properties(driver_cyberfinger PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/driver/cyberfinger/bin/linux64"
-    )
-endif()
-
-# ── Hand Tracking Bridge executable ─────────────────────────────────────────
-add_executable(handtracking_bridge bridge/handtracking_bridge.cpp)
-
-target_include_directories(handtracking_bridge PRIVATE
-    "${OPENVR_SDK}/headers"
-)
-
-if(WIN32)
-    target_link_libraries(handtracking_bridge PRIVATE
-        "${OPENVR_SDK}/lib/win64/openvr_api.lib"
-        ws2_32
-    )
-else()
-    target_link_libraries(handtracking_bridge PRIVATE
-        ${OPENVR_LIB}
-        pthread
-    )
-endif()
-
-# Copy openvr_api.dll next to the bridge exe so it can find it
-if(WIN32 AND EXISTS "${OPENVR_SDK}/bin/win64/openvr_api.dll")
-    add_custom_command(TARGET handtracking_bridge POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-            "${OPENVR_SDK}/bin/win64/openvr_api.dll"
-            "$<TARGET_FILE_DIR:handtracking_bridge>/openvr_api.dll"
-        COMMENT "Copying openvr_api.dll next to bridge executable"
-    )
-endif()
-
-# ── Post-build: copy resources into build/driver/cyberfinger/ ─────────
 set(DRIVER_DIR "${CMAKE_BINARY_DIR}/driver/cyberfinger")
 
+if(WIN32)
+    target_link_libraries(driver_cyberfinger PRIVATE minhook ws2_32)
+    target_compile_definitions(driver_cyberfinger PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+    foreach(cfg "" _DEBUG _RELEASE _RELWITHDEBINFO _MINSIZEREL)
+        set_target_properties(driver_cyberfinger PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY${cfg} "${DRIVER_DIR}/bin/win64"
+            LIBRARY_OUTPUT_DIRECTORY${cfg} "${DRIVER_DIR}/bin/win64")
+    endforeach()
+elseif(UNIX)
+    target_link_libraries(driver_cyberfinger PRIVATE pthread)
+    set_target_properties(driver_cyberfinger PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${DRIVER_DIR}/bin/linux64")
+endif()
+
+# ── Post-build: assemble build/driver/cyberfinger/ ─────────────────────────
 add_custom_command(TARGET driver_cyberfinger POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/resources/driver.vrdrivermanifest"
-        "${DRIVER_DIR}/driver.vrdrivermanifest"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${DRIVER_DIR}/resources/settings"
-    COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/resources/settings/default.vrsettings"
-        "${DRIVER_DIR}/resources/settings/default.vrsettings"
-    COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/resources/settings/settingsschema.vrsettings"
-        "${DRIVER_DIR}/resources/settings/settingsschema.vrsettings"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${DRIVER_DIR}/resources/input"
-    COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/resources/input/cyberfinger_profile.json"
-        "${DRIVER_DIR}/resources/input/cyberfinger_profile.json"
-    COMMAND ${CMAKE_COMMAND} -E copy
-        "${CMAKE_SOURCE_DIR}/resources/input/cyberfinger_bindings.json"
-        "${DRIVER_DIR}/resources/input/cyberfinger_bindings.json"
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-        "${DRIVER_DIR}/resources/icons"
+        "${CMAKE_SOURCE_DIR}/resources/driver.vrdrivermanifest" "${DRIVER_DIR}/driver.vrdrivermanifest"
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_SOURCE_DIR}/resources/icons"
-        "${DRIVER_DIR}/resources/icons"
-    COMMENT "Copying driver resources to ${DRIVER_DIR}"
+        "${CMAKE_SOURCE_DIR}/resources/settings" "${DRIVER_DIR}/resources/settings"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/resources/input" "${DRIVER_DIR}/resources/input"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/resources/icons" "${DRIVER_DIR}/resources/icons"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/resources/rendermodels" "${DRIVER_DIR}/resources/rendermodels"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_SOURCE_DIR}/resources/localization" "${DRIVER_DIR}/resources/localization"
+    COMMENT "Assembling driver folder ${DRIVER_DIR}"
 )
 
-# ── Install: deploy to SteamVR drivers directory ──────────────────────────
-# Usage:  cmake --install . --prefix "C:/Program Files (x86)/Steam/steamapps/common/SteamVR/drivers"
-# Or set CMAKE_INSTALL_PREFIX in CMake settings / CMakePresets.json
+# ── Tests (no SteamVR needed) ──────────────────────────────────────────────
+enable_testing()
+add_executable(driver_tests tests/driver_tests.cpp src/SkeletonSynth.cpp)
+target_include_directories(driver_tests PRIVATE "${OPENVR_SDK}/headers" src)
+add_test(NAME driver_tests COMMAND driver_tests "${CMAKE_SOURCE_DIR}/tests/protocol_vectors.bin")
 
+# Runs the passthrough pose filter over a recorded capture (tools/analyze_tap_capture.py --capture N).
+add_executable(filter_eval tests/filter_eval.cpp)
+target_include_directories(filter_eval PRIVATE "${OPENVR_SDK}/headers" src)
+
+# Replays a capture with the CyberFinger IMUs through the driver-side IMU fusion (ImuFusion.h).
+add_executable(fusion_eval tests/fusion_eval.cpp)
+target_include_directories(fusion_eval PRIVATE "${OPENVR_SDK}/headers" src)
+
+# ── Install: deploy to SteamVR drivers directory ──────────────────────────
+# cmake --install . --prefix "C:/Program Files (x86)/Steam/steamapps/common/SteamVR/drivers"
+# (or register build/driver/cyberfinger with vrpathreg adddriver)
 set(DRIVER_INSTALL_NAME "cyberfinger" CACHE STRING "Driver folder name in SteamVR/drivers")
 
 install(TARGETS driver_cyberfinger
     RUNTIME DESTINATION ${DRIVER_INSTALL_NAME}/bin/win64
     LIBRARY DESTINATION ${DRIVER_INSTALL_NAME}/bin/linux64
 )
-
-install(FILES
-    resources/driver.vrdrivermanifest
-    DESTINATION ${DRIVER_INSTALL_NAME}
-)
-
-install(DIRECTORY resources/settings/
-    DESTINATION ${DRIVER_INSTALL_NAME}/resources/settings
-)
-
-install(DIRECTORY resources/input/
-    DESTINATION ${DRIVER_INSTALL_NAME}/resources/input
-)
-
-install(DIRECTORY resources/icons/
-    DESTINATION ${DRIVER_INSTALL_NAME}/resources/icons
-)
+install(FILES resources/driver.vrdrivermanifest DESTINATION ${DRIVER_INSTALL_NAME})
+foreach(dir settings input icons rendermodels localization)
+    install(DIRECTORY resources/${dir}/ DESTINATION ${DRIVER_INSTALL_NAME}/resources/${dir})
+endforeach()

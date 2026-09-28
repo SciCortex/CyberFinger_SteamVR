@@ -1,6 +1,10 @@
 {
   "default_bindings": [
     {
+      "controller_type": "cyberfinger",
+      "binding_url": "cyberfinger_bindings_cyberfinger.json"
+    },
+    {
       "controller_type": "knuckles",
       "binding_url": "cyberfinger_bindings_knuckles.json"
     },

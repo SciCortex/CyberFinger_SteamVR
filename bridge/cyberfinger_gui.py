@@ -24,6 +24,15 @@ import queue
 import json
 import math
 
+import cf_protocol  # SteamVR driver wire protocol (CFG2 CyberFinger packets)
+import cyberfinger_report  # the CyberFinger's BLE input report, every firmware revision
+import cyberfinger_control  # bridge → CyberFinger commands (haptics)
+import flux_actions   # FluxAction1..42 of the MoreFluxActions mod
+import pink_button    # the right pink button: Windows microphone mute or a FluxAction
+import tap_gesture    # a triple tap on the joint IMU: resync the driver's IMU fusion
+from driver_link import DriverLink          # driver → bridge: haptic requests, driver status
+from haptics_view import describe as describe_haptic, draw_haptic_meter
+
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -52,31 +61,9 @@ except Exception:
 VR_SERVICE_UUID = "0000cf00-0000-1000-8000-00805f9b34fb"
 VR_INPUT_UUID   = "0000cf01-0000-1000-8000-00805f9b34fb"
 
-GAMEPAD_MAGIC    = 0x50474643
-GAMEPAD_PACK_FMT = "<IBBhhBB"
-INPUT_REPORT_FMT = "<BBhhBBI"
-INPUT_REPORT_SIZE = struct.calcsize(INPUT_REPORT_FMT)
-
-# The GATT report grew twice, and each revision is a strict prefix of the next
-# (see CyberFingerFW_ESP32/src/vr_gatt.h — the first 28 bytes are frozen), so
-# the widest layout the payload can support is the correct one to apply:
-#
-#   12 bytes — base report, no IMU at all
-#   28 bytes — one appended quaternion (primary body IMU)
-#   61 bytes — presence bitmask + two further quaternions
-#
-INPUT_REPORT_IMU_FMT = "<BBhhBBI4f"
-INPUT_REPORT_IMU_SIZE = struct.calcsize(INPUT_REPORT_IMU_FMT)
-
-INPUT_REPORT_MULTI_FMT = "<BBhhBBI4fB4f4f"
-INPUT_REPORT_MULTI_SIZE = struct.calcsize(INPUT_REPORT_MULTI_FMT)
-
-# 79 bytes — three raw body-frame accel vectors appended, one per IMU slot in
-# the same order as the quaternions. Still a strict suffix, so it is unpacked
-# separately from the 61-byte prefix above rather than duplicating that layout.
-ACCEL_TAIL_FMT = "<9h"
-ACCEL_TAIL_SIZE = struct.calcsize(ACCEL_TAIL_FMT)
-INPUT_REPORT_ACCEL_SIZE = INPUT_REPORT_MULTI_SIZE + ACCEL_TAIL_SIZE
+# The GATT report grew with each firmware revision (12, 28, 61/79 bytes, then v1.3's variable-length IMU
+# tail); cyberfinger_report.py decodes them all.
+INPUT_REPORT_SIZE = cyberfinger_report.BASE.size   # shortest valid report
 
 ZERO_ACCEL = (0, 0, 0)
 ACCEL_LSB_PER_G = 2048.0  # VR_ACCEL_LSB_PER_G — ±16g on every sensor
@@ -146,7 +133,7 @@ SLIME_SENSOR_BODY  = 0
 SLIME_SENSOR_JOINT = 1
 
 # The server drops a tracker after 3 s of silence, so the service thread has to
-# keep answering heartbeats even when no glove data is flowing.
+# keep answering heartbeats even when no CyberFinger data is flowing.
 SLIME_TIMEOUT = 3.0
 
 SLIME_FIRMWARE_VERSION = "CyberFinger"
@@ -173,6 +160,25 @@ BUTTON_NAMES = {
     BTN_JCLICK:  "JCLK",
     BTN_STSEL:   "ST/SE",
 }
+
+
+def _black_hold_seconds():
+    """The driver's black-button long press (black_hold_ms in SteamVR's settings, 800 ms by default; 0 = none)."""
+    try:
+        with open(os.path.join(os.environ.get("LOCALAPPDATA", ""), "openvr", "openvrpaths.vrpath"),
+                  encoding="utf-8") as f:
+            config_dirs = json.load(f).get("config", [])
+        for d in config_dirs:
+            path = os.path.join(d, "steamvr.vrsettings")
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    return max(0, int(json.load(f).get("driver_cyberfinger", {}).get("black_hold_ms", 800))) / 1000.0
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+    return 0.8
+
+
+BLACK_HOLD_S = _black_hold_seconds()
 
 # Brand colors
 COLOR_BG       = "#1a1a1a"
@@ -270,6 +276,7 @@ def _generate_fallback_icon(color):
 class HandState:
     def __init__(self):
         self.buttons = 0
+        self.buttons2 = 0          # the extension byte's buttons (cyberfinger_report.PINK)
         self.joy_x = 0
         self.joy_y = 0
         self.trigger = 0
@@ -292,6 +299,8 @@ class HandState:
         self.accel = ZERO_ACCEL
         self.accel_body2 = ZERO_ACCEL
         self.accel_joint = ZERO_ACCEL
+        self.rx_perf = 0.0       # time.perf_counter() when the latest report arrived
+        self.report_seq = 0      # the latest report's own sequence number
 
     @property
     def joy_x_float(self):
@@ -308,7 +317,7 @@ class HandState:
         return 1.0 if (self.buttons & BTN_TRIGGER) else 0.0
 
     def reset_link(self):
-        """Clear per-connection capability flags before (re)attaching a glove."""
+        """Clear per-connection capability flags before (re)attaching a CyberFinger."""
         self.imu_present = 0
         self.quat = IDENTITY_QUAT
         self.quat_body2 = IDENTITY_QUAT
@@ -349,6 +358,7 @@ class BLEManager:
         self._polling_chars = []
         self._ble_devices = []     # track opened BLE device handles
         self._gatt_services = []   # track opened GATT service handles
+        self.haptics = cyberfinger_control.HapticSender(log=app.log)   # vibration commands to the CyberFingers
 
     def start(self):
         self._running = True
@@ -370,6 +380,7 @@ class BLEManager:
             if str(e) != "Event loop stopped before Future completed.":
                 self.app.log(f"BLE thread error: {e}")
         finally:
+            self.haptics.detach_all()
             # Clean up: unsubscribe notifications
             for _, char, token in self._subscriptions:
                 try:
@@ -463,43 +474,13 @@ class BLEManager:
     def _handle_data(self, data):
         if len(data) < INPUT_REPORT_SIZE:
             return
+        t_rx = time.perf_counter()
 
-        # Each revision is a strict prefix of the next, so decode with the
-        # widest layout this payload can satisfy and leave the rest at defaults.
-        present = 0
-        quats = (IDENTITY_QUAT, IDENTITY_QUAT, IDENTITY_QUAT)
-        accels = (ZERO_ACCEL, ZERO_ACCEL, ZERO_ACCEL)
-        has_accel = False
-
-        if len(data) >= INPUT_REPORT_MULTI_SIZE:
-            (hand, buttons, joy_x, joy_y, trigger, battery, seq,
-             q1w, q1x, q1y, q1z,
-             present,
-             q2w, q2x, q2y, q2z,
-             q3w, q3x, q3y, q3z) = struct.unpack(
-                INPUT_REPORT_MULTI_FMT, data[:INPUT_REPORT_MULTI_SIZE])
-            quats = ((q1w, q1x, q1y, q1z),
-                     (q2w, q2x, q2y, q2z),
-                     (q3w, q3x, q3y, q3z))
-
-            if len(data) >= INPUT_REPORT_ACCEL_SIZE:
-                a = struct.unpack(ACCEL_TAIL_FMT,
-                                  data[INPUT_REPORT_MULTI_SIZE:INPUT_REPORT_ACCEL_SIZE])
-                accels = (a[0:3], a[3:6], a[6:9])
-                has_accel = True
-
-        elif len(data) >= INPUT_REPORT_IMU_SIZE:
-            hand, buttons, joy_x, joy_y, trigger, battery, seq, qw, qx, qy, qz = \
-                struct.unpack(INPUT_REPORT_IMU_FMT, data[:INPUT_REPORT_IMU_SIZE])
-            # This revision has no presence bitmask. An all-zero quaternion is
-            # the only signal that the IMU failed to come up.
-            if any(abs(v) > 1e-6 for v in (qw, qx, qy, qz)):
-                present = IMU_BODY_PRIMARY
-                quats = ((qw, qx, qy, qz), IDENTITY_QUAT, IDENTITY_QUAT)
-
-        else:
-            hand, buttons, joy_x, joy_y, trigger, battery, seq = \
-                struct.unpack(INPUT_REPORT_FMT, data[:INPUT_REPORT_SIZE])
+        # Every firmware revision's layout, including v1.3's variable-length IMU tail (cyberfinger_report.py).
+        r = cyberfinger_report.decode(data)
+        hand, buttons, joy_x, joy_y, trigger, battery, seq = (
+            r.hand, r.buttons, r.joy_x, r.joy_y, r.trigger, r.battery, r.seq)
+        present, quats, accels, has_accel = r.present, r.quats, r.accels, r.has_accel
 
         h = min(hand, 1)
         state = self.left if h == 0 else self.right
@@ -512,9 +493,14 @@ class BLEManager:
         state.quat, state.quat_body2, state.quat_joint = quats
         state.has_accel = has_accel
         state.accel, state.accel_body2, state.accel_joint = accels
+        state.rx_perf = t_rx
+        state.report_seq = seq
 
         old_buttons = state.buttons
         state.buttons = buttons
+        if r.buttons2 != state.buttons2 and r.buttons2:
+            self.app.log(f"{'L' if h == 0 else 'R'} PINK")
+        state.buttons2 = r.buttons2
         state.joy_x = joy_x
         state.joy_y = joy_y
         state.trigger = trigger
@@ -638,6 +624,12 @@ class BLEManager:
         if not vr_input:
             self.app.log(f"{label}: CF01 characteristic not found")
             return None
+        # The control characteristic: haptics go there (cyberfinger_control.py)
+        vr_ctrl = next((c for c in char_result.characteristics if "cf02" in str(c.uuid).lower()), None)
+        if vr_ctrl is not None:
+            self.haptics.attach(0 if label == "LEFT" else 1, vr_ctrl)
+        else:
+            self.app.log(f"{label}: CF02 control characteristic not found (no haptics)")
 
         # Clear any stale CCCD from previous session
         try:
@@ -686,17 +678,45 @@ class BLEManager:
 # ── VR Mode (UDP forwarding) ─────────────────────────────────────────────
 
 class VRMode:
-    def __init__(self, port=27015):
+    """CyberFinger → SteamVR driver: per BLE report one CFG2 packet (see cf_protocol.py) and, when the CyberFinger has
+    IMUs, one CFIM packet with their raw slots (the driver's own IMU fusion, and its captures)."""
+
+    STICK_DEADZONE = 0.12
+
+    def __init__(self, port=cf_protocol.DRIVER_PORT):
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.target = ("127.0.0.1", port)
+        self.seq = [0, 0]
+        self.resync = [0, 0]     # CFG2's resync count per hand: a new value resyncs the driver's IMU fusion
+        # The right pink button goes on to SteamVR (/input/pink, for the apps' bindings) only when the bridge leaves
+        # it to them; otherwise the bridge acts on it (mic mute, a FluxAction) and SteamVR never sees it.
+        self.right_pink_to_steamvr = False
+
+    def resync_imu(self, hands=(0, 1)):
+        """Ask the driver to resync the IMU fusion of these hands (with their next CFG2 packets)."""
+        for hand in hands:
+            self.resync[hand] = (self.resync[hand] + 1) & 0xFF
 
     def on_input(self, hand, state):
-        pkt = struct.pack(GAMEPAD_PACK_FMT,
-                          GAMEPAD_MAGIC, hand, state.buttons,
-                          state.joy_x, state.joy_y, state.trigger, state.battery)
+        # The firmware's stick +y is down; CFG2's is up.
+        joy_x, joy_y = cf_protocol.stick_to_int16(state.joy_x_float, -state.joy_y_float,
+                                                  self.STICK_DEADZONE)
+        self.seq[hand] += 1
+        buttons2 = state.buttons2
+        if hand == 1 and not self.right_pink_to_steamvr:
+            buttons2 &= ~cyberfinger_report.PINK
+        pkt = cf_protocol.pack_cyberfinger(hand, self.seq[hand], state.buttons, state.trigger,
+                                     joy_x, joy_y, state.battery, buttons2=buttons2,
+                                     resync=self.resync[hand])
         try:
             self.sock.sendto(pkt, self.target)
+            if state.imu_present:
+                age_us = (time.perf_counter() - state.rx_perf) * 1e6 if state.rx_perf else 0
+                self.sock.sendto(cf_protocol.pack_imu(
+                    hand, state.report_seq, state.imu_present, (state.quat, state.quat_body2, state.quat_joint),
+                    (state.accel, state.accel_body2, state.accel_joint) if state.has_accel else None,
+                    age_us=age_us), self.target)
         except Exception:
             pass
 
@@ -707,9 +727,9 @@ class VRMode:
 # ── SlimeVR forwarding (runs alongside whichever mode is active) ─────────
 
 class SlimeVRTracker:
-    """One emulated SlimeVR tracker — one glove, up to two sensors.
+    """One emulated SlimeVR tracker — one CyberFinger, up to two sensors.
 
-    The server keys trackers by the MAC in the handshake, so each glove gets a
+    The server keys trackers by the MAC in the handshake, so each CyberFinger gets a
     stable synthetic MAC and its own socket. Rotation packets are pushed from
     the BLE thread via send_rotation(); a service thread owns the handshake,
     heartbeat replies and periodic sensor-info re-announcements.
@@ -899,7 +919,7 @@ class SlimeVRTracker:
 
 
 class SlimeVRForwarder:
-    """Feeds glove IMU quaternions to a SlimeVR server as two emulated trackers.
+    """Feeds CyberFinger IMU quaternions to a SlimeVR server as two emulated trackers.
 
     Runs in parallel with the active mode rather than replacing it — VR/Gamepad
     still get buttons and sticks while SlimeVR gets orientation.
@@ -1115,7 +1135,7 @@ def _write_app_manifest():
             "strings": {
                 "en_us": {
                     "name": "CyberFinger Bridge",
-                    "description": "CyberFinger glove bridge — hand skeleton display",
+                    "description": "CyberFinger bridge — hand skeleton display",
                 },
             },
         }],
@@ -1981,8 +2001,8 @@ class CyberFingerApp:
         self.root = tk.Tk()
         self.root.title("CyberFinger Bridge")
         self.root.configure(bg=COLOR_BG)
-        self.root.geometry("680x790")
-        self.root.minsize(600, 660)
+        self.root.geometry("680x700")
+        self.root.minsize(600, 620)
 
         # Set window icon (color version)
         try:
@@ -2010,6 +2030,17 @@ class CyberFingerApp:
         self.vrchat_gamepad_mode = None  # created lazily on first use
         self.active_mode = None
         self.slimevr = None              # created lazily while forwarding is on
+        self.driver_link = None          # listens for the driver's haptic requests while in VR mode
+        # VR mode: the right CyberFinger's pink button mutes and unmutes the Windows microphone, or fires a FluxAction
+        # (_pink_flux: its number, 0 for the microphone; set on the Tk thread from the options, read on the BLE one)
+        self._pink_flux = 0
+        self.pink_button = pink_button.PinkButton(self.log, haptics=lambda: getattr(self.ble, "haptics", None),
+                                                  action=lambda: self._pink_flux)
+        # VR mode: a triple tap on a CyberFinger's joint IMU resyncs the driver's IMU fusion, like the Resync IMU button.
+        # settings.json "tap_threshold_g" tunes how hard a tap must be.
+        self.triple_tap = [tap_gesture.TripleTap(threshold_g=float(self._config.get("tap_threshold_g", 1.0)))
+                           for _ in range(2)]
+        self._haptic_logged = [False, False]
         # Config gate ("skeleton_enabled": false in settings.json) exists so
         # the OpenVR client can be ruled in/out when debugging SteamVR-side
         # trouble without touching code.
@@ -2206,12 +2237,11 @@ class CyberFingerApp:
         self.mode_var = tk.StringVar(value=self._config.get("mode", "vr"))
         radio_frame = ttk.Frame(ctrl_frame)
         radio_frame.pack(side=tk.LEFT)
-        ttk.Radiobutton(radio_frame, text="VR Mode (BLE→SteamVR)",
-                        variable=self.mode_var, value="vr").pack(anchor=tk.W)
-        ttk.Radiobutton(radio_frame, text="Gamepad Mode (BLE→Xbox 360, Resonite)",
-                        variable=self.mode_var, value="gamepad").pack(anchor=tk.W)
-        ttk.Radiobutton(radio_frame, text="Gamepad Mode (BLE→Xbox 360, VRChat)",
-                        variable=self.mode_var, value="gamepad_vrc").pack(anchor=tk.W)
+        for text, value in (("VR Mode (BLE→SteamVR)", "vr"), ("Gamepad Mode (BLE→Xbox 360, Resonite)", "gamepad"),
+                            ("Gamepad Mode (BLE→Xbox 360, VRChat)", "gamepad_vrc")):
+            radio = ttk.Radiobutton(radio_frame, text=text, variable=self.mode_var, value=value)
+            radio.pack(anchor=tk.W)
+            Tooltip(radio, TIPS[value])
 
         # Start/Stop buttons on the right
         self.stop_btn = ttk.Button(ctrl_frame, text="Stop", style="Stop.TButton",
@@ -2220,115 +2250,164 @@ class CyberFingerApp:
         self.start_btn = ttk.Button(ctrl_frame, text="Start", style="Accent.TButton",
                                     command=self._start_bridge)
         self.start_btn.pack(side=tk.RIGHT)
+        Tooltip(self.start_btn, TIPS["start"])
+        Tooltip(self.stop_btn, TIPS["stop"])
 
         # ── Options row ──
         opts_frame = ttk.Frame(self.root)
         opts_frame.pack(fill=tk.X, padx=16, pady=(0, 8))
 
         self.autostart_var = tk.BooleanVar(value=self._config.get("autostart", False))
-        ttk.Checkbutton(opts_frame, text="Auto-start on launch",
-                        variable=self.autostart_var,
-                        command=self._on_autostart_changed).pack(side=tk.LEFT)
+        autostart = ttk.Checkbutton(opts_frame, text="Auto-start on launch", variable=self.autostart_var,
+                                    command=self._on_autostart_changed)
+        autostart.pack(side=tk.LEFT)
+        Tooltip(autostart, TIPS["autostart"])
 
         if HAS_TRAY:
             ttk.Label(opts_frame, text="(close button minimizes to tray)",
                      style="Status.TLabel").pack(side=tk.RIGHT)
+
+        # ── Right pink button row (VR mode): the Windows microphone's mute, or a FluxAction of the
+        # MoreFluxActions mod in Resonite ──
+        style.configure("TSpinbox", fieldbackground=COLOR_BG2, background=COLOR_BG3, foreground=COLOR_FG,
+                        arrowcolor=COLOR_FG, insertcolor=COLOR_FG, bordercolor=COLOR_BG3,
+                        lightcolor=COLOR_BG2, darkcolor=COLOR_BG2)
+        style.map("TSpinbox", fieldbackground=[("disabled", COLOR_BG)], foreground=[("disabled", COLOR_FG_DIM)],
+                  arrowcolor=[("disabled", COLOR_FG_DIM)])
+        pink_frame = ttk.Frame(self.root)
+        pink_frame.pack(fill=tk.X, padx=16, pady=(0, 8))
+        pink_label = ttk.Label(pink_frame, text="Right pink button:", style="Status.TLabel")
+        pink_label.pack(side=tk.LEFT)
+        Tooltip(pink_label, TIPS["pink"])
+        self.pink_mode_var = tk.StringVar(value=self._config.get("right_pink", "steamvr"))
+        for label, value in (("SteamVR", "steamvr"), ("mic mute", "mic"), ("FluxAction", "flux")):
+            radio = ttk.Radiobutton(pink_frame, text=label, style="Small.TRadiobutton",
+                                    variable=self.pink_mode_var, value=value, command=self._on_pink_changed)
+            radio.pack(side=tk.LEFT)
+            Tooltip(radio, TIPS["pink"])
+        self.pink_flux_var = tk.StringVar(value=str(self._saved_pink_flux()))
+        self.pink_flux_box = ttk.Spinbox(pink_frame, from_=1, to=flux_actions.COUNT, width=3,
+                                         textvariable=self.pink_flux_var, font=("Consolas", 9))
+        self.pink_flux_box.pack(side=tk.LEFT)
+        Tooltip(self.pink_flux_box, TIPS["pink_flux"])
+        self.pink_flux_var.trace_add("write", lambda *_: self._on_pink_changed())
+        # Left mid-edit (empty, 0, 50...): back to the number in use.
+        self.pink_flux_box.bind("<FocusOut>", lambda _e: self.pink_flux_var.set(str(self._saved_pink_flux())))
+        self.pink_flux_box.bind("<Return>", lambda _e: self.root.focus_set())
 
         # ── SlimeVR row ──
         slime_frame = ttk.Frame(self.root)
         slime_frame.pack(fill=tk.X, padx=16, pady=(0, 8))
 
         self.slimevr_var = tk.BooleanVar(value=self._config.get("slimevr_enabled", False))
-        ttk.Checkbutton(slime_frame, text="Forward IMU to SlimeVR",
-                        variable=self.slimevr_var,
-                        command=self._on_slimevr_changed).pack(side=tk.LEFT)
+        slime_check = ttk.Checkbutton(slime_frame, text="Forward IMU to SlimeVR", variable=self.slimevr_var,
+                                      command=self._on_slimevr_changed)
+        slime_check.pack(side=tk.LEFT)
+        Tooltip(slime_check, TIPS["slimevr"])
 
         # Body 1 and Body 2 are redundant IMUs at the same location, so only one
         # is forwarded — this picks which, falling back to the other if absent.
-        ttk.Label(slime_frame, text="  body IMU:",
-                  style="Status.TLabel").pack(side=tk.LEFT)
+        body_label = ttk.Label(slime_frame, text="  body IMU:", style="Status.TLabel")
+        body_label.pack(side=tk.LEFT)
+        Tooltip(body_label, TIPS["body_imu"])
         self.slimevr_body_var = tk.StringVar(
             value=self._config.get("slimevr_body_imu", "body1"))
         for label, value in (("1", "body1"), ("2", "body2")):
-            ttk.Radiobutton(slime_frame, text=label, style="Small.TRadiobutton",
-                            variable=self.slimevr_body_var, value=value,
-                            command=self._on_slimevr_changed).pack(side=tk.LEFT)
+            radio = ttk.Radiobutton(slime_frame, text=label, style="Small.TRadiobutton",
+                                    variable=self.slimevr_body_var, value=value, command=self._on_slimevr_changed)
+            radio.pack(side=tk.LEFT)
+            Tooltip(radio, TIPS["body_imu"])
 
-        # ── Hands visualization ──
-        hands_frame = ttk.Frame(self.root)
-        hands_frame.pack(fill=tk.X, padx=16, pady=4)
+        # The driver's IMU fusion starts its heading over (a CyberFinger switched off and on, or put back differently).
+        # A triple tap on a CyberFinger's joint IMU does the same.
+        resync = ttk.Button(slime_frame, text="Resync IMU", style="Console.TButton",
+                            command=lambda: self._resync_imu("button"))
+        resync.pack(side=tk.RIGHT)
+        Tooltip(resync, TIPS["resync"])
 
-        self.left_panel = HandPanel(hands_frame, "LEFT", side=tk.LEFT)
-        self.right_panel = HandPanel(hands_frame, "RIGHT", side=tk.RIGHT)
+        # ── Tabs: the CyberFingers (buttons, stick, IMU, haptics), the skeletons the VR runtime tracks, the log ──
+        style.configure("TNotebook", background=COLOR_BG, borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("TNotebook.Tab", background=COLOR_BG3, foreground=COLOR_FG_DIM,
+                        font=("Consolas", 10), padding=(14, 4), borderwidth=0)
+        style.map("TNotebook.Tab",
+                  background=[("selected", COLOR_BG2), ("active", COLOR_BG2)],
+                  foreground=[("selected", COLOR_ACCENT), ("active", COLOR_FG)])
+        self.tabs = ttk.Notebook(self.root)
+        self.tabs.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 12))
 
-        # ── Bottom bar: console toggle ──
-        # Packed before the skeleton row so pack gives it its slice at the
-        # bottom and the skeleton area expands into whatever is left.
-        bottom = ttk.Frame(self.root)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=16, pady=(0, 8))
-        self.console_visible = self._config.get("console_visible", False)
-        self.console_btn = ttk.Button(
-            bottom, text="▼ Console" if self.console_visible else "▲ Console",
-            style="Console.TButton", command=self._toggle_console)
-        self.console_btn.pack(side=tk.RIGHT)
+        hands_tab = ttk.Frame(self.tabs)
+        self.tabs.add(hands_tab, text="Buttons + IMU")
+        hands_frame = ttk.Frame(hands_tab)
+        hands_frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.left_panel = HandPanel(hands_frame, "LEFT", side=tk.LEFT, on_test_haptic=lambda: self._test_haptic(0))
+        self.right_panel = HandPanel(hands_frame, "RIGHT", side=tk.RIGHT, on_test_haptic=lambda: self._test_haptic(1))
 
-        # ── Hand skeleton row (what the VR runtime is tracking) ──
-        self.skeleton_area = ttk.Frame(self.root)
-        self.skeleton_area.pack(fill=tk.BOTH, expand=True, padx=16, pady=(4, 4))
+        skeleton_tab = ttk.Frame(self.tabs)
+        self.tabs.add(skeleton_tab, text="Skeleton")
+        self.skeleton_area = ttk.Frame(skeleton_tab)
+        self.skeleton_area.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         self.left_skeleton = SkeletonPanel(self.skeleton_area, "LEFT", side=tk.LEFT)
         self.right_skeleton = SkeletonPanel(self.skeleton_area, "RIGHT", side=tk.RIGHT)
 
-        # ── Log console — hidden by default, slides up over the skeletons ──
-        self.log_frame = ttk.Frame(self.root)
+        console_tab = ttk.Frame(self.tabs)
+        self.tabs.add(console_tab, text="Console")
         self.log_text = scrolledtext.ScrolledText(
-            self.log_frame, height=8,
+            console_tab, height=8,
             bg=COLOR_BG2, fg=COLOR_FG, insertbackground=COLOR_FG,
             font=("Consolas", 9), relief=tk.FLAT, borderwidth=0,
             selectbackground=COLOR_ACCENT, selectforeground="white",
             state=tk.DISABLED, wrap=tk.WORD
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True)
+        self.log_text.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
 
         self.log_text.tag_configure("accent", foreground=COLOR_ACCENT)
         self.log_text.tag_configure("green", foreground=COLOR_GREEN)
         self.log_text.tag_configure("red", foreground=COLOR_RED)
 
-        self._console_frac = 1.0 if self.console_visible else 0.0
-        self._console_anim = None
-        if self.console_visible:
-            self._place_console(1.0)
+        # Reopens on the tab last used.
+        self._tab_names = ("hands", "skeleton", "console")
+        last = self._config.get("tab", "hands")
+        if last in self._tab_names:
+            self.tabs.select(self._tab_names.index(last))
+        self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
-    def _place_console(self, frac):
-        """Overlay the console over the bottom `frac` of the skeleton area."""
-        self.log_frame.place(in_=self.skeleton_area, relx=0.0, rely=1.0,
-                             anchor="sw", relwidth=1.0,
-                             relheight=max(0.02, frac))
+        self._on_pink_changed()
 
-    def _toggle_console(self):
-        self.console_visible = not self.console_visible
-        self._config["console_visible"] = self.console_visible
+    def _saved_pink_flux(self):
+        n = self._config.get("right_pink_flux", flux_actions.COUNT)
+        return n if isinstance(n, int) and 1 <= n <= flux_actions.COUNT else flux_actions.COUNT
+
+    def _on_pink_changed(self):
+        """The right pink button's job: saved, and in effect at the next press."""
+        try:
+            n = int(self.pink_flux_var.get())
+        except ValueError:
+            n = 0
+        if 1 <= n <= flux_actions.COUNT:
+            self._config["right_pink_flux"] = n
+        mode = self.pink_mode_var.get()
+        mode = mode if mode in ("mic", "flux", "steamvr") else "steamvr"
+        flux = mode == "flux"
+        self._config["right_pink"] = mode
         self._save_config()
-        self.console_btn.configure(
-            text="▼ Console" if self.console_visible else "▲ Console")
-        if self._console_anim is not None:
-            self.root.after_cancel(self._console_anim)
-        self._animate_console()
+        self.pink_flux_box.state(["!disabled"] if flux else ["disabled"])
+        n = self._saved_pink_flux()
+        self._pink_flux = n if flux else (-1 if mode == "steamvr" else 0)
+        self.vr_mode.right_pink_to_steamvr = mode == "steamvr"
+        self.right_panel.pink_label = f"PINK→FA{n}" if flux else ("PINK→VR" if mode == "steamvr" else None)
 
-    def _animate_console(self):
-        self._console_anim = None
-        target = 1.0 if self.console_visible else 0.0
-        delta = target - self._console_frac
-        if abs(delta) < 0.02:
-            self._console_frac = target
-            if target > 0.0:
-                self._place_console(1.0)
-                self.log_text.see(tk.END)
-            else:
-                self.log_frame.place_forget()
-            return
-        self._console_frac += max(-0.2, min(0.2, delta))
-        self._place_console(self._console_frac)
-        self._console_anim = self.root.after(16, self._animate_console)
+    def _current_tab(self):
+        try:
+            return self._tab_names[self.tabs.index(self.tabs.select())]
+        except (tk.TclError, IndexError):
+            return "hands"
+
+    def _on_tab_changed(self, _event=None):
+        tab = self._current_tab()
+        self._config["tab"] = tab
+        self._save_config()
+        if tab == "console":
+            self.log_text.see(tk.END)
 
     def _on_autostart_changed(self):
         self._config["autostart"] = self.autostart_var.get()
@@ -2406,6 +2485,8 @@ class CyberFingerApp:
 
         if self.slimevr_var.get():
             self._start_slimevr()
+        if self.active_mode is self.vr_mode:
+            self._start_driver_link()
 
         self.start_btn.configure(state=tk.DISABLED)
         self.stop_btn.configure(state=tk.NORMAL)
@@ -2422,6 +2503,7 @@ class CyberFingerApp:
             self.active_mode.stop()
         self.active_mode = None
         self._stop_slimevr()
+        self._stop_driver_link()
 
         self.start_btn.configure(state=tk.NORMAL)
         self.stop_btn.configure(state=tk.DISABLED)
@@ -2434,8 +2516,65 @@ class CyberFingerApp:
 
         # Recreate for next start
         self.ble = BLEManager(self)
+        self.vr_mode = VRMode()   # stop() closed its socket
         self.gamepad_mode = None         # recreated lazily on next start
         self.vrchat_gamepad_mode = None  # recreated lazily on next start
+
+    def _start_driver_link(self):
+        if self.driver_link is None:
+            self.driver_link = DriverLink(on_haptic=self._on_haptic, log=self.log)
+        self.driver_link.start()
+
+    def _stop_driver_link(self):
+        if self.driver_link is not None:
+            self.driver_link.stop()
+            self.driver_link = None
+
+
+    def _on_haptic(self, h):
+        """Driver-link thread: an app asked a hand to vibrate. The hand panel shows it, and the CyberFinger gets it over
+        GATT (cyberfinger_control.py; firmware 1.3.3+ with the motor)."""
+        hand = h["hand"]
+        if not self._haptic_logged[hand]:
+            self._haptic_logged[hand] = True
+            st = {"count": 1, "duration": h["duration_s"], "frequency": h["frequency_hz"], "amplitude": h["amplitude"]}
+            self.log(f"Haptics: first request for the {'right' if hand else 'left'} hand ({describe_haptic(st)})")
+        self.ble.haptics.request(hand, h["duration_s"], h["frequency_hz"], h["amplitude"])
+
+    def _resync_imu(self, why, confirm_hand=None):
+        """Any thread: ask the driver to resync both hands' IMU fusion (the heading is fitted again from the next
+        views, in about half a second). A triple tap is confirmed on that CyberFinger: two short pulses."""
+        if self.active_mode is not self.vr_mode:
+            self.log("Resync IMU: only in VR mode (it's the SteamVR driver's fusion)")
+            return
+        # Only some hardware revisions have the joint IMU (the fusion's sensor); without it the headset alone turns
+        # the hand and there's nothing to resync.
+        hands = [h for h, st in enumerate((self.ble.left, self.ble.right)) if st.imu_present & IMU_JOINT]
+        if not hands:
+            self.log("Resync IMU: no CyberFinger with a joint IMU is connected (only some revisions have one; without it "
+                     "the headset alone turns the hands)")
+            return
+        self.vr_mode.resync_imu(hands)
+        names = " and ".join("right" if h else "left" for h in hands)
+        self.log(f"Resync IMU fusion, {names} ({why})")
+        haptics = getattr(self.ble, "haptics", None)
+        if confirm_hand is not None and haptics is not None:
+            haptics.request(confirm_hand, 0.25, 8.0, 1.0)
+
+    def _test_haptic(self, hand):
+        """UI thread: the hand panel's haptics strip was clicked (VR mode): a short pulse to that CyberFinger."""
+        name = "right" if hand else "left"
+        if not self.ble.haptics.available(hand):
+            self.log(f"Haptics: the {name} CyberFinger isn't connected (or has no control characteristic)")
+            return
+        duration, frequency, amplitude = 0.25, 0.0, 0.8
+        self.ble.haptics.request(hand, duration, frequency, amplitude)
+        if self.driver_link is not None:
+            self.driver_link.haptics.add(hand, duration, frequency, amplitude)   # shown on the meter too
+        self.log(f"Haptics: test pulse to the {name} CyberFinger")
+
+    def _haptic_state(self, hand):
+        return self.driver_link.haptics.state(hand) if self.driver_link is not None else None
 
     def on_input(self, hand, state):
         """Called from BLE thread on each input report."""
@@ -2444,6 +2583,13 @@ class CyberFingerApp:
                 self.active_mode.update_gamepad(self.ble.left, self.ble.right)
             else:
                 self.active_mode.on_input(hand, state)
+            if self.active_mode is self.vr_mode:
+                self.pink_button.on_input(hand, state.buttons2)
+                if state.has_accel and state.imu_present & IMU_JOINT:
+                    tap = self.triple_tap[hand]
+                    if tap.feed(state.rx_perf or time.perf_counter(), state.accel_joint):
+                        self._resync_imu(f"{'right' if hand else 'left'} CyberFinger triple tap "
+                                         f"({', '.join(f'{g:.1f}' for g in tap.sequence_g)} g)", hand)
 
         # Runs alongside the active mode, not instead of it — SlimeVR takes the
         # orientation none of the other modes forward.
@@ -2481,12 +2627,13 @@ class CyberFingerApp:
             except queue.Empty:
                 break
 
-        if self.ble:
-            self.left_panel.update_state(self.ble.left)
-            self.right_panel.update_state(self.ble.right)
+        # Only the visible tab is redrawn.
+        tab = self._current_tab()
+        if self.ble and tab == "hands":
+            self.left_panel.update_state(self.ble.left, self._haptic_state(0))
+            self.right_panel.update_state(self.ble.right, self._haptic_state(1))
 
-        # Skip the skeleton redraw while the console fully covers it.
-        if self._console_frac < 1.0:
+        if tab == "skeleton":
             if self.skeleton:
                 poses = self.skeleton.pose_info
                 self.left_skeleton.draw(self.skeleton.hands[0],
@@ -2588,20 +2735,138 @@ def project(v, cx, cy, scale):
 
 # ── Hand visualization panel ─────────────────────────────────────────────
 
+class Tooltip:
+    """A hover tip for a widget: why you'd use it, and what it implies. Shown after a short pause, beside the
+    pointer's widget and kept on screen; gone on leaving or clicking."""
+
+    DELAY_MS = 450
+    WRAP_PX = 380
+
+    def __init__(self, widget, text):
+        self.widget, self.text = widget, text
+        self._after = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after = self.widget.after(self.DELAY_MS, self._show)
+
+    def _cancel(self):
+        if self._after is not None:
+            self.widget.after_cancel(self._after)
+            self._after = None
+
+    def _show(self):
+        self._after = None
+        if self._tip is not None or not self.widget.winfo_viewable():
+            return
+        tip = tk.Toplevel(self.widget)
+        tip.wm_overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text=self.text, justify=tk.LEFT, wraplength=self.WRAP_PX, bg=COLOR_BG3, fg=COLOR_FG,
+                 font=("Consolas", 9), padx=9, pady=7, relief=tk.SOLID, borderwidth=1).pack()
+        tip.update_idletasks()
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        x = max(0, min(x, self.widget.winfo_screenwidth() - tip.winfo_width() - 8))
+        if y + tip.winfo_height() > self.widget.winfo_screenheight() - 8:       # no room below: above
+            y = self.widget.winfo_rooty() - tip.winfo_height() - 4
+        tip.wm_geometry(f"+{x}+{y}")
+        self._tip = tip
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+
+# What each control is for (Tooltip texts).
+TIPS = {
+    "vr": "CyberFingers → the CyberFinger SteamVR driver, for SteamVR apps (Resonite, VRChat, the SteamVR dashboard).\n\n"
+          "The CyberFingers become two hand controllers: their buttons, stick and trigger, with the hand pose and fingers "
+          "from the headset's hand tracking, the rotation from the CyberFinger's joint IMU (where fitted), app vibration "
+          "(where fitted), and the pink buttons. Needs the CyberFinger driver installed and SteamVR running.",
+    "gamepad": "CyberFingers → a virtual Xbox 360 controller laid out for Resonite, without SteamVR: desktop mode, or "
+               "alongside other controllers.\n\nOnly buttons and sticks: no hand tracking, no vibration from apps, "
+               "no pink-button functions. Needs the ViGEmBus driver (the vgamepad package installs it).",
+    "gamepad_vrc": "CyberFingers → a virtual Xbox 360 controller laid out for VRChat, without SteamVR: desktop mode, or "
+                   "alongside other controllers.\n\nOnly buttons and sticks: no hand tracking, no vibration from "
+                   "apps, no pink-button functions. Needs the ViGEmBus driver (the vgamepad package installs it).",
+    "start": "Connect to both CyberFingers over Bluetooth and start forwarding them in the chosen mode. The CyberFingers must be "
+             "paired in Windows and switched on.",
+    "stop": "Stop forwarding and disconnect the CyberFingers. In VR mode SteamVR then sees the CyberFinger controllers "
+            "without input, and the headset's own hand tracking can take the hands back.",
+    "autostart": "Start in the last used mode as soon as the bridge opens: handy when it starts with Windows. "
+                 "With the CyberFingers off, it keeps looking for them.",
+    "pink": "What the right CyberFinger's pink button does in VR mode.\n\n"
+            "mic mute: mutes and unmutes Windows' default microphone, so every app goes quiet at once (Resonite, "
+            "VRChat, Discord). The CyberFinger confirms: pulses when muted, one buzz when live (CyberFingers with a motor).\n\n"
+            "FluxAction: presses a FluxAction in Resonite instead, for your own ProtoFlux (needs the MoreFluxActions "
+            "mod). The microphone is left alone, and nothing vibrates.\n\n"
+            "SteamVR (the default): hands the button to SteamVR (the right CyberFinger's Pink input), for the app's own "
+            "binding: VRChat's mute, with its microphone icon; in Resonite FluxAction42, which mutes with the "
+            "MoreFluxActions mod (its MuteToggleAction, 42 by default). The bridge does nothing with it.\n\n"
+            "Remembered across restarts.\n\n"
+            "(The left pink button opens the SteamVR dashboard.)",
+    "pink_flux": "Which FluxAction (1-42) the right pink button presses, with FluxAction chosen. 42 by default: the "
+                 "CyberFinger bindings leave it free.\n\nIn Resonite, a Dynamic Impulse Receiver tagged "
+                 "FluxAction42.Pressed (or .Released) under your avatar reacts to it. Sent straight to the mod, "
+                 "not through SteamVR's bindings.",
+    "slimevr": "Also send the CyberFingers' IMUs to a SlimeVR server on this PC, as trackers: the wrist IMU as the lower "
+               "arm, the joint IMU (where fitted) as the hand.\n\nFor full-body setups with SlimeVR: it gives "
+               "SlimeVR the forearms. Runs alongside any mode. Needs the SlimeVR server running.",
+    "body_imu": "Which wrist IMU SlimeVR gets. Every CyberFinger has body IMU 1; some revisions add a second chip at the "
+                "same spot (2). Falls back to the other when the chosen one is missing.",
+    "resync": "Start the SteamVR driver's IMU fusion over, for both hands: it keeps how each CyberFinger sits on the hand "
+              "and the tracking delay, and fits the IMU's heading again from the next views of the hand (about "
+              "half a second of the hand in view).\n\nUse it when a hand's rotation is off: after taking a CyberFinger "
+              "off or re-seating it, or switching it off and on. The driver usually notices those by itself; this "
+              "is the manual way. A triple tap on the module on the back of the hand does the same.\n\n"
+              "VR mode only, and only for CyberFingers with the joint IMU (some revisions): without it the headset "
+              "alone turns the hand, and there's nothing to resync.",
+}
+
+
 class HandPanel:
     """Canvas-based hand state visualization."""
 
-    def __init__(self, parent, label, side):
+    def __init__(self, parent, label, side, on_test_haptic=None):
         self.label = label
         self.frame = ttk.Frame(parent)
         self.frame.pack(side=side, fill=tk.BOTH, expand=True, padx=(0, 4) if side == tk.LEFT else (4, 0))
 
-        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, height=350)
+        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, height=380)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
         self._last_state = None
+        self._haptic_shown = False
+        self._on_test_haptic = on_test_haptic
+        self._pink_until = 0.0       # the pink click, shown lit until then
+        self._black_since = None     # the black button held since then (its long press)
+        self.pink_label = None       # the pink button's row, when not the default PINK→dash / PINK→mic
+        self.canvas.bind("<Button-1>", self._on_click)
 
-    def update_state(self, state: HandState):
+    def _on_click(self, event):
+        """A click on the haptics strip (VR mode) sends a test pulse to this CyberFinger."""
+        if self._haptic_shown and self._on_test_haptic and event.y > self.canvas.winfo_height() - 36:
+            self._on_test_haptic()
+
+    def _draw_haptics(self, c, w, h, haptic):
+        """Bottom strip: what the SteamVR driver asks this hand's CyberFinger to vibrate (None: not in VR mode). Click it
+        for a test pulse."""
+        self._haptic_shown = haptic is not None
+        if haptic is None:
+            return
+        c.create_line(20, h - 34, w - 20, h - 34, fill=COLOR_BG3, width=1)
+        draw_haptic_meter(c, 10, h - 28, w - 20, 22, haptic, time.perf_counter(), label="HAPTIC",
+                          accent=COLOR_ACCENT, bg=COLOR_BG, dim=COLOR_FG_DIM, fg=COLOR_FG, line=COLOR_BG3)
+        c.create_text(w - 12, h - 40, text="click: test", fill=COLOR_FG_DIM, font=("Consolas", 7), anchor=tk.E)
+
+    def update_state(self, state: HandState, haptic=None):
         c = self.canvas
         c.delete("all")
         w = c.winfo_width()
@@ -2619,6 +2884,7 @@ class HandPanel:
         else:
             c.create_text(w // 2, 14, text=f"{self.label} (disconnected)",
                          fill=COLOR_FG_DIM, font=("Consolas", 10))
+            self._draw_haptics(c, w, h, haptic)
             return
 
         # Battery
@@ -2653,29 +2919,54 @@ class HandPanel:
                      fill=COLOR_ACCENT, outline=COLOR_ACCENT2, width=1)
 
         # ── Button indicators ──
+        now = time.perf_counter()
         btn_x = 3 * w // 4 if is_left else w // 4
         btn_y_start = 30
-        btn_spacing = 17
+        btn_spacing = 15
+        # The pink button's press arrives as an ~80 ms click: shown lit a little longer, so it can be seen.
+        if state.buttons2 & cyberfinger_report.PINK:
+            self._pink_until = now + 0.3
         btn_names_bits = [
-            ("TRIG", BTN_TRIGGER),
-            ("GRIP", BTN_GRIP),
-            ("C",    BTN_C),
-            ("D",    BTN_D),
-            ("E",    BTN_E),
-            ("MENU", BTN_MENU),
-            ("JCLK", BTN_JCLICK),
-            ("ST/SE",BTN_STSEL),
+            ("TRIG", state.buttons & BTN_TRIGGER),
+            ("GRIP", state.buttons & BTN_GRIP),
+            ("C",    state.buttons & BTN_C),
+            ("D",    state.buttons & BTN_D),
+            ("E",    state.buttons & BTN_E),
+            ("MENU", state.buttons & BTN_MENU),
+            ("JCLK", state.buttons & BTN_JCLICK),
+            ("ST/SE", state.buttons & BTN_STSEL),
+            (self.pink_label or ("PINK→dash" if is_left else "PINK→mic"), now < self._pink_until),
         ]
 
-        for i, (name, bit) in enumerate(btn_names_bits):
+        for i, (name, pressed) in enumerate(btn_names_bits):
             by = btn_y_start + i * btn_spacing
-            pressed = bool(state.buttons & bit)
+            pressed = bool(pressed)
             fill = COLOR_ACCENT if pressed else COLOR_BG
             outline = COLOR_ACCENT if pressed else COLOR_BG3
-            c.create_oval(btn_x - 7, by - 7, btn_x + 7, by + 7,
+            c.create_oval(btn_x - 6, by - 6, btn_x + 6, by + 6,
                          fill=fill, outline=outline, width=2)
-            c.create_text(btn_x + 14, by, text=name, fill=COLOR_FG if pressed else COLOR_FG_DIM,
+            c.create_text(btn_x + 13, by, text=name, fill=COLOR_FG if pressed else COLOR_FG_DIM,
                          font=("Consolas", 8), anchor=tk.W)
+
+        # Beside ST/SE: the black button's long press, as the driver sees it (/input/a_hold; in Resonite
+        # FluxAction1 left, FluxAction2 right). The pill fills while the button is held and lights at the threshold.
+        black = bool(state.buttons & BTN_STSEL)
+        if black and self._black_since is None:
+            self._black_since = now
+        elif not black:
+            self._black_since = None
+        held = now - self._black_since if self._black_since is not None else 0.0
+        by = btn_y_start + 7 * btn_spacing
+        px0, px1 = btn_x + 52, btn_x + 112
+        on = BLACK_HOLD_S > 0 and held >= BLACK_HOLD_S
+        c.create_rectangle(px0, by - 6, px1, by + 6, fill=COLOR_BG, outline=COLOR_ACCENT if on else COLOR_BG3)
+        if on:
+            c.create_rectangle(px0, by - 6, px1, by + 6, fill=COLOR_ACCENT, outline=COLOR_ACCENT)
+        elif held > 0 and BLACK_HOLD_S > 0:
+            c.create_rectangle(px0, by - 6, px0 + int((px1 - px0) * held / BLACK_HOLD_S), by + 6,
+                               fill=COLOR_BG3, outline="")
+        c.create_text((px0 + px1) // 2, by, text=f"HOLD·FA{1 if is_left else 2}",
+                     fill="white" if on else COLOR_FG_DIM, font=("Consolas", 7))
 
         # ── Trigger bar ──
         trig_x = w // 2
@@ -2697,6 +2988,7 @@ class HandPanel:
 
         # ── IMU orientation ──
         self._draw_imu(c, w, h, state)
+        self._draw_haptics(c, w, h, haptic)
 
     def _draw_imu(self, c, w, h, state):
         """Draw a 3D triad per populated IMU slot, or a placeholder if there are none."""

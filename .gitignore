@@ -39,3 +39,15 @@
 
 # debug information files
 *.dwo
+
+# Render-model meshes are sources, not object files
+!resources/rendermodels/**/*.obj
+
+# Build trees and Python caches
+out/
+build/
+__pycache__/
+
+# Bridge build outputs (bridge/build.bat)
+bridge/dist/
+bridge/assets/icon.ico

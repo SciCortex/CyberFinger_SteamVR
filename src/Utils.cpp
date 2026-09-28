@@ -10,9 +10,8 @@
 #include "Utils.h"
 #include <cstdarg>
 #include <cstdio>
-#include <cstring>
 
-namespace merged_ctrl {
+namespace cf {
 
 static vr::IVRDriverLog* g_pLog = nullptr;
 
@@ -24,37 +23,32 @@ void DriverLog(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-
-    if (g_pLog)
-        g_pLog->Log(buf);
+    if (g_pLog) g_pLog->Log(buf);
 }
 
-std::string GetDriverSettingString(const char* section, const char* key,
-                                    const char* defaultVal) {
+std::string SettingString(const char* key, const char* def) {
     char buf[512]{};
-    vr::EVRSettingsError err;
-    vr::VRSettings()->GetString(section, key, buf, sizeof(buf), &err);
-    if (err != vr::VRSettingsError_None) return defaultVal;
-    return buf;
+    vr::EVRSettingsError err = vr::VRSettingsError_None;
+    vr::VRSettings()->GetString(kSettingsSection, key, buf, sizeof(buf), &err);
+    return (err == vr::VRSettingsError_None) ? std::string(buf) : std::string(def);
 }
 
-float GetDriverSettingFloat(const char* section, const char* key, float def) {
-    vr::EVRSettingsError err;
-    float val = vr::VRSettings()->GetFloat(section, key, &err);
-    return (err == vr::VRSettingsError_None) ? val : def;
+float SettingFloat(const char* key, float def) {
+    vr::EVRSettingsError err = vr::VRSettingsError_None;
+    const float v = vr::VRSettings()->GetFloat(kSettingsSection, key, &err);
+    return (err == vr::VRSettingsError_None) ? v : def;
 }
 
-int32_t GetDriverSettingInt(const char* section, const char* key, int32_t def) {
-    vr::EVRSettingsError err;
-    int32_t val = vr::VRSettings()->GetInt32(section, key, &err);
-    return (err == vr::VRSettingsError_None) ? val : def;
+int32_t SettingInt(const char* key, int32_t def) {
+    vr::EVRSettingsError err = vr::VRSettingsError_None;
+    const int32_t v = vr::VRSettings()->GetInt32(kSettingsSection, key, &err);
+    return (err == vr::VRSettingsError_None) ? v : def;
 }
 
-bool GetDriverSettingBool(const char* section, const char* key, bool def) {
-    vr::EVRSettingsError err;
-    bool val = vr::VRSettings()->GetBool(section, key, &err);
-    return (err == vr::VRSettingsError_None) ? val : def;
+bool SettingBool(const char* key, bool def) {
+    vr::EVRSettingsError err = vr::VRSettingsError_None;
+    const bool v = vr::VRSettings()->GetBool(kSettingsSection, key, &err);
+    return (err == vr::VRSettingsError_None) ? v : def;
 }
 
-} // namespace merged_ctrl
-
+} // namespace cf
