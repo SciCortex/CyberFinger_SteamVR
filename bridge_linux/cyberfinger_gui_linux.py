@@ -1131,7 +1131,7 @@ class HandPanel:
         self.frame = ttk.Frame(parent)
         self.frame.pack(side=side, fill=tk.BOTH, expand=True, padx=(0, 4) if side == tk.LEFT else (4, 0))
 
-        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, height=210)
+        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, width=1, height=210)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
     def update_state(self, state: HandState):
