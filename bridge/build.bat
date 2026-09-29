@@ -31,7 +31,13 @@ if exist "dist\CyberFingerBridge.exe" del /f "dist\CyberFingerBridge.exe"
 REM Step 3: Build with PyInstaller
 REM   --log-level WARN    less noise
 REM   PYTHONDONTWRITEBYTECODE prevents .pyc caching with local paths
+REM   build_info.py records the git commit for the console (the .exe has no git); see bridge_version.git_hash()
 echo [3/4] Building executable (paths will be stripped)...
+set "GIT_HASH="
+for /f %%h in ('git describe --always --dirty 2^>nul') do set "GIT_HASH=%%h"
+if not defined GIT_HASH set "GIT_HASH=unknown"
+> build_info.py echo GIT_HASH = "%GIT_HASH%"
+echo   Git commit: %GIT_HASH%
 set PYTHONDONTWRITEBYTECODE=1
 pyinstaller cyberfinger_bridge.spec --noconfirm --log-level WARN
 if errorlevel 1 (

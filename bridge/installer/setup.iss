@@ -5,7 +5,15 @@
 ; staging the Resonite mods (tools\stage_resonite_mods.py).
 
 #define MyAppName "CyberFinger Bridge"
-#define MyAppVersion "2.1.0"
+; The version comes from the first line of bridge\bridge_version.py (VERSION = "x.y.z"), shared with the GUI.
+#define VersionFile FileOpen(AddBackslash(SourcePath) + "..\bridge_version.py")
+#define VersionLine FileRead(VersionFile)
+#expr FileClose(VersionFile)
+#define MyAppVersion Copy(VersionLine, Pos('"', VersionLine) + 1, RPos('"', VersionLine) - Pos('"', VersionLine) - 1)
+#if MyAppVersion == ""
+  #error Could not read the version from bridge\bridge_version.py (its first line must be VERSION = "x.y.z").
+#endif
+#pragma message "Building version " + MyAppVersion
 #define MyAppPublisher "SciCortex Technologies Corp."
 #define MyAppURL "https://github.com/DrSciCortex/CyberFinger"
 #define MyAppExeName "CyberFingerBridge.exe"

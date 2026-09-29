@@ -32,6 +32,7 @@ import pink_button    # the right pink button: Windows microphone mute or a Flux
 import tap_gesture    # a triple tap on the joint IMU: resync the driver's IMU fusion
 from driver_link import DriverLink          # driver → bridge: haptic requests, driver status
 from haptics_view import describe as describe_haptic, draw_haptic_meter
+from bridge_version import VERSION, git_hash
 
 try:
     import pystray
@@ -1999,7 +2000,7 @@ class GamepadModeVRChat:
 class CyberFingerApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("CyberFinger Bridge")
+        self.root.title(f"CyberFinger Bridge v{VERSION}")
         self.root.configure(bg=COLOR_BG)
         self.root.geometry("680x700")
         self.root.minsize(600, 620)
@@ -2058,6 +2059,7 @@ class CyberFingerApp:
         if HAS_TRAY:
             self._setup_tray()
 
+        self.log(f"CyberFinger Bridge v{VERSION} ({git_hash()})")
         self._poll_queues()
 
         # X button minimizes to tray (if available), otherwise saves and quits

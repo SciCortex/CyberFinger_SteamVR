@@ -40,6 +40,10 @@ import queue
 import json
 import subprocess
 
+# The bridge version lives in bridge/bridge_version.py, shared with the Windows GUI and installer.
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bridge"))
+from bridge_version import VERSION, git_hash
+
 try:
     from bleak import BleakScanner, BleakClient
     from bleak.backends.bluezdbus.manager import get_global_bluez_manager
@@ -751,7 +755,7 @@ class GamepadModeVRChat:
 class CyberFingerApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("CyberFinger Bridge")
+        self.root.title(f"CyberFinger Bridge v{VERSION}")
         self.root.configure(bg=COLOR_BG)
         self.root.geometry("680x620")
         self.root.minsize(600, 540)
@@ -792,6 +796,7 @@ class CyberFingerApp:
         if HAS_TRAY:
             self._setup_tray()
 
+        self.log(f"CyberFinger Bridge v{VERSION} ({git_hash()})")
         self._poll_queues()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
