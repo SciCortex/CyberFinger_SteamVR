@@ -2839,7 +2839,7 @@ class HandPanel:
         self.frame = ttk.Frame(parent)
         self.frame.pack(side=side, fill=tk.BOTH, expand=True, padx=(0, 4) if side == tk.LEFT else (4, 0))
 
-        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, height=380)
+        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, width=1, height=380)
         self.canvas.pack(fill=tk.BOTH, expand=True)
 
         self._last_state = None
@@ -3072,7 +3072,7 @@ class SkeletonPanel:
         self.frame = ttk.Frame(parent)
         self.frame.pack(side=side, fill=tk.BOTH, expand=True,
                         padx=(0, 4) if side == tk.LEFT else (4, 0))
-        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0,
+        self.canvas = tk.Canvas(self.frame, bg=COLOR_BG2, highlightthickness=0, width=1,
                                 height=150)
         self.canvas.pack(fill=tk.BOTH, expand=True)
         # Projection axes, chosen from the first tracked frame and then kept
