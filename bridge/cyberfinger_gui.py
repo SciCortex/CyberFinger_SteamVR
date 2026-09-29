@@ -32,7 +32,7 @@ import pink_button    # the right pink button: Windows microphone mute or a Flux
 import tap_gesture    # a triple tap on the joint IMU: resync the driver's IMU fusion
 from driver_link import DriverLink          # driver → bridge: haptic requests, driver status
 from haptics_view import describe as describe_haptic, draw_haptic_meter
-from bridge_version import VERSION
+from bridge_version import VERSION, git_hash
 
 try:
     import pystray
@@ -2059,7 +2059,7 @@ class CyberFingerApp:
         if HAS_TRAY:
             self._setup_tray()
 
-        self.log(f"CyberFinger Bridge v{VERSION}")
+        self.log(f"CyberFinger Bridge v{VERSION} ({git_hash()})")
         self._poll_queues()
 
         # X button minimizes to tray (if available), otherwise saves and quits

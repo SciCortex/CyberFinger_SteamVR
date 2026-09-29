@@ -54,3 +54,6 @@ bridge/assets/icon.ico
 
 # Resonite mods staged for the installer (tools/stage_resonite_mods.py)
 bridge/installer/resonite_mods/
+
+# Git commit recorded by bridge/build.bat for the .exe
+bridge/build_info.py

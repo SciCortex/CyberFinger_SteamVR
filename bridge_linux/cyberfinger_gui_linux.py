@@ -42,7 +42,7 @@ import subprocess
 
 # The bridge version lives in bridge/bridge_version.py, shared with the Windows GUI and installer.
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "bridge"))
-from bridge_version import VERSION
+from bridge_version import VERSION, git_hash
 
 try:
     from bleak import BleakScanner, BleakClient
@@ -796,7 +796,7 @@ class CyberFingerApp:
         if HAS_TRAY:
             self._setup_tray()
 
-        self.log(f"CyberFinger Bridge v{VERSION}")
+        self.log(f"CyberFinger Bridge v{VERSION} ({git_hash()})")
         self._poll_queues()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
