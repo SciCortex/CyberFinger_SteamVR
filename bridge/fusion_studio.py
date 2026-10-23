@@ -5772,9 +5772,18 @@ class FusionStudioTab:
 
 
 def main():
+    # The packaged .exe (fusion_studio.spec) is also the OpenXR helper process (openxr_skeleton starts a second copy of
+    # it with --openxr-provider) and can check itself (--selftest [report file]).
+    if "--openxr-provider" in sys.argv:
+        sys.argv.remove("--openxr-provider")
+        import openxr_skeleton_provider
+        return openxr_skeleton_provider.main()
+    if "--selftest" in sys.argv:
+        import fusion_studio_selftest
+        return fusion_studio_selftest.run(sys.argv[sys.argv.index("--selftest") + 1:])
     app = FusionStudioApp()
     app.run()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

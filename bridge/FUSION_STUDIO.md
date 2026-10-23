@@ -19,11 +19,22 @@ source, so SteamVR apps get the hand even where the headset camera cannot see it
 
 ## Run
 
+**The Windows app (no Python needed):** unzip `CyberFingerFusionStudio.zip` into a folder you can write to (e.g.
+Documents — not Program Files: the Studio saves its refined EMG posture model next to itself) and run
+`CyberFingerFusionStudio.exe`. To check an installation without any hardware, run
+`CyberFingerFusionStudio.exe --selftest`: it starts the Studio, streams the built-in EMG simulator, starts the
+headset helper, quits, and writes the result to `%APPDATA%\CyberFingerBridge\fusion_studio_selftest.txt`.
+
+**From source** (Python 3.12):
+
 ```
 cd bridge
-pip install -r requirements.txt -r requirements-fusion-studio.txt
+pip install -r requirements-fusion-studio-lock.txt
 python fusion_studio.py
 ```
+
+`requirements-fusion-studio.txt` lists the same packages without versions. pyopenxr must stay at 1.1.5301 for now:
+1.1.6302 ships an API-layer DLL that does not load.
 
 Top bar:
 
@@ -70,6 +81,8 @@ is the learned flag detector (trained on recordings of real posture changes) and
 ## Files
 
 - `fusion_studio.py` — the application (CyberFinger BLE, SteamVR driver link, OpenXR preview, EMG dashboard, fusion, drawing).
+- `fusion_studio_selftest.py` — `--selftest`: checks that every component and model loaded (no hardware needed).
+- `fusion_studio.spec`, `build_fusion_studio.bat` — the Windows app build.
 - `openxr_skeleton.py`, `openxr_skeleton_provider.py` — OpenXR hand-tracking source (runs the session in a helper process).
 - `armband_panel.py`, `armband/` — MindRove EMG stream, filters, simulator, feature extraction.
 - `gesture_skeleton.py` — EMG feature vector shared by the posture models.
@@ -87,3 +100,17 @@ is the learned flag detector (trained on recordings of real posture changes) and
 
 Settings (CyberFinger options, camera field of view, IMU slots) are shared with the CyberFinger Bridge in
 `%APPDATA%\CyberFingerBridge\settings.json`.
+
+## Build the Windows app
+
+```
+cd bridge
+pip install -r requirements-fusion-studio-lock.txt pyinstaller
+build_fusion_studio.bat
+```
+
+`fusion_studio.spec` makes a folder build, `dist\CyberFingerFusionStudio\` (`CyberFingerFusionStudio.exe` and its
+`_internal` folder: Python, the libraries, the MindRove SDK and OpenXR loader DLLs, the models). The script then runs the
+exe's self-test and zips the folder into `dist\CyberFingerFusionStudio.zip`. The same exe is the headset's OpenXR
+helper process (`--openxr-provider`, started by the Studio itself). Build from a path without your user name (e.g.
+`C:\Build\CyberFinger\`): module paths end up in the exe.
