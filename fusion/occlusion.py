@@ -77,7 +77,54 @@ def _seg_seg(p1, q1, p2, q2):
     return float(np.linalg.norm(cp1 - cp2)), s
 
 
+_BA = np.array([b[0] for b in _BONES]); _BB = np.array([b[1] for b in _BONES])
+_BPALM = np.array([b[2] for b in _BONES], bool)
+_JS = np.arange(2, 26)
+_INCIDENT = (_JS[:, None] == _BA[None, :]) | (_JS[:, None] == _BB[None, :])      # (24 joints, bones)
+
+
 def per_joint_visibility(P, cam, r_finger=0.010, r_palm=0.018, s_max=0.95):
+    """P: (26,3) world joints (metres). cam: (3,) HMD position. Returns vis (26,) in [0,1] —
+    1 = the camera clearly sees the joint, 0 = fully self-occluded. A bone occludes a joint when
+    the camera→joint ray passes within the bone's radius at a point IN FRONT of the joint
+    (s < s_max excludes only the sliver right at the joint), and never its own incident bones.
+    Occlusion strength = how deeply the ray penetrates the bone (1 − dist/radius).
+    Vectorised over every (joint, bone) pair; same result as the reference loop below."""
+    P = np.asarray(P, float)
+    cam = np.asarray(cam, float)
+    eps = 1e-12
+    d1 = (P[_JS] - cam)[:, None, :]                       # camera → joint rays   (J, 1, 3)
+    p2 = P[_BA][None, :, :]; d2 = (P[_BB] - P[_BA])[None, :, :]   # bones        (1, B, 3)
+    r = cam[None, None, :] - p2                           # (1, B, 3)
+    a = np.sum(d1 * d1, axis=-1)                          # (J, 1)
+    e = np.sum(d2 * d2, axis=-1)                          # (1, B)
+    f = np.sum(d2 * r, axis=-1)                           # (1, B)
+    c = np.sum(d1 * r, axis=-1)                           # (J, B)
+    b = np.sum(d1 * d2, axis=-1)                          # (J, B)
+    a, e, f = np.broadcast_to(a, c.shape), np.broadcast_to(e, c.shape), np.broadcast_to(f, c.shape)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        denom = a * e - b * b
+        s = np.where(denom > eps, np.clip((b * f - c * e) / denom, 0.0, 1.0), 0.0)
+        t = (b * s + f) / e
+        s_lo = np.clip(-c / a, 0.0, 1.0); s_hi = np.clip((b - c) / a, 0.0, 1.0)
+        s = np.where(t < 0.0, s_lo, np.where(t > 1.0, s_hi, s))
+        t = np.clip(t, 0.0, 1.0)
+        # degenerate segments (Ericson's special cases)
+        e0 = e <= eps; a0 = a <= eps
+        s = np.where(~a0 & e0, s_lo, s); t = np.where(~a0 & e0, 0.0, t)
+        s = np.where(a0, 0.0, s); t = np.where(a0 & ~e0, np.clip(f / e, 0.0, 1.0), t); t = np.where(a0 & e0, 0.0, t)
+    cp1 = cam[None, None, :] + s[..., None] * d1
+    cp2 = p2 + t[..., None] * d2
+    d = np.linalg.norm(cp1 - cp2, axis=-1)                # (J, B)
+    rad = np.where(_BPALM, r_palm, r_finger)[None, :]
+    hit = (~_INCIDENT) & (s < s_max) & (d < rad)
+    worst = np.where(hit, 1.0 - d / rad, 0.0).max(axis=1)
+    vis = np.ones(26)
+    vis[2:] = np.maximum(0.0, 1.0 - worst)
+    return vis
+
+
+def _per_joint_visibility_loop(P, cam, r_finger=0.010, r_palm=0.018, s_max=0.95):
     """P: (26,3) world joints (metres). cam: (3,) HMD position. Returns vis (26,) in [0,1] —
     1 = the camera clearly sees the joint, 0 = fully self-occluded. A bone occludes a joint when
     the camera→joint ray passes within the bone's radius at a point IN FRONT of the joint

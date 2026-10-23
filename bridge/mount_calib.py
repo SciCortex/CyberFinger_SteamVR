@@ -145,6 +145,18 @@ class MountCalib:
         E = Rc @ est.T
         self.alpha = wrap(self.alpha + gain * math.atan2(float(E[0, 2] - E[2, 0]), float(E[0, 0] + E[2, 2])))
 
+    def reanchor(self, R_imu, R_cam):
+        """The sensor's heading jumped (restarted, or drifted while the segment was hidden): turn the heading onto the
+        camera frame at once and drop the older pairs, so the next solves don't pull it back. The mounting M is kept;
+        if it changed too, the residual set here stays high and the mount is not trusted until it is solved again."""
+        est = self.estimate(R_imu)
+        if est is None:
+            return
+        Rc = np.asarray(R_cam, float); E = Rc @ est.T
+        self.alpha = wrap(self.alpha + math.atan2(float(E[0, 2] - E[2, 0]), float(E[0, 0] + E[2, 2])))
+        self.buf = []; self._dirty = False
+        self.resid = rot_angle_deg(self.estimate(R_imu), Rc)
+
     def status(self):
         if not self.ready:
             return f"learning the mount ({self.n_pairs} pairs)" if self.buf else "no camera pairs yet"
