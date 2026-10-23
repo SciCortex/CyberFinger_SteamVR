@@ -18,7 +18,7 @@ What the survey of the installed SteamVR, VRChat and Resonite files settled:
 |---|---|
 | S1 roles | Steam Link's hand devices (`VRLINKQ_Hand_Left/Right`, type `svl_hand_interaction_augmented`) declare `hand_priority: -1`, so CyberFinger (1000) takes the roles |
 | Load order | Higher `loadPriority` loads first (Steam Link: 110). CyberFinger uses 2000, so its hooks are in place before Steam Link creates its hand components. Virtual Desktop loads before us regardless |
-| Hook layout | `IVRDriverInput_003` and `_004` share vtable slots 0–6; one set of MinHook detours covers both |
+| Hook layout | `IVRDriverInput_003`, `_004` and `_005` share vtable slots 0–6; a set of MinHook detours per version covers them all. SteamVR of 2026-10-21 added `_005` (Steam Link uses it) and backs the older versions with adapters that forward into it, so only the outermost detour on a thread reports a call |
 | ≡ pinch | Arrives as `/input/system/click` on Steam Link's left hand, bound by role in the compositor binding. The driver forwards it to CyberFinger's left `/input/system` |
 | Q1 buttons | MENU (the context / rotary-dial button) → B/Y, Start/Select (black wrist button) → A/X, C/D/E → `/input/c,d,e` for per-app binding. Grab is tap to hold (`/input/grab`) in the VRChat and Resonite defaults |
 | Binding UI image | SteamVR has one `binding_image_point` per input, in right-image pixels, mirrored for the left hand. So both hands show the right render, the left with `"transform": "scale(-1,1)"` (as Valve does for the Vive wand); `tools/preview_bindingui.py` draws the points |

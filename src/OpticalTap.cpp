@@ -9,10 +9,14 @@
 //
 // The hook pattern (MinHook on the implementation functions behind the
 // interface vtable) follows OpenVR-SpaceCalibrator. vrserver implements every
-// IVRDriverInput version itself, and slots 0–6 are identical in _003 and _004,
-// so hooking those functions observes every driver's calls, whichever
-// interface version it was built against. TrackedDevicePoseUpdated is slot 1
-// of IVRServerDriverHost _005 and _006 (SpaceCalibrator hooks the same slot).
+// IVRDriverInput version itself, and slots 0–6 are identical in _003, _004 and
+// _005, so hooking those functions observes every driver's calls, whichever
+// interface version it was built against. SteamVR of 2026-10-21 added _005 and
+// Steam Link moved to it; its older versions are adapters that forward into
+// _005 (the _004 one jumps to the same slot unchanged for slots 0–9), so only
+// the outermost detour on a thread reports a call. TrackedDevicePoseUpdated is
+// slot 1 of IVRServerDriverHost _005 and _006 (SpaceCalibrator hooks the same
+// slot).
 // ═══════════════════════════════════════════════════════════════════════════
 
 #include "OpticalTap.h"
@@ -58,6 +62,17 @@ constexpr int kSlotUpdateScalar = 3;
 constexpr int kSlotCreateSkel = 5;
 constexpr int kSlotUpdateSkel = 6;
 
+// The older IVRDriverInput versions forward into the latest one, so a call
+// through a hooked adapter reaches a second hooked function on the same thread.
+// Any IVRDriverInput call made from inside a tap callback counts as nested too
+// and goes unseen: the callbacks must not submit (ServerProvider republishes
+// from its own thread).
+thread_local int t_nested = 0;
+struct Outer {
+    const bool first = (t_nested++ == 0);
+    ~Outer() { --t_nested; }
+};
+
 struct Originals {
     CreateBoolFn createBool = nullptr;
     UpdateBoolFn updateBool = nullptr;
@@ -75,36 +90,43 @@ struct HookSet {
 
     static vr::EVRInputError CreateBool(vr::IVRDriverInput* self, vr::PropertyContainerHandle_t c,
                                         const char* name, vr::VRInputComponentHandle_t* h) {
+        const Outer o;
         const vr::EVRInputError e = orig.createBool(self, c, name, h);
-        if (e == vr::VRInputError_None && h && name)
+        if (o.first && e == vr::VRInputError_None && h && name)
             if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) t->OnCreateInput(c, name, *h);
         return e;
     }
     static vr::EVRInputError UpdateBool(vr::IVRDriverInput* self, vr::VRInputComponentHandle_t h,
                                         bool value, double timeOffset) {
+        const Outer o;
         bool hold = false;
-        if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) hold = t->OnUpdateInput(h, value ? 1.f : 0.f);
+        if (o.first)
+            if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) hold = t->OnUpdateInput(h, value ? 1.f : 0.f);
         return orig.updateBool(self, h, value && !hold, timeOffset);
     }
     static vr::EVRInputError CreateScalar(vr::IVRDriverInput* self, vr::PropertyContainerHandle_t c,
                                           const char* name, vr::VRInputComponentHandle_t* h,
                                           vr::EVRScalarType type, vr::EVRScalarUnits units) {
+        const Outer o;
         const vr::EVRInputError e = orig.createScalar(self, c, name, h, type, units);
-        if (e == vr::VRInputError_None && h && name)
+        if (o.first && e == vr::VRInputError_None && h && name)
             if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) t->OnCreateInput(c, name, *h);
         return e;
     }
     static vr::EVRInputError UpdateScalar(vr::IVRDriverInput* self, vr::VRInputComponentHandle_t h,
                                           float value, double timeOffset) {
-        if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) t->OnUpdateInput(h, value);
+        const Outer o;
+        if (o.first)
+            if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) t->OnUpdateInput(h, value);
         return orig.updateScalar(self, h, value, timeOffset);
     }
     static vr::EVRInputError CreateSkel(vr::IVRDriverInput* self, vr::PropertyContainerHandle_t c,
                                         const char* name, const char* skeletonPath, const char* basePosePath,
                                         vr::EVRSkeletalTrackingLevel level, const vr::VRBoneTransform_t* grip,
                                         uint32_t gripCount, vr::VRInputComponentHandle_t* h) {
+        const Outer o;
         const vr::EVRInputError e = orig.createSkel(self, c, name, skeletonPath, basePosePath, level, grip, gripCount, h);
-        if (e == vr::VRInputError_None && h)
+        if (o.first && e == vr::VRInputError_None && h)
             if (OpticalTap* t = g_tap.load(std::memory_order_acquire))
                 t->OnCreateSkeleton(c, name, skeletonPath, basePosePath, level, *h);
         return e;
@@ -112,7 +134,9 @@ struct HookSet {
     static vr::EVRInputError UpdateSkel(vr::IVRDriverInput* self, vr::VRInputComponentHandle_t h,
                                         vr::EVRSkeletalMotionRange range, const vr::VRBoneTransform_t* bones,
                                         uint32_t count) {
-        if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) t->OnUpdateSkeleton(h, range, bones, count);
+        const Outer o;
+        if (o.first)
+            if (OpticalTap* t = g_tap.load(std::memory_order_acquire)) t->OnUpdateSkeleton(h, range, bones, count);
         return orig.updateSkel(self, h, range, bones, count);
     }
 };
@@ -133,7 +157,7 @@ struct PoseHook {
 };
 template <int N> PoseUpdatedFn PoseHook<N>::orig = nullptr;
 
-constexpr const char* kInterfaceVersions[] = { "IVRDriverInput_004", "IVRDriverInput_003" };
+constexpr const char* kInterfaceVersions[] = { "IVRDriverInput_005", "IVRDriverInput_004", "IVRDriverInput_003" };
 constexpr const char* kHostVersions[] = { "IVRServerDriverHost_006", "IVRServerDriverHost_005" };
 
 template <int N>
@@ -226,7 +250,7 @@ bool OpticalTap::InstallHooks(vr::IVRDriverContext* ctx) {
     std::vector<void*> hooked;
     bool skeletonUpdateHooked = false;
     int created = 0;
-    for (int v = 0; v < 2; ++v) {
+    for (int v = 0; v < 3; ++v) {
         vr::EVRInitError err = vr::VRInitError_None;
         void* iface = ctx->GetGenericInterface(kInterfaceVersions[v], &err);
         if (!iface || err != vr::VRInitError_None) {
@@ -234,8 +258,9 @@ bool OpticalTap::InstallHooks(vr::IVRDriverContext* ctx) {
             continue;
         }
         void** vtbl = *reinterpret_cast<void***>(iface);
-        created += (v == 0) ? HookVersion<0>(vtbl, hooked, skeletonUpdateHooked)
-                            : HookVersion<1>(vtbl, hooked, skeletonUpdateHooked);
+        created += (v == 0)   ? HookVersion<0>(vtbl, hooked, skeletonUpdateHooked)
+                   : (v == 1) ? HookVersion<1>(vtbl, hooked, skeletonUpdateHooked)
+                              : HookVersion<2>(vtbl, hooked, skeletonUpdateHooked);
     }
     for (int v = 0; v < 2; ++v) {
         vr::EVRInitError err = vr::VRInitError_None;
