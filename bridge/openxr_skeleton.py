@@ -88,7 +88,11 @@ class OpenXRHandSkeletonSource:
             self._errlog = open(os.path.join(cfg_dir, "openxr_provider.log"), "w")
         except Exception:
             self._errlog = None
-        cmd = [sys.executable, _PROVIDER, "--port", str(port)]
+        if getattr(sys, "frozen", False):
+            # the packaged Fusion Studio (.exe) has no separate Python: it runs the provider as a copy of itself
+            cmd = [sys.executable, "--openxr-provider", "--port", str(port)]
+        else:
+            cmd = [sys.executable, _PROVIDER, "--port", str(port)]
         if self.log_path:
             cmd += ["--log", self.log_path]
         try:

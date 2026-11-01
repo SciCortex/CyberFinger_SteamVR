@@ -18,6 +18,7 @@ import queue
 import json
 import math
 import csv
+import collections
 import cf_protocol                                   # SteamVR driver wire protocol (CFG2 CyberFinger packets)
 import cyberfinger_report                                  # the CyberFinger's BLE input report, every firmware revision
 import cyberfinger_control                                 # bridge → CyberFinger commands (haptics)
@@ -32,6 +33,18 @@ try:
     import mount_calib                               # Fusion Studio: camera-taught sensor mounting (live wrist bend out of view)
 except Exception:                                    # noqa: BLE001
     mount_calib = None
+try:
+    import steamvr_link                              # Fusion Studio → SteamVR: the fused hand on the CyberFinger driver
+except Exception:                                    # noqa: BLE001
+    steamvr_link = None
+try:
+    import finger_fusion                             # Fusion Studio: camera ↔ EMG weight per finger, w = f(m, d)
+except Exception:                                    # noqa: BLE001
+    finger_fusion = None
+try:
+    import transition_events                         # Transitions tab: the EMG burst that starts a posture change
+except Exception:                                    # noqa: BLE001
+    transition_events = None
 try:
     import pystray
     from PIL import Image, ImageDraw
@@ -2138,6 +2151,131 @@ class GamepadModeVRChat:
             self._osc_send(addr, 0)
 
 
+def _rot_log(Rm):
+    """Rotation matrix → rotation vector (axis × angle, rad)."""
+    c = max(-1.0, min(1.0, (float(_np.trace(Rm)) - 1.0) / 2.0)); th = math.acos(c); sn = math.sin(th)
+    v = _np.array([Rm[2, 1] - Rm[1, 2], Rm[0, 2] - Rm[2, 0], Rm[1, 0] - Rm[0, 1]])
+    if th < 1e-6:
+        return 0.5 * v
+    if sn < 1e-4:                                    # ~180°: axis from the column of R + I with the largest norm
+        M = Rm + _np.eye(3); j = int(_np.argmax(_np.linalg.norm(M, axis=0))); ax = M[:, j]
+        return th * ax / (float(_np.linalg.norm(ax)) or 1.0)
+    return v * (th / (2.0 * sn))
+
+
+def _rot_exp(v):
+    """Rotation vector → rotation matrix."""
+    th = float(_np.linalg.norm(v))
+    if th < 1e-9:
+        return _np.eye(3)
+    a = _np.asarray(v, float) / th
+    K = _np.array([[0.0, -a[2], a[1]], [a[2], 0.0, -a[0]], [-a[1], a[0], 0.0]])
+    return _np.eye(3) + math.sin(th) * K + (1.0 - math.cos(th)) * (K @ K)
+
+
+class _StudioTransition:
+    """Fusion Studio · smooth transitions of the DRAWN hand between the camera and the prediction, and between posture
+    sources. Per channel (wrist position, hand rotation, hand shape):
+      dwell — a switch between the camera family and the prediction family must persist DWELL s before it is drawn, so
+              a one-frame gate flicker at the edge of view does not swap the hand there and back. Meanwhile the drawn
+              hand COASTS: it keeps moving the way it was moving, gently slowing (no visible pause);
+      inertialization with momentum (as in game animation) — at each switch the offset between what is drawn and the
+              new source, AND the difference of their velocities, decay together along a critically damped curve
+              x(t) = (x0 + (v0 + w·x0)·t)·e^(−w·t): the hand keeps its speed and eases into the new source's motion,
+              without a jump, a stop or a catch-up rush; nothing is delayed outside transitions;
+      glitch guard — a one-frame leap of the source faster than a hand moves (the Quest's tracking glitches, or the
+              source catching up after a held moment) is glided the same way instead of being drawn as a jump.
+    Rotations are handled as rotation vectors in the world frame. The estimators themselves are untouched."""
+    DWELL = 0.08
+    T90 = {"pos": 0.35, "rot": 0.30, "pose": 0.30}          # time for 90 % of a transition offset to fade
+    T90_POSTURE = 0.08                                       # a key-posture change (fist → point): deliberate, so quick
+    LEAP = {"pos": (0.08, 3.0), "rot": (45.0, 900.0), "pose": (0.025, 0.6)}   # (size per frame, speed): m, m/s | °, °/s
+    VMAX = {"pos": 2.0, "rot": math.radians(720.0), "pose": 0.5}             # cap on the carried velocity
+    FRICTION = 0.15                                          # s: how fast the coasting speed settles during a dwell
+    COAST_TO_SOURCE = False                                  # settle toward the incoming source's speed (else toward 0)
+
+    def __init__(self):
+        self.ch = {}
+
+    def shown(self, name):
+        c = self.ch.get(name)
+        return None if c is None else c["disp"]
+
+    def blending(self, name):
+        c = self.ch.get(name)
+        return bool(c is not None and (c["x0"] is not None or c["cand"] is not None))
+
+    @staticmethod
+    def _diff(a, b, rot):
+        return _rot_log(a @ b.T) if rot else (a - b)
+
+    @staticmethod
+    def _apply(value, off, rot):
+        return (_rot_exp(off) @ value) if rot else (value + off)
+
+    def _cap(self, name, v):
+        lim = self.VMAX[name]
+        if v.ndim == 2:                                      # per joint
+            n = _np.linalg.norm(v, axis=1, keepdims=True)
+            return v * _np.minimum(1.0, lim / _np.maximum(n, 1e-9))
+        n = float(_np.linalg.norm(v))
+        return v * (lim / n) if n > lim else v
+
+    def _leap(self, name, a, b, rot, dt):
+        size, speed = self.LEAP[name]
+        if rot:
+            d = math.degrees(math.acos(max(-1.0, min(1.0, (float(_np.trace(a.T @ b)) - 1.0) / 2.0))))
+        elif name == "pose":
+            d = float(_np.linalg.norm(a - b, axis=-1).mean())
+        else:
+            d = float(_np.linalg.norm(a - b))
+        return d > size and d / max(dt, 1e-3) > speed
+
+    def step(self, name, now, key, value, rot=False, dt=1 / 30.0, t90=None):
+        c = self.ch.get(name)
+        if value is None:
+            return None if c is None else c["disp"]
+        value = _np.asarray(value, float)
+        zero = _np.zeros(3) if rot else _np.zeros_like(value)
+        if c is None or c["disp"] is None or c["disp"].shape != value.shape:
+            self.ch[name] = {"key": key, "cand": None, "cand_t": 0.0, "x0": None, "v0": None, "t0": now, "disp": value,
+                             "vd": zero, "raw": {key: (value, now)}, "tprev": now}
+            return value
+        dtd = (now - c["tprev"]) if now > c["tprev"] else max(dt, 1e-3)
+        last = c["raw"].get(key); c["raw"][key] = (value, now)
+        vsrc = (self._diff(value, last[0], rot) / (now - last[1])
+                if (last is not None and 0.0 < now - last[1] < 0.12) else zero)
+        reanchor = leap = False
+        if key != c["key"]:
+            if key[0] != c["key"][0]:                        # camera <-> prediction: must persist DWELL first
+                if c["cand"] != key:
+                    c["cand"], c["cand_t"] = key, now
+                if now - c["cand_t"] < self.DWELL:           # coast meanwhile: keep the drawn motion, settling its speed
+                    c["disp"] = self._apply(c["disp"], c["vd"] * dtd, rot)
+                    tgt = vsrc if self.COAST_TO_SOURCE else zero
+                    c["vd"] = tgt + (c["vd"] - tgt) * math.exp(-dtd / self.FRICTION); c["tprev"] = now
+                    return c["disp"]
+            c["key"] = key; c["cand"] = None; reanchor = True
+        elif c["cand"] is not None:                          # a held moment ended without a switch: glide from the hold
+            c["cand"] = None; reanchor = True
+        elif last is not None and self._leap(name, last[0], value, rot, dt):   # the source leapt: glide, not jump
+            reanchor = leap = True
+        if reanchor:                                         # start the blend one frame back, so this frame already moves
+            vs = zero if leap else vsrc
+            c["x0"] = self._diff(c["disp"], value, rot) + vs * dtd
+            c["v0"] = self._cap(name, c["vd"] - vs); c["t0"] = now - dtd; c["w"] = 3.89 / (t90 or self.T90[name])
+        disp = value
+        if c["x0"] is not None:
+            w = c.get("w") or 3.89 / self.T90[name]; t = max(0.0, now - c["t0"])
+            if w * t > 6.0:
+                c["x0"] = None
+            else:
+                disp = self._apply(value, (c["x0"] + (c["v0"] + w * c["x0"]) * t) * math.exp(-w * t), rot)
+        c["vd"] = 0.5 * c["vd"] + 0.5 * (self._diff(disp, c["disp"], rot) / max(dtd, 1e-3))
+        c["disp"] = disp; c["tprev"] = now
+        return disp
+
+
 class _OneEuroVec:
     """One-Euro filter (Casiez et al. 2012) for a vector signal — strong smoothing when the value
     is still (kills jitter), light smoothing when it moves fast (low lag). Beats a fixed EMA, which
@@ -2319,7 +2457,6 @@ class FusionStudioApp:
         self._ppose = None                   # SEPARATE continuous pose regressor (IMU+EMG → 5 curls), own file
         self._ppose_Wlive = None             # ONLINE-refined weights (NLMS from live optical ground truth)
         self._ppose_adapt_n = 0; self._ppose_err_ema = None
-        self._ppose_adapt_n = 0; self._ppose_err_ema = None
         self._ppose_bufZ = self._ppose_bufT = self._ppose_bufW = None   # rehearsal buffer (anti-forgetting)
         self._ppose_bufn = 0
         self._ppose_curl_filt = _OneEuroVec(mincutoff=2.0, beta=1.0)   # smooth the continuous skeleton morph
@@ -2337,7 +2474,6 @@ class FusionStudioApp:
         self._pcap_fwd = None                # torso-forward (horizontal unit vector, world) — "Set forward"
         self._pcap_hmd = None                # latest (pos, R) of the headset, for the Set-forward button
         self._pcap_prevP = None; self._pcap_same = 0     # frozen-pose detector (Quest repeats a pose it can't see)
-        self._pcap_prevP = None; self._pcap_same = 0     # frozen-pose detector (Quest repeats a pose it can't see)
         self._pcap_prev_w = None             # previous wrist (world) → speed read-out
         self._pcap_disk = None               # coverage already on disk: {"xyz": (N,3), "palm": (N,3)}
         self._pcap_files = []                # clip paths, same order as the tab's list
@@ -2349,94 +2485,40 @@ class FusionStudioApp:
         self._plp_lost_t = 0.0               # seconds since the camera last placed the hand
         self._plp_err_ema = None             # running model error while the camera can check it (m)
         self._plp_last = None; self._plp_src = None; self._plp_vel = (0.0, 0.0, 0.0)
-        self._plp_last = None; self._plp_src = None; self._plp_vel = (0.0, 0.0, 0.0)
-        self._plp_last = None; self._plp_src = None; self._plp_vel = (0.0, 0.0, 0.0)
-        self._plp_prevP = None; self._plp_same = 0       # frozen-pose detector (a repeated pose is not a camera fix)
         self._plp_prevP = None; self._plp_same = 0       # frozen-pose detector (a repeated pose is not a camera fix)
         self._pbv_curl_filt = _OneEuroVec(mincutoff=2.0, beta=1.0)
         self._pbv_fwd = None; self._pbv_hmd = None       # body 'forward' (horizontal, world) · last (hmd_p, hmd_R)
-        self._pbv_fwd = None; self._pbv_hmd = None       # body 'forward' (horizontal, world) · last (hmd_p, hmd_R)
         self._pbv_resid = None; self._pbv_model_then = None; self._pbv_last_w = None
-        self._pbv_resid = None; self._pbv_model_then = None; self._pbv_last_w = None
-        self._pbv_resid = None; self._pbv_model_then = None; self._pbv_last_w = None
-        self._pbv_lost_t = 0.0; self._pbv_err_ema = None; self._pbv_prevP = None; self._pbv_same = 0
-        self._pbv_lost_t = 0.0; self._pbv_err_ema = None; self._pbv_prevP = None; self._pbv_same = 0
-        self._pbv_lost_t = 0.0; self._pbv_err_ema = None; self._pbv_prevP = None; self._pbv_same = 0
         self._pbv_lost_t = 0.0; self._pbv_err_ema = None; self._pbv_prevP = None; self._pbv_same = 0
         self._pbv_msg = ("", 0.0)
         self._fk_mod = None; self._fk_cfg = {}; self._fk_cal_u = None; self._fk_cal_f = None
-        self._fk_mod = None; self._fk_cfg = {}; self._fk_cal_u = None; self._fk_cal_f = None
-        self._fk_mod = None; self._fk_cfg = {}; self._fk_cal_u = None; self._fk_cal_f = None
-        self._fk_mod = None; self._fk_cfg = {}; self._fk_cal_u = None; self._fk_cal_f = None
-        self._fk_fwd = None; self._fk_hmd = None; self._fk_u_held = None; self._fk_acc_hang = None
-        self._fk_fwd = None; self._fk_hmd = None; self._fk_u_held = None; self._fk_acc_hang = None
-        self._fk_fwd = None; self._fk_hmd = None; self._fk_u_held = None; self._fk_acc_hang = None
         self._fk_fwd = None; self._fk_hmd = None; self._fk_u_held = None; self._fk_acc_hang = None
         self._fk_L_held = None               # shoulder→elbow distance the camera implied at the last fix ('camera' source)
         self._fk_prevP = None; self._fk_same = 0; self._fk_pending = None; self._fk_msg = ("", 0.0)
-        self._fk_prevP = None; self._fk_same = 0; self._fk_pending = None; self._fk_msg = ("", 0.0)
-        self._fk_prevP = None; self._fk_same = 0; self._fk_pending = None; self._fk_msg = ("", 0.0)
-        self._fk_prevP = None; self._fk_same = 0; self._fk_pending = None; self._fk_msg = ("", 0.0)
         self._fk_err_ema = None; self._fk_merr_ema = None; self._fk_ncmp = 0; self._fk_buf = []; self._fk_tickn = 0
-        self._fk_err_ema = None; self._fk_merr_ema = None; self._fk_ncmp = 0; self._fk_buf = []; self._fk_tickn = 0
-        self._fk_err_ema = None; self._fk_merr_ema = None; self._fk_ncmp = 0; self._fk_buf = []; self._fk_tickn = 0
-        self._fk_err_ema = None; self._fk_merr_ema = None; self._fk_ncmp = 0; self._fk_buf = []; self._fk_tickn = 0
-        self._fk_err_ema = None; self._fk_merr_ema = None; self._fk_ncmp = 0; self._fk_buf = []; self._fk_tickn = 0
-        self._fk_log_f = None; self._fk_log_w = None; self._fk_log_n = 0; self._fk_log_path = None; self._fk_log_t0 = 0.0
-        self._fk_log_f = None; self._fk_log_w = None; self._fk_log_n = 0; self._fk_log_path = None; self._fk_log_t0 = 0.0
-        self._fk_log_f = None; self._fk_log_w = None; self._fk_log_n = 0; self._fk_log_path = None; self._fk_log_t0 = 0.0
-        self._fk_log_f = None; self._fk_log_w = None; self._fk_log_n = 0; self._fk_log_path = None; self._fk_log_t0 = 0.0
         self._fk_log_f = None; self._fk_log_w = None; self._fk_log_n = 0; self._fk_log_path = None; self._fk_log_t0 = 0.0
         self._fk_last = {}
         self._pg = None; self._pg_Wlive = None; self._pg_shW = None
-        self._pg = None; self._pg_Wlive = None; self._pg_shW = None
-        self._pg = None; self._pg_Wlive = None; self._pg_shW = None
         self._pg_curl_filt = _OneEuroVec(mincutoff=2.0, beta=1.0)
-        self._hyb_mod = None; self._hyb_nets = None; self._hyb_tracker = None; self._hyb_right = None
-        self._hyb_mod = None; self._hyb_nets = None; self._hyb_tracker = None; self._hyb_right = None
-        self._hyb_mod = None; self._hyb_nets = None; self._hyb_tracker = None; self._hyb_right = None
         self._hyb_mod = None; self._hyb_nets = None; self._hyb_tracker = None; self._hyb_right = None
         self._hyb_curl_filt = _OneEuroVec(mincutoff=2.0, beta=1.0)
         self._hyb_fwd = None; self._hyb_hmd = None; self._hyb_prevP = None; self._hyb_same = 0; self._hyb_msg = ("", 0.0)
-        self._hyb_fwd = None; self._hyb_hmd = None; self._hyb_prevP = None; self._hyb_same = 0; self._hyb_msg = ("", 0.0)
-        self._hyb_fwd = None; self._hyb_hmd = None; self._hyb_prevP = None; self._hyb_same = 0; self._hyb_msg = ("", 0.0)
-        self._hyb_fwd = None; self._hyb_hmd = None; self._hyb_prevP = None; self._hyb_same = 0; self._hyb_msg = ("", 0.0)
-        self._hyb_fwd = None; self._hyb_hmd = None; self._hyb_prevP = None; self._hyb_same = 0; self._hyb_msg = ("", 0.0)
-        self._hyb_old_resid = None; self._hyb_old_then = None; self._hyb_freeze_w = None
-        self._hyb_old_resid = None; self._hyb_old_then = None; self._hyb_freeze_w = None
         self._hyb_old_resid = None; self._hyb_old_then = None; self._hyb_freeze_w = None
         self._hyb_err = {}; self._hyb_nerr = 0
-        self._hyb_err = {}; self._hyb_nerr = 0
         self._hyb_good_n = 0; self._hyb_handback = None; self._hyb_last_src = None; self._hyb_last_pos = None
-        self._hyb_good_n = 0; self._hyb_handback = None; self._hyb_last_src = None; self._hyb_last_pos = None
-        self._hyb_good_n = 0; self._hyb_handback = None; self._hyb_last_src = None; self._hyb_last_pos = None
-        self._hyb_good_n = 0; self._hyb_handback = None; self._hyb_last_src = None; self._hyb_last_pos = None
-        self._hyb_log_f = None; self._hyb_log_w = None; self._hyb_log_n = 0; self._hyb_log_path = None
-        self._hyb_log_f = None; self._hyb_log_w = None; self._hyb_log_n = 0; self._hyb_log_path = None
-        self._hyb_log_f = None; self._hyb_log_w = None; self._hyb_log_n = 0; self._hyb_log_path = None
         self._hyb_log_f = None; self._hyb_log_w = None; self._hyb_log_n = 0; self._hyb_log_path = None
         self._load_hyb()
         self._st_tracker = None; self._st_right = None; self._st_curl_filt = _OneEuroVec(mincutoff=2.0, beta=1.0)
-        self._st_tracker = None; self._st_right = None; self._st_curl_filt = _OneEuroVec(mincutoff=2.0, beta=1.0)
-        self._st_tracker = None; self._st_right = None; self._st_curl_filt = _OneEuroVec(mincutoff=2.0, beta=1.0)
-        self._st_fwd = None; self._st_head_fwd = None; self._st_prevP = None; self._st_same = 0; self._st_msg = ("", 0.0)
-        self._st_fwd = None; self._st_head_fwd = None; self._st_prevP = None; self._st_same = 0; self._st_msg = ("", 0.0)
-        self._st_fwd = None; self._st_head_fwd = None; self._st_prevP = None; self._st_same = 0; self._st_msg = ("", 0.0)
-        self._st_fwd = None; self._st_head_fwd = None; self._st_prevP = None; self._st_same = 0; self._st_msg = ("", 0.0)
         self._st_fwd = None; self._st_head_fwd = None; self._st_prevP = None; self._st_same = 0; self._st_msg = ("", 0.0)
         self._st_last_w = None; self._st_last_R = None; self._st_last_local = None
-        self._st_last_w = None; self._st_last_R = None; self._st_last_local = None
-        self._st_last_w = None; self._st_last_R = None; self._st_last_local = None
+        self._st_tx = None; self._st_ptemp = {}; self._st_last_cam = None; self._st_emg_anchor = None   # smooth transitions
+        self._st_xref = None; self._st_xbad = False; self._st_xbad_since = None; self._st_xgood_since = None; self._st_xmute_until = 0.0; self._st_xseen = 0.0   # camera↔IMU check
         self._st_mount_k = None; self._st_mount_w = None; self._st_bend_B = None; self._st_seen_t = None   # camera-taught mounts
-        self._st_mount_k = None; self._st_mount_w = None; self._st_bend_B = None; self._st_seen_t = None   # camera-taught mounts
-        self._st_mount_k = None; self._st_mount_w = None; self._st_bend_B = None; self._st_seen_t = None   # camera-taught mounts
-        self._st_mount_k = None; self._st_mount_w = None; self._st_bend_B = None; self._st_seen_t = None   # camera-taught mounts
+        self._svr_on = False; self._svr_src = None; self._svr_out = None; self._svr_shown = None   # Studio → SteamVR (FUSED)
+        self._st_ff = finger_fusion.FingerFusion() if finger_fusion is not None else None             # camera ↔ EMG weights
+        self._st_bone_ref = None; self._st_hidden_since = None    # the user's bone lengths · when the camera lost the hand
+        self._tr = None; self._tr_total = None; self._tr_det = None   # transition flags: the EMG burst that starts a posture change
         self._kp_model = None; self._kp_gate = None; self._kp_templates = {}; self._kp_rec = None; self._kp_rec_t0 = 0.0
-        self._kp_model = None; self._kp_gate = None; self._kp_templates = {}; self._kp_rec = None; self._kp_rec_t0 = 0.0
-        self._kp_model = None; self._kp_gate = None; self._kp_templates = {}; self._kp_rec = None; self._kp_rec_t0 = 0.0
-        self._kp_model = None; self._kp_gate = None; self._kp_templates = {}; self._kp_rec = None; self._kp_rec_t0 = 0.0
-        self._kp_model = None; self._kp_gate = None; self._kp_templates = {}; self._kp_rec = None; self._kp_rec_t0 = 0.0
-        self._kp_rec_label = ("fist", "front"); self._kp_clips_meta = []
         self._kp_rec_label = ("fist", "front"); self._kp_clips_meta = []
         if key_postures is not None:
             self._load_kp()
@@ -2975,6 +3057,85 @@ class FusionStudioApp:
             pt.set_follow(False)
         self._st_msg = ("body heading locked to the way you face now — tick 'follows the headset' to release", time.time() + 4.0)
 
+    def _st_steamvr(self, on, why=""):
+        """The header switch: send the Studio's hand to the CyberFinger driver (FUSED), with the headset hand from the
+        driver as the camera. The Studio's world becomes SteamVR raw space, so what it learned in the old one (mounts,
+        IMU offsets, position anchors, body heading) starts over: show the hand to the camera once."""
+        pt = getattr(self, "st_tab", None)
+        if on and not self._svr_on:
+            problem = ("steamvr_link.py could not be imported" if steamvr_link is None else
+                       "press ▶ Start CyberFinger first: the driver link runs with it"
+                       if (self.driver_link is None or not self.driver_link.running) else "")
+            if problem:
+                self._st_msg = (problem, time.time() + 6.0)
+                if pt is not None:
+                    pt.set_steamvr_on(False)
+                return
+            self._svr_src = steamvr_link.SteamVRContextSource(self.driver_link)
+            self._svr_out = steamvr_link.SteamVROutput()
+            self._svr_on = True
+            self._st_reset_world()
+            self._st_msg = ("sending to SteamVR — show your hand to the camera once so the Studio recalibrates", time.time() + 6.0)
+            self.log("Fusion Studio → SteamVR: sending this hand to the CyberFinger driver (FUSED). The Studio's camera is "
+                     "now the headset hand the driver taps; Live Preview and the skeleton reader are ignored while sending "
+                     "(they would read the Studio's own hand back).")
+        elif not on and self._svr_on:
+            self._svr_on = False
+            if self._svr_out is not None:
+                self._svr_out.close()
+            self._svr_out = None; self._svr_src = None; self._svr_shown = None
+            self._st_reset_world()
+            self.log("Fusion Studio → SteamVR: stopped" + (f" ({why})" if why else "")
+                     + "; the driver shows the headset hand again (PASSTHROUGH)")
+            if pt is not None:
+                pt.set_steamvr_on(False); pt.set_steamvr("", COLOR_FG_DIM)
+
+    def _st_reset_world(self):
+        """Forget everything tied to the Studio's world frame (it changes with the camera source)."""
+        self._st_tracker = None; self._st_fwd = None; self._st_prevP = None; self._st_same = 0
+        self._st_last_w = None; self._st_last_R = None; self._st_tx = None
+        self._st_xref = None; self._st_xbad = False; self._st_xbad_since = None; self._st_xgood_since = None; self._st_xmute_until = 0.0
+        self._st_mount_k = None; self._st_mount_w = None; self._st_bend_B = None; self._st_seen_t = None
+        for fu in (self._fuser_wrist, self._fuser_knuckle):     # shared with the other tabs, which get the same new source
+            if fu is not None:
+                fu._have_off = False                            # snap to the camera on the next clear frame
+        pt = getattr(self, "st_tab", None)
+        if pt is not None:
+            pt._trail = []; pt._dhist = []; pt._ref_f = None; pt._ref_t = None
+
+    def _st_publish(self, h, right, S, cam_ok, k_good, kp_active, src):
+        """One CFHS per Studio frame, from what the Studio draws (after its smoothing)."""
+        out = self._svr_out; pt = getattr(self, "st_tab", None)
+        wrist, hand_R, hand_local = S.get("wrist"), S.get("hand_R"), S.get("hand_local")
+        sent = False
+        if out is not None and wrist is not None and hand_R is not None and hand_local is not None:
+            hand_local = _np.asarray(hand_local, float); hand_R = _np.asarray(hand_R, float)
+            wrist = _np.asarray(wrist, float) + hand_R @ hand_local[1]          # the drawn hand's own wrist joint
+            ctx = getattr(src, "ctx", None)
+            age = (time.perf_counter() - self.driver_link._context_time) if (cam_ok and self.driver_link is not None) else 0.0
+            kp_classes = (self._kp_model or {}).get("classes", []) if getattr(self, "_kp_model", None) else []
+            sp = str(S.get("src_pose") or "")
+            sent = out.publish(
+                h, right, wrist, hand_R, hand_local, camera_sees=cam_ok, calibrated=k_good, finger_conf=S.get("fc"),
+                optical_seq=(ctx or {}).get("seq", 0) if cam_ok else 0, age_s=min(age, 0.1),
+                pos_src={"camera": 0, "hybrid": 1}.get(str(S.get("src_pos")), 2),
+                rot_src=0 if cam_ok else (1 if "knuckle" in str(S.get("src_R")) else 2),
+                pose_src=0 if sp.startswith("camera") else 1 if "KEY POSTURE" in sp else 2 if "EMG" in sp else 3,
+                key_posture=(kp_classes.index(kp_active) + 1) if (kp_active and kp_active in kp_classes) else 0)
+        if pt is not None:
+            ctx = getattr(self._svr_src, "ctx", None)
+            mode = ctx["mode"][h] if ctx is not None else None
+            mode_name = {1: "FUSED", 2: "headset hand", 3: "no pose", 4: "released"}.get(mode, "—") if ctx is not None else "no driver"
+            if out is not None and out.last_error:
+                txt, col = f"SteamVR: send failed {out.last_error[:40]}", COLOR_RED
+            elif not sent:
+                txt, col = f"SteamVR: no hand to send · driver shows {mode_name}", COLOR_ORANGE
+            else:
+                txt, col = (f"SteamVR: {mode_name} · {out.rate:.0f}/s (Studio {out.studio_rate:.0f}/s)", COLOR_GREEN if mode == 1 else COLOR_ORANGE)
+            key = (txt, col)
+            if key != self._svr_shown:
+                self._svr_shown = key; pt.set_steamvr(txt, col)
+
     def _st_reset_learning(self):
         self._ppose_reset_online()                            # the online-refined pose model is shared with Pose Hand
         pt = getattr(self, "st_tab", None)
@@ -3015,8 +3176,13 @@ class FusionStudioApp:
 
     def _st_tick(self, src):
         pt = getattr(self, "st_tab", None)
-        if pt is None or not pt.visible:
+        fl_on = (bool(getattr(getattr(self, "fl_tab", None), "visible", False)) or bool(getattr(getattr(self, "tr_tab", None), "visible", False))
+                 or getattr(self, "_tr_rec", None) is not None)
+        if pt is None or not (pt.visible or self._svr_on or fl_on):  # sending to SteamVR / Fusion Logic / Transitions: compute when hidden
             return
+        if self._svr_on and (self.driver_link is None or not self.driver_link.running):
+            self._st_steamvr(False, why="VR Mode stopped")
+        t_frame = time.perf_counter()
         now = time.time(); h = self._gest_hand; right = (h == 1); F = pt.flags(); hp_ = self._hyb_mod
         msg = self._st_msg[0] if now < self._st_msg[1] else ""
         hmd = getattr(src, "hmd", None) if src is not None else None
@@ -3074,6 +3240,60 @@ class FusionStudioApp:
         kq = self._cyberfinger_slot_quat(st, self._config.get("imu_hand_slot") or "joint") if F["knuckle"] else None
         wq = _np.asarray([float(x) for x in wq], float) if wq is not None else None
         kq = _np.asarray([float(x) for x in kq], float) if kq is not None else None
+        # ── camera ↔ IMU cross-check: the Quest sometimes flips the hand or swaps it with the other one (self-occlusion, the
+        #    other hand on top) while the gate still says it sees it; on the recordings it turned the hand 60–146° in one
+        #    frame while the knuckle IMU turned 1–3°. Two tests: (1) relative — how much the camera turned since the last
+        #    trusted frame vs how much the IMU turned (angles only, so no calibration needed); (2) absolute — the camera vs
+        #    the knuckle IMU through its camera-taught mounting, when that is trusted (normally 6° apart, > 45° in 0.65 % of
+        #    clear frames). The calibrated test decides whenever it is available: the relative one only remembers the last
+        #    trusted frame, which can itself have been a little off. A distrusted camera is not drawn, not taught from and
+        #    kept out of every calibration — so after 2.5 s of disagreement (camera blinks under 0.5 s don't restart the
+        #    count) the IMU side is the more likely culprit (heading drift while the hand was hidden, a restarted CyberFinger):
+        #    the camera is trusted again, the knuckle mount's heading is turned onto it at once, and the check rests 1 s. ──
+        cam_note = ""
+        if not F.get("crosscheck", False):
+            self._st_xbad = False
+        elif (cam_ok and R_opt is not None and mount_calib is not None and (kq is not None or wq is not None)
+                and now >= self._st_xmute_until):
+            try:
+                self._st_xseen = now
+                Rc = _np.asarray(R_opt, float)
+                Ri = _np.asarray(mount_calib.quat_wxyz_to_R(kq if kq is not None else wq), float)
+                def _a(A, B):
+                    return math.degrees(math.acos(max(-1.0, min(1.0, (float(_np.trace(A.T @ B)) - 1.0) / 2.0))))
+                lim_rel, lim_abs = ((25.0, 30.0) if self._st_xbad else (40.0, 45.0))
+                if kq is None:
+                    lim_rel += 30.0                                  # the wrist sensor also turns with the wrist bend
+                mk0 = self._st_mount_k
+                e_abs = (_a(mk0.estimate(Ri), Rc) if (kq is not None and mk0 is not None and mk0.ready
+                                                       and mk0.resid is not None and mk0.resid < 25.0) else None)
+                ref = self._st_xref
+                e_rel = (_a(Rc, ref[0]) - _a(Ri, ref[1])) if (ref is not None and now - ref[2] < 3.0) else None
+                bad = (e_abs > lim_abs) if e_abs is not None else bool(e_rel is not None and e_rel > lim_rel)
+                if bad:
+                    self._st_xgood_since = None
+                    if not self._st_xbad:
+                        self._st_xbad = True; self._st_xbad_since = now
+                    elif now - self._st_xbad_since > 2.5:
+                        self._st_xbad = False; self._st_xref = None; self._st_xmute_until = now + 1.0
+                        if e_abs is not None:
+                            mk0.reanchor(Ri, Rc)
+                            self.log(f"[studio] the knuckle IMU disagreed with the camera for 2.5 s — camera trusted again, IMU heading re-fitted (now {mk0.resid:.0f}° apart)")
+                elif self._st_xbad:
+                    if self._st_xgood_since is None:
+                        self._st_xgood_since = now
+                    if now - self._st_xgood_since >= 0.15:
+                        self._st_xbad = False
+                if self._st_xbad:
+                    cam_ok = False; cam_note = "camera disagrees with the IMU (the Quest flipped or swapped the hand)"
+                elif e_abs is None or e_abs < 25.0:
+                    self._st_xref = (Rc, Ri, now)
+            except Exception:
+                pass
+        elif not cam_ok and now - self._st_xseen > 0.5:
+            self._st_xbad = False
+        if cam_note:
+            chips["optical"] = (COLOR_ORANGE, "distrusted")
         seen_f = bool(cam_ok and gate_clear and wj is not None)
         forearm_R = qoff = wrist_raw_R = knuckle_R = None
         if self._fuser_wrist is not None and wq is not None and _fus_quat_to_R is not None:
@@ -3113,7 +3333,7 @@ class FusionStudioApp:
                 out = None; self._st_msg = (f"tracker error — {e!r}", now + 3.0)
         chips["pos"] = ((COLOR_FG_DIM, "off") if not F["pos"] else (COLOR_GREEN, "ready") if self._hyb_nets is not None else (COLOR_RED, "no weights"))
         why = ""; wrist = None; src_pos = None
-        lost_reason = ("optical off" if not F["optical"] else
+        lost_reason = (cam_note if cam_note else "optical off" if not F["optical"] else
                        {"OUT_OF_VIEW": "hand out of view", "OBJECT": "hand behind an object", "OTHER": "hand behind something",
                         "SELF": "self-occluded"}.get(gate, "frozen camera pose" if frozen else "no hand from the camera"))
         if cam_ok:
@@ -3201,6 +3421,9 @@ class FusionStudioApp:
                 if F["learn"] and cam_ok and local is not None and fc is not None:
                     target = _np.asarray(self._finger_flex(local), float)
                     wfing = _np.clip((_np.asarray(fc, float) - 0.5) / 0.4, 0.0, 1.0)
+                    if F.get("fuse") and finger_fusion is not None:      # learn only where the camera clearly dominates
+                        w_l = finger_fusion.weight(_np.asarray(fc, float), _np.abs(target - _np.clip(z @ self._ppose_Wlive, 0.0, 1.0)))
+                        wfing = _np.where(w_l > finger_fusion.LEARN_W, w_l, 0.0)
                     if float(wfing.sum()) > 0.05:
                         self._ppose_buf_add(z, target, wfing)
                         self._ppose_replay_step(z, target, wfing)
@@ -3213,7 +3436,8 @@ class FusionStudioApp:
                             pt.set_learn_status(f"● learning [{seen_f_}] · remembers {self._ppose_bufn} exemplars · "
                                                 f"refined on {self._ppose_adapt_n} frames · err {self._ppose_err_ema:.3f}")
                     else:
-                        pt.set_learn_status("paused — no finger is clearly visible to the camera", COLOR_ORANGE)
+                        pt.set_learn_status("paused — " + ("the camera does not clearly dominate any finger (w ≤ 0.8)" if F.get("fuse")
+                                            else "no finger is clearly visible to the camera"), COLOR_ORANGE)
                 elif F["learn"]:
                     pt.set_learn_status(("paused — camera does not see the hand; predicting from EMG + IMU"
                                          + (f" (refined on {self._ppose_adapt_n} frames)" if self._ppose_adapt_n else "")), COLOR_ORANGE)
@@ -3230,13 +3454,70 @@ class FusionStudioApp:
         else:
             pt.set_learn_status("continual learning is switched off", COLOR_FG_DIM)
         chips["learn"] = ((COLOR_GREEN, "live") if learn_state[0] == "learning" else (COLOR_ORANGE, "paused") if learn_state[0] == "paused" else (COLOR_FG_DIM, "off"))
+        # ── the user's bone lengths, from any trusted camera hand (the headset's hand model: constant per session) ──
+        if finger_fusion is not None and cam_ok and local is not None:
+            bl = finger_fusion.bone_lengths(_np.asarray(local, float))
+            if _np.isfinite(bl).all():
+                self._st_bone_ref = bl if self._st_bone_ref is None else 0.95 * self._st_bone_ref + 0.05 * bl
+        if cam_ok:
+            self._st_hidden_since = None
+        elif self._st_hidden_since is None:
+            self._st_hidden_since = now
+        # ── smooth transitions: remember the shape the camera shows, and your own shape of each key posture this session ──
+        tx_on = bool(F.get("transitions", False))
+        if tx_on and cam_ok and local is not None:
+            fcm = float(_np.mean(fc)) if fc is not None else 1.0
+            if fcm >= 0.6:
+                Lc = _np.asarray(local, float); Lc = Lc - Lc[1]
+                lab = key_postures.cam_label(Lc) if (key_postures is not None and hasattr(key_postures, "cam_label")) else None
+                # only a clean, recognisable hand is carried into a loss: the frames just before an occlusion are often
+                # already partly covered (the other hand arriving), and freezing on one of those showed a stuck,
+                # distorted hand
+                if lab is not None and fcm >= 0.75:
+                    self._st_last_cam = (Lc.copy(), lab)
+                if lab and fcm >= 0.75:
+                    old = self._st_ptemp.get(lab)
+                    self._st_ptemp[lab] = (Lc.copy(), 1) if old is None else (0.9 * old[0] + 0.1 * Lc, old[1] + 1)
         # ── key-posture recogniser (Key Postures tab, read-only): a stable decision + its template hand ──
-        kp_probs, kp_active, kp_top, kp_p = (self._kp_classify2(None, wq, (local if cam_ok else None), (float(_np.mean(fc)) if (cam_ok and fc is not None) else 0.0), self._poll_dt)
+        kp_probs, kp_active, kp_top, kp_p = (self._kp_classify2(None, wq, (local if cam_ok else None), (float(_np.mean(fc)) if (cam_ok and fc is not None) else 0.0), self._poll_dt, kq=kq)
                                              if (key_postures is not None and wq is not None) else (None, None, None, 0.0))
         kp_local = self._kp_template_hand(kp_active) if (kp_active and F["snap"]) else None
+        kp_note = ""
+        if tx_on and not cam_ok and kp_local is not None:
+            sess = (self._st_ptemp[kp_active][0] if (self._st_ptemp.get(kp_active) is not None and self._st_ptemp[kp_active][1] >= 10)
+                    else None)
+            target = _np.asarray(sess if sess is not None else kp_local, float)
+            if self._st_last_cam is not None and self._st_last_cam[1] == kp_active:
+                # same posture: the camera's last clean shape carries the first moments, then fades into the posture's
+                # own shape (τ 0.8 s) — it no longer stays frozen for the whole occlusion
+                hfade = math.exp(-max(0.0, now - (self._st_hidden_since if self._st_hidden_since is not None else now)) / 0.8)
+                kp_local = hfade * self._st_last_cam[0] + (1.0 - hfade) * target; kp_note = "as the camera last saw it"
+            elif sess is not None:
+                kp_local = target; kp_note = "your shape from this session"
+        if F.get("soft") and F["snap"] and getattr(self, "_kp_belief", None) is not None:
+            # ◍ the soft hand: every posture's shape (this session's, else the template) weighted by the flag HMM's
+            # belief — the fingers move as soon as the evidence does; doubt shows as an in-between shape, not a wrong one
+            shapes, ws = [], []
+            for name, wgt in zip(*self._kp_belief):
+                tpl = self._kp_template_hand(name) if name != "other" else None
+                if tpl is None:
+                    continue
+                sess = self._st_ptemp.get(name)
+                H = _np.asarray(sess[0] if (tx_on and sess is not None and sess[1] >= 10) else tpl, float)
+                shapes.append(H - H[1]); ws.append(float(wgt))
+            if shapes and sum(ws) > 0:
+                w_ = _np.asarray(ws) / sum(ws); tgt = sum(wi * Hi for wi, Hi in zip(w_, shapes))
+                prev = getattr(self, "_st_soft", None)
+                a_ = 1.0 - math.exp(-max(self._poll_dt, 1e-3) / key_postures.SOFT_TAU)
+                kp_local = tgt if (prev is None or prev.shape != tgt.shape) else prev + a_ * (tgt - prev)
+                self._st_soft = kp_local.copy(); kp_note = "soft"
+        else:
+            self._st_soft = None
         chips["posture"] = ((COLOR_FG_DIM, "no recogniser") if getattr(self, "_kp_model", None) is None else (COLOR_FG_DIM, "off") if not F["snap"]
-                            else (key_postures.COLORS.get(kp_active, COLOR_GREEN), kp_active) if kp_active else (COLOR_ORANGE, f"{kp_top or '—'} {kp_p * 100:.0f} %"))
+                            else (key_postures.COLORS.get(kp_active, COLOR_GREEN), kp_active + (" (arm turning)" if self._kp_turning() else "")) if kp_active
+                            else (COLOR_ORANGE, f"{kp_top or '—'} {kp_p * 100:.0f} %"))
         hand_local = None; src_pose = None; fusion_note = ""; finger_cols = None
+        self._st_fuse_dbg = None                                      # per-finger m, d, w for the Fusion Logic tab
         if cam_ok and local is not None:
             L = _np.asarray(local, float); src_pose = "camera"
             if fc is not None:
@@ -3245,6 +3526,11 @@ class FusionStudioApp:
                 fill_src = kp_local if kp_local is not None else emg_local
                 if fill_src is not None:
                     E = fill_src - fill_src[1]; nfill = 0
+                    if F.get("fuse") and finger_fusion is not None and self._st_ff is not None:
+                        # supervisor's rule: S-curve in the camera's reliability, as steep as camera and EMG disagree
+                        d_f = finger_fusion.curl_distance(L, E)
+                        wf = self._st_ff.step(fc, d_f, self._poll_dt)
+                        self._st_fuse_dbg = {"m": fc.copy(), "d": d_f, "w": _np.asarray(wf, float).copy(), "where": "camera"}
                     for ci, chain in enumerate(SKELETON_CHAINS):
                         if wf[ci] < 0.999:
                             for j in chain[1:]:
@@ -3261,9 +3547,16 @@ class FusionStudioApp:
                 try: curls = _np.asarray(self._finger_flex(local), float)
                 except Exception: curls = None
         elif kp_local is not None:
-            hand_local = kp_local; src_pose = f"KEY POSTURE: {kp_active}"; finger_cols = [key_postures.COLORS.get(kp_active, pt.TEAL)] * 5
-            curls = _np.asarray(self._kp_model["templates"][self._kp_model["classes"].index(kp_active)], float)   # bars match the drawn hand
+            hand_local = kp_local; src_pose = f"KEY POSTURE: {kp_active or '…'}"; finger_cols = [key_postures.COLORS.get(kp_active, pt.TEAL)] * 5
+            if kp_active in self._kp_model["classes"]:
+                curls = _np.asarray(self._kp_model["templates"][self._kp_model["classes"].index(kp_active)], float)   # bars match the drawn hand
+            if kp_note:
+                src_pose += f" · {kp_note}"
+                try: curls = _np.asarray(self._finger_flex(kp_local), float)
+                except Exception: pass
         elif emg_local is not None:
+            # the EMG's own hand: the transition smoothing glides into it (adding the EMG's change onto the last shape
+            # mixed two hand geometries and broke the anatomy of 87 % of those frames)
             hand_local = emg_local - emg_local[1]; src_pose = "EMG"; finger_cols = [pt.TEAL] * 5
         elif self._st_last_local is not None:
             hand_local = self._st_last_local; src_pose = "held"; finger_cols = [COLOR_FG_DIM] * 5
@@ -3273,8 +3566,54 @@ class FusionStudioApp:
                 src_pose = "neutral (no data)"; finger_cols = [COLOR_FG_DIM] * 5
             except Exception:
                 hand_local = None
+        # Another hand in the way: the camera's pose is not used (it flips or swaps hands), but its fingers join the
+        # predicted ones with their lowered reliability, by the same w = f(m, d).
+        if (F.get("fuse") and finger_fusion is not None and self._st_ff is not None and not cam_ok and gate == "OTHER"
+                and local is not None and fc is not None and not cam_note and not frozen
+                and hand_local is not None and src_pose not in ("held", "neutral (no data)")):
+            Lc = _np.asarray(local, float); Lc = Lc - Lc[1]; E = _np.asarray(hand_local, float); E = E - E[1]
+            d_o = finger_fusion.curl_distance(Lc, E)
+            w_o = self._st_ff.step(_np.asarray(fc, float), d_o, self._poll_dt)
+            self._st_fuse_dbg = {"m": _np.asarray(fc, float).copy(), "d": d_o, "w": _np.asarray(w_o, float).copy(), "where": "other"}
+            if float(w_o.max()) > 0.02:
+                H = E.copy()
+                for ci, chain in enumerate(SKELETON_CHAINS):
+                    for j in chain[1:]:
+                        H[j] = w_o[ci] * Lc[j] + (1.0 - w_o[ci]) * E[j]
+                hand_local = H; src_pose = f"{src_pose} · camera fingers {100 * float(w_o.mean()):.0f} %"
         if hand_local is not None and src_pose != "held":
             self._st_last_local = hand_local
+        if not str(src_pose or "").startswith("EMG"):
+            self._st_emg_anchor = None
+        if tx_on:
+            if self._st_tx is None:
+                self._st_tx = _StudioTransition()
+            fam = "cam" if cam_ok else "pred"
+            sp = str(src_pose or "")
+            pkey = (("cam", "camera" + ("+kp:" + str(kp_active) if "KEY POSTURE" in sp else "+emg" if "EMG" in sp else ""))
+                    if sp.startswith("camera") else ("pred", sp.split("·")[0].strip() + ("·held" if kp_note.startswith("as the camera") else "")))
+            dt_ = max(self._poll_dt, 1e-3)
+            wrist = self._st_tx.step("pos", now, (fam, str(src_pos)), wrist, dt=dt_)
+            hand_R = self._st_tx.step("rot", now, (fam, str(src_R or "").split(",")[0].split("·")[0].strip()), hand_R, rot=True, dt=dt_)
+            pk0 = (self._st_tx.ch.get("pose") or {}).get("key")
+            is_kp = lambda k: k is not None and ("KEY POSTURE" in k[1] or "kp:" in k[1])
+            kp_switch = bool(pk0 != pkey and is_kp(pk0) and is_kp(pkey) and pk0[0] == pkey[0])   # one key posture → another
+            hand_local = self._st_tx.step("pose", now, pkey, hand_local, dt=dt_, t90=(_StudioTransition.T90_POSTURE if kp_switch else None))
+            if wrist is not None and f_fore is not None:
+                elbow = wrist - LF * f_fore
+            if self._st_tx.blending("pos") or self._st_tx.blending("rot") or self._st_tx.blending("pose"):
+                fusion_note = (fusion_note + " · " if fusion_note else "") + "blending into the new source"
+        elif self._st_tx is not None:
+            self._st_tx = None
+        # Keep the drawn hand anatomical: mixing hands by joint positions (camera with EMG, a held shape with a template,
+        # the smoothing between sources) shortened or stretched bones and bent joints backwards; each finger is rebuilt
+        # with the user's bone lengths and its joints within their limits. A pure camera hand is left as measured.
+        if (F.get("anat", True) and finger_fusion is not None and hand_local is not None
+                and (src_pose != "camera" or (self._st_tx is not None and self._st_tx.blending("pose")))):
+            try:
+                hand_local = finger_fusion.anatomize(hand_local, self._st_bone_ref if self._st_bone_ref is not None else self._kp_bone_ref())
+            except Exception:
+                pass
         HW = (wrist + (hand_R @ hand_local.T).T) if (wrist is not None and hand_local is not None and hand_R is not None) else None
         # ── signals ──
         def seg(Rm, cal, qv):
@@ -3311,11 +3650,37 @@ class FusionStudioApp:
              "n_anchor": int((out or {}).get("n_anchor", 0)), "g": float((out or {}).get("g", 0.0)),
              "hand": HW, "hand_local": hand_local, "hand_R": hand_R, "src_R": src_R, "src_pose": src_pose,
              "finger_cols": finger_cols, "fc": fc, "curls": curls, "fusion_note": fusion_note,
-             "kp": {"active": kp_active, "top": kp_top, "p": kp_p, "probs": kp_probs, "classes": (self._kp_model["classes"] if getattr(self, "_kp_model", None) else [])},
+             "kp": {"active": kp_active, "top": kp_top, "p": kp_p, "probs": kp_probs, "classes": (self._kp_model["classes"] if getattr(self, "_kp_model", None) else []),
+                    "flag_age": getattr(self, "_kp_flag_age", None)},
              "imu": imu, "bend": bend, "emg_rms": rms, "acc": acc, "xyz": xyz, "depth": depth, "cam_depth": cam_depth,
              "head_yaw_rel": head_yaw_rel, "head_pitch": head_pitch, "gate_txt": gtxt if F["gate"] else "gate: switched off", "gate_col": gcol,
              "chips": chips}
+        S["fuse_dbg"] = self._st_fuse_dbg; S["gate_dbg"] = getattr(getattr(self, "_kp_gate", None), "dbg", None)
+        S["t"] = now                                                  # the Transitions tab: the camera's own hand and its confidence
+        S["cam_local"] = local if cam_ok else None
+        S["cam_conf"] = float(_np.mean(fc)) if (cam_ok and fc is not None) else 0.0
+        self._st_last_S = S                                           # read by the Fusion Logic and Transitions tabs
+        # Diagnostics: one Console line whenever the Studio's state changes (gate, camera vs prediction, both IMU
+        # calibrations, where rotation and position come from, knuckle-mount trust) — the Console.
+        mk_ = getattr(self, "_st_mount_k", None)
+        sig = (gate_raw or "none", "camera" if cam_ok else ("prediction — camera distrusted, IMU disagrees" if cam_note else "prediction"), chips.get("wrist", ("", "?"))[1], chips.get("knuckle", ("", "?"))[1],
+               str(src_R or "—").split(",")[0].split("·")[0].strip(), str(src_pos), "trusted" if k_good else "not trusted")
+        if sig != getattr(self, "_st_sig_last", None):
+            self._st_sig_last = sig
+            self.log("[studio] gate %s · hand drawn from %s · wrist IMU %s · knuckle IMU %s · rotation from %s · position from %s · knuckle mount %s" % sig
+                     + (f" (residual {mk_.resid:.0f}°)" if (mk_ is not None and mk_.resid is not None) else ""))
+        if self._svr_on:
+            self._st_publish(h, right, S, cam_ok, k_good, kp_active, src)
+        if not pt.visible:
+            return
         pt.draw(S, msg)
+        tp = time.perf_counter(); last = getattr(self, "_st_fps_t", None); self._st_fps_t = tp     # live frame rate
+        if last is not None and 0.0 < tp - last < 0.5:
+            inst = 1.0 / (tp - last); cost = (tp - t_frame) * 1000.0
+            self._st_fps = inst if getattr(self, "_st_fps", None) is None else 0.92 * self._st_fps + 0.08 * inst
+            self._st_cost = cost if getattr(self, "_st_cost", None) is None else 0.92 * self._st_cost + 0.08 * cost
+            if tp - getattr(self, "_st_fps_shown", 0.0) > 0.33:
+                pt.set_fps(self._st_fps, self._st_cost); self._st_fps_shown = tp
 
     def _load_kp(self):
         self._kp_teacher = None
@@ -3327,6 +3692,8 @@ class FusionStudioApp:
             else:
                 self._kp_model = key_postures.load(p) if os.path.exists(p) else None
             self._kp_gate = key_postures.PostureGate(self._kp_model["classes"]) if self._kp_model is not None else None
+            self._kp_hmm = (key_postures.PostureHMM(self._kp_model["classes"])
+                            if (self._kp_model is not None and hasattr(key_postures, "PostureHMM")) else None)
             if self._kp_model is not None:
                 self.log(f"Key Postures: recogniser loaded ({', '.join(self._kp_model['classes'])}; "
                          + ("v2 with camera self-teaching" if self._kp_teacher is not None else "v1 linear") + ")")
@@ -3334,6 +3701,21 @@ class FusionStudioApp:
             self._kp_model = None; self._kp_gate = None; self._kp_teacher = None
             self.log(f"Key Postures: load failed — {e!r}")
         self._kp_templates = {}
+
+    def _kp_bone_ref(self):
+        """Bone lengths of the user's own hand from the key-posture templates (camera shapes from the recordings), for
+        before the camera has seen the hand this session; None without templates."""
+        M = getattr(self, "_kp_model", None)
+        if M is None or finger_fusion is None or "template_joints" not in M:
+            return None
+        try:
+            ok = [i for i, h in enumerate(M["template_has_joints"]) if h]
+            if not ok:
+                return None
+            i = M["classes"].index("open") if ("open" in M["classes"] and M["template_has_joints"][M["classes"].index("open")]) else ok[0]
+            return finger_fusion.bone_lengths(_np.asarray(M["template_joints"][i], float))
+        except Exception:
+            return None
 
     def _kp_template_hand(self, name):
         """26-joint local hand (wrist at the origin, R_opt frame) for a recognised posture, from its template curls."""
@@ -3387,7 +3769,87 @@ class FusionStudioApp:
                 self._kp_gate.reset()
             self.log("Key Postures: camera self-teaching reset to the trained model")
 
-    def _kp_classify2(self, raw, wq, local, cam_conf, dt, allow_teach=True):
+    def _kp_turn_rate(self, wq, kq):
+        """How fast the forearm (wrist IMU) or the hand (knuckle IMU) turns: the larger of the two, in deg/s over the last
+        0.2 s (angle summed over the window, so it does not depend on how often the IMUs update)."""
+        now = time.time(); Rs = []
+        for q in (wq, kq):
+            try:
+                qa = _np.asarray(q, float) if q is not None else None
+                Rs.append(key_postures.qR(qa) if (qa is not None and qa.shape == (4,) and _np.isfinite(qa).all() and _np.abs(qa).sum() > 0) else None)
+            except Exception:
+                Rs.append(None)
+        prev = getattr(self, "_kp_turn_prev", None); da = [0.0, 0.0]
+        if prev is not None:
+            for k in (0, 1):
+                if prev[k] is not None and Rs[k] is not None:
+                    c = (float(_np.trace(prev[k].T @ Rs[k])) - 1.0) / 2.0
+                    da[k] = math.degrees(math.acos(max(-1.0, min(1.0, c))))
+        self._kp_turn_prev = Rs
+        h = getattr(self, "_kp_turn_hist", None)
+        if h is None:
+            h = self._kp_turn_hist = []
+        h.append((now, da[0], da[1]))
+        while h and now - h[0][0] > 0.2:
+            h.pop(0)
+        span = max(now - h[0][0], 0.05)
+        return max(sum(x[1] for x in h), sum(x[2] for x in h)) / span
+
+    def _kp_turning(self):
+        g = getattr(self, "_kp_gate", None)
+        return bool(g is not None and getattr(g, "turn_since", 1e9) < getattr(key_postures, "ROT_SETTLE", 0.0))
+
+
+    def _tr_load_detector(self):
+        path = transition_events.default_model_path() if transition_events is not None else ""
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            return transition_events.LearnedDetector.load(path)
+        except Exception as e:
+            self.log(f"Transitions: could not load the learned detector — {e!r}")
+            return None
+
+    def _tr_feed(self):
+        """Feed the EMG that arrived since the last tick to the transition tracker (the EMG burst that starts a posture
+        change, ~60 ms before the fingers move), with the Studio's posture and the camera's label. The ⚡ transition
+        flags and ◍ soft hand switches read its flags; the learned detector (transition_model.npz) is used when there."""
+        if transition_events is None:
+            return
+        arm = getattr(self, "armband", None); dash = getattr(arm, "dash", None) if arm is not None else None
+        if dash is None or not getattr(arm, "running", False) or getattr(dash, "buf_emg", None) is None:
+            self._tr_total = None
+            return
+        buf = dash.buf_emg; total = int(getattr(dash, "total_samples", 0)); fs = float(getattr(dash, "fs", 500.0))
+        tr = self._tr
+        if tr is None or tr.cs.n_ch != buf.shape[0] or abs(tr.cs.fs - fs) > 1e-6:
+            prior = getattr(key_postures, "TRANSITION_PRIOR", None) if key_postures is not None else None
+            classes = getattr(key_postures, "PRIOR_CLASSES", transition_events.PRIOR_CLASSES) if key_postures is not None else transition_events.PRIOR_CLASSES
+            tr = self._tr = transition_events.TransitionTracker(fs, buf.shape[0], prior=prior, classes=classes)
+            if self._tr_det is None:
+                self._tr_det = self._tr_load_detector()
+            tr.set_detector(self._tr_det, on=True)
+            self._tr_total = None
+        if self._tr_total is None or total < self._tr_total:
+            self._tr_total = total
+            return
+        n = min(total - self._tr_total, buf.shape[1]); self._tr_total = total
+        x = _np.array(buf[:, buf.shape[1] - n:], float) if n > 0 else _np.zeros((buf.shape[0], 0))
+        now = time.time(); S = getattr(self, "_st_last_S", None)
+        fresh = S is not None and now - float(S.get("t", 0.0)) < 0.25
+        posture = (S.get("kp") or {}).get("active") if fresh else None
+        cam = None
+        if fresh and S.get("cam_local") is not None and float(S.get("cam_conf", 0.0)) >= 0.75 and key_postures is not None:
+            try:
+                Lc = _np.asarray(S["cam_local"], float); cam = key_postures.cam_label(Lc - Lc[1])
+            except Exception:
+                cam = None
+        h = self._gest_hand; st = (self.ble.right if h == 1 else self.ble.left) if getattr(self, "ble", None) else None
+        wq = self._cyberfinger_slot_quat(st, self._config.get("imu_wrist_slot") or "body2")
+        kq = self._cyberfinger_slot_quat(st, self._config.get("imu_hand_slot") or "joint")
+        tr.update(x, now, posture, cam, wq, kq)
+
+    def _kp_classify2(self, raw, wq, local, cam_conf, dt, allow_teach=True, kq=None):
         """v2 path: features from the raw EMG window + wrist tilt; while the camera sees the hand clearly the geometric
         label teaches the live copy of the model (OnlineTeacher); then the same stable gate. Falls back to the v1 path
         (43-d) when only the v1 recogniser is loaded. → (probs, active, top, top_p)."""
@@ -3411,14 +3873,75 @@ class FusionStudioApp:
             if raw is None or not _np.isfinite(_np.asarray(raw, float)).all():
                 return None, None, None, 0.0
             win = int(M.get("win", key_postures.EMG_WIN)); raw = _np.asarray(raw, float)[:, -win:]     # the window the model was trained with
-            F = key_postures.feat_raw(raw[None], key_postures.tilt(_np.asarray(wq, float))[None])[0]
+            tl = key_postures.model_tilt(M, wq) if hasattr(key_postures, "model_tilt") else key_postures.tilt(_np.asarray(wq, float))
+            F = key_postures.feat_raw(raw[None], _np.asarray(tl, float)[None])[0]
             if allow_teach and self._kp_teach_enabled() and local is not None and float(cam_conf or 0.0) >= key_postures.TEACH_CONF:
                 if T.observe(F, key_postures.cam_label(local), time.time()):
                     T.step(key_postures.TEACH_STEPS if hasattr(key_postures, "TEACH_STEPS") else 3)
             elif allow_teach:
                 T.observe(F, None, time.time())
             p = key_postures.predict2(T.M if self._kp_teach_enabled() else M, F[None])[0]
-            active, top_p, top = self._kp_gate.update(p, max(dt, 1e-3))
+            # Fusion Studio switches: the transition prior (the expected next posture: shapes on the way to it don't
+            # flash, and a relaxing fist opens at once) and the optional HMM smoothing
+            st_tab = getattr(self, "st_tab", None); vv = getattr(st_tab, "view_vars", {}) if st_tab is not None else {}
+            pv = vv.get("prior"); hv = vv.get("hmm")
+            # ◍ soft hand + flag HMM: a sticky belief (released by transition flags) replaces the gate; the Studio
+            # draws the out-of-view hand from it
+            sf = vv.get("soft")
+            if sf is not None and sf.get() and hasattr(key_postures, "FlagHMM"):
+                fh = getattr(self, "_kp_fhmm", None)
+                if fh is None or fh.classes != list(M["classes"]):
+                    fh = self._kp_fhmm = key_postures.FlagHMM(M["classes"])
+                tr = getattr(self, "_tr", None)
+                age = tr.flag_age(time.time()) if tr is not None else math.inf
+                # the forearm's turn rate (wrist IMU only — the knuckle IMU turns when the hand closes): while it turns
+                # the belief holds, so the hand does not flicker when the arm rotates
+                if not hasattr(self, "_kp_fore_hist"):
+                    self._kp_fore_hist = collections.deque()
+                fore = transition_events.turn_rate(self._kp_fore_hist, time.time(), wq) if transition_events is not None else None
+                # anticipation after a flag: your own transitions (the tracker's counts: recordings + this session) or
+                # the general prior
+                ov = vv.get("own")
+                own = (ov is None or ov.get()) and tr is not None and list(tr.dirm.classes) == list(key_postures.PRIOR_CLASSES)
+                if own:
+                    try:
+                        fh.prior = tr.dirm.matrix(known=fh.classes)       # spread over the recogniser's postures
+                    except TypeError:                                      # an older transition_events
+                        fh.prior = tr.dirm.matrix()
+                else:
+                    fh.prior = key_postures.TRANSITION_PRIOR
+                shown, belief = fh.update(p, max(dt, 1e-3), flag_age=age, turn_dps=fore)
+                self._kp_belief = (list(fh.classes), belief); self._kp_flag_age = age
+                k = int(_np.argmax(p))
+                return p, shown, M["classes"][k], float(p[k])
+            self._kp_belief = None
+            if getattr(self, "_kp_fhmm", None) is not None:
+                self._kp_fhmm.reset()
+            hmm = getattr(self, "_kp_hmm", None)
+            if hmm is not None:
+                if hv is not None and hv.get():
+                    p = hmm.update(p, max(dt, 1e-3))
+                else:
+                    hmm.reset()
+            prior = key_postures.TRANSITION_PRIOR if (pv is not None and pv.get() and hasattr(key_postures, "TRANSITION_PRIOR")) else None
+            emg_pow = float(_np.abs(raw - raw.mean(1, keepdims=True)).mean())      # the window's EMG power (relaxation cue)
+            # a turning arm/hand changes the EMG by itself: the gate then needs a longer clear lead before it switches
+            st_tab = getattr(self, "st_tab", None); sv = getattr(st_tab, "view_vars", {}).get("steady") if st_tab is not None else None
+            rot = self._kp_turn_rate(wq, kq) if (sv is None or sv.get()) else None
+            # ⚡ transition flags (Transitions tab's tracker): right after an EMG burst a new posture commits quickly,
+            # with no flag for a while a switch needs a longer lead
+            fv = vv.get("flags"); flag_age = None
+            if fv is not None and fv.get() and hasattr(key_postures, "FLAG_WIN"):
+                tr = getattr(self, "_tr", None)
+                flag_age = tr.flag_age(time.time()) if tr is not None else math.inf
+            self._kp_flag_age = flag_age
+            try:
+                if flag_age is not None:
+                    active, top_p, top = self._kp_gate.update(p, max(dt, 1e-3), rot_dps=rot, prior=prior, rms=emg_pow, flag_age=flag_age)
+                else:
+                    active, top_p, top = self._kp_gate.update(p, max(dt, 1e-3), rot_dps=rot, prior=prior, rms=emg_pow)
+            except TypeError:                                                  # an older key_postures.PostureGate
+                active, top_p, top = self._kp_gate.update(p, max(dt, 1e-3))
             return p, active, top, top_p
         except Exception as e:
             self._kp_last_err = repr(e)
@@ -3855,7 +4378,7 @@ class FusionStudioApp:
         # ── the Studio fills the rest ──
         self.st_frame = ttk.Frame(self.root); self.st_frame.pack(fill=tk.BOTH, expand=True)
         self.st_tab = FusionStudioTab(self.st_frame, on_forward=self._st_set_forward, on_reset=self._st_reset_learning,
-                                      on_save=self._st_save_refined)
+                                      on_save=self._st_save_refined, on_steamvr=self._st_steamvr)
         self.st_tab.visible = True
         # ── hidden helpers: the embedded EMG dashboard (streams; never painted) and the occlusion gate ──
         self._hidden = ttk.Frame(self.root)
@@ -3939,8 +4462,14 @@ class FusionStudioApp:
         src = self._preview_skeleton
         if src is None and self.skeleton and self._skeleton_running:
             src = self.skeleton
+        # While the Studio drives SteamVR, the only camera is the headset hand the driver taps (CFOP): Live Preview and
+        # the skeleton reader would read the CyberFinger hands, i.e. the Studio's own output (a feedback loop).
+        if self._svr_on and self._svr_src is not None:
+            self._svr_src.update()
+            src = self._svr_src
         self._update_gate_tab(src)
         self._st_tick(src)
+        self._tr_feed()                      # transition flags (⚡ / ◍ switches), fed headless
         self._draw_haptics()
         if getattr(self, "armband", None) is not None:
             self.armband.tick()
@@ -4547,6 +5076,181 @@ CAPTURE_GESTURES = [
      "→ FUSION DRIFT · 20 s", 20.0),
 ]
 CAPTURE_TARGET = {g[0]: g[3] for g in CAPTURE_GESTURES}
+class FusionLogicTab:
+    """Fusion Logic — the two ideas behind the Studio's decisions, drawn live.
+    Left: the posture transition map (the supervisor's Markov chain): which posture usually follows which, the arrow
+    width is the probability; the posture the recogniser shows now is lit, its arrows coloured, its likely next postures
+    listed, with the gate's reasoning (in-between postures held back, the relaxation cue toward open).
+    Right: the camera ↔ EMG weight w = f(m, d) as a family of S-curves (gentle when camera and EMG agree, a step at M0
+    when they disagree), the learning gate, and each finger's live (m, w) on it."""
+
+    FINGER_COLS = ("#ffd166", "#448aff", "#00e676", "#ff9100", "#b388ff")
+    FINGERS = ("thumb", "index", "middle", "ring", "pinky")
+    D_CURVES = (0.0, 0.1, 0.2, 0.3, 0.5)
+    POS = {"open": (0.7, 0.5), "fist": (0.12, 0.2), "pinch": (0.88, 0.2), "point": (0.12, 0.8), "victory": (0.88, 0.8),
+           "rest": (0.3, 0.5)}                                    # rest between fist and open, open still the hub
+
+    def __init__(self, parent):
+        self.visible = False
+        self._n = 0
+        outer = ttk.Frame(parent)
+        outer.pack(fill=tk.BOTH, expand=True)
+        head = ttk.Frame(outer); head.pack(fill=tk.X, padx=16, pady=(10, 0))
+        ttk.Label(head, text="◈ Fusion Logic — which posture comes next, and how camera and EMG are weighed",
+                  style="Title.TLabel").pack(side=tk.LEFT)
+        self.status = tk.Label(outer, text="", bg=COLOR_BG, fg=COLOR_FG_DIM, font=("Consolas", 9), anchor=tk.W)
+        self.status.pack(fill=tk.X, padx=16, pady=(4, 0))
+        body = ttk.Frame(outer); body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(6, 12))
+        self.cv_map = tk.Canvas(body, bg=COLOR_BG2, highlightthickness=0)
+        self.cv_map.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 6))
+        self.cv_w = tk.Canvas(body, bg=COLOR_BG2, highlightthickness=0)
+        self.cv_w.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(6, 0))
+
+    @staticmethod
+    def _mix(c1, c2, a):
+        a = max(0.0, min(1.0, a))
+        x = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]; y = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+        return "#%02x%02x%02x" % tuple(int(round(x[k] + (y[k] - x[k]) * a)) for k in range(3))
+
+    def draw(self, kp, fuse, gate_dbg, prior_on, fuse_on, live):
+        self.draw_map(self.cv_map, kp or {}, gate_dbg, prior_on, live)
+        self.draw_weight(self.cv_w, fuse, fuse_on)
+
+    # ── the transition map (also drawn small in the Fusion Studio: compact=True) ──
+    @classmethod
+    def draw_map(cls, c, kp, gate_dbg, prior_on, live, compact=False):
+        c.delete("all")
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 50 or H < 50 or key_postures is None:
+            return
+        f = (lambda n, b=False: ("Consolas", max(6, n - 2) if compact else n) + (("bold",) if b else ()))
+        names = list(key_postures.PRIOR_CLASSES); T = key_postures.TRANSITION_PRIOR; cols = key_postures.COLORS
+        cur = kp.get("active") if kp.get("active") in names else None
+        probs = kp.get("probs"); kcls = list(kp.get("classes") or [])
+        top, bot, side = ((20, 22, 8) if compact else (46, 70, 24))
+        def at(n):
+            fx, fy = cls.POS[n]; return side + fx * (W - 2 * side), top + fy * (H - top - bot)
+        r = max(9.0, min(W, H) * (0.095 if compact else 0.075))
+        off = 4 if compact else 7
+        c.create_text(6 if compact else 14, 4 if compact else 12, anchor=tk.NW, fill=COLOR_FG, font=f(10, True),
+                      text=("NEXT POSTURE — transition prior" if compact else "TRANSITION MAP — after this posture, which one comes next"))
+        if not compact:
+            c.create_text(14, 28, anchor=tk.NW, fill=COLOR_FG_DIM, font=f(8),
+                          text="arrow width = probability · emg2pose (no counting drill) + your sessions" + ("" if prior_on else " · prior switched OFF in the Studio"))
+        elif not prior_on:
+            c.create_text(W - 6, 4, anchor=tk.NE, fill=COLOR_ORANGE, font=f(8), text="prior off")
+        for i, a in enumerate(names):
+            for j, b in enumerate(names):
+                pab = float(T[i][j])
+                if a == b or pab < 0.015:
+                    continue
+                (x1, y1), (x2, y2) = at(a), at(b)
+                dx, dy = x2 - x1, y2 - y1; L = math.hypot(dx, dy) or 1.0; ux, uy = dx / L, dy / L
+                ox, oy = -uy * off, ux * off                           # a → b and b → a side by side
+                re = r * (1.0 + 0.9 * abs(ux)) if compact else r      # edge of the (oval) node along this direction
+                sx, sy = x1 + ux * (re + 2) + ox, y1 + uy * (re + 2) + oy; ex, ey = x2 - ux * (re + 4) + ox, y2 - uy * (re + 4) + oy
+                lit = cur is None or a == cur
+                col = (cols.get(b, COLOR_FG) if a == cur else "#5c5c5c") if lit else "#343434"
+                wdt = (1.0 + 5.0 * pab) if compact else (1.0 + 9.0 * pab)
+                c.create_line(sx, sy, ex, ey, fill=col, width=wdt, arrow=tk.LAST,
+                              arrowshape=(5 + wdt, 7 + wdt, 2 + wdt / 2) if compact else (8 + wdt, 10 + wdt, 3 + wdt / 2), capstyle=tk.ROUND)
+                if lit and pab >= 0.05 and (a == cur or not compact):
+                    tx, ty = sx + (ex - sx) * 0.62 + ox * 1.8, sy + (ey - sy) * 0.62 + oy * 1.8
+                    c.create_text(tx, ty, text=f"{100 * pab:.0f}%", fill=(col if a == cur else COLOR_FG_DIM), font=f(9, a == cur))
+        for n in names:
+            x, y = at(n); on = (n == cur)
+            rx = r * 1.9 if compact else r                         # small: an oval wide enough for the name
+            c.create_oval(x - rx, y - r, x + rx, y + r, fill=(cols.get(n, COLOR_FG) if on else COLOR_BG3),
+                          outline=cols.get(n, COLOR_FG), width=(3 if on else 1.5) if compact else (4 if on else 2))
+            c.create_text(x, y, text=n.upper(), fill=(COLOR_BG if on else COLOR_FG), font=(("Consolas", 7, "bold") if compact else f(10, True)))
+            if probs is not None and n in kcls and not compact:
+                c.create_text(x, y + r + 10, text=f"EMG {100 * float(probs[kcls.index(n)]):.0f}%", fill=COLOR_FG_DIM, font=f(8))
+        relax = bool(gate_dbg is not None and prior_on and cur is not None and gate_dbg[2])
+        if cur is not None:
+            row = T[names.index(cur)]
+            nxt = sorted(((float(row[j]), names[j]) for j in range(len(names)) if names[j] != cur), reverse=True)
+            txt = (f"{cur} → " + " · ".join(f"{n} {100 * p:.0f}%" for p, n in nxt[:3])) if compact else \
+                  (f"now {cur.upper()}  →  next: " + "  ·  ".join(f"{n} {100 * p:.0f}%" for p, n in nxt[:4]))
+            c.create_text(6 if compact else 14, H - (6 if compact else 52), anchor=(tk.SW if compact else tk.NW), fill=COLOR_FG, font=f(10, True), text=txt)
+        else:
+            c.create_text(6 if compact else 14, H - (6 if compact else 52), anchor=(tk.SW if compact else tk.NW), fill=COLOR_FG_DIM, font=f(10),
+                          text=("no key posture now" if compact else ("no key posture recognised right now" if live else
+                                "open the Fusion Studio sources (EMG armband + CyberFingers) to see it live")))
+        if relax:
+            c.create_text(W - (6 if compact else 14), H - (6 if compact else 30), anchor=(tk.SE if compact else tk.NE), fill=COLOR_GREEN,
+                          font=f(9, True), text="relaxing → opening")
+        if gate_dbg is not None and prior_on and cur is not None and not compact:
+            exp_name, mid, _r = gate_dbg
+            msg = ([f"expected next: {exp_name}"] if exp_name else []) + (["held back on the way there: " + ", ".join(mid)] if mid else [])
+            c.create_text(14, H - 30, anchor=tk.NW, fill=COLOR_FG_DIM, font=f(9), text="   ·   ".join(msg))
+
+    # ── w = f(m, d) (also drawn small in the Fusion Studio: compact=True) ──
+    @classmethod
+    def draw_weight(cls, c, fuse, fuse_on, compact=False):
+        c.delete("all")
+        W, H = c.winfo_width(), c.winfo_height()
+        if W < 80 or H < 60 or finger_fusion is None:
+            return
+        f = (lambda n, b=False: ("Consolas", max(6, n - 2) if compact else n) + (("bold",) if b else ()))
+        x0, x1, y0, y1 = ((26, W - 8, 20, H - 18) if compact else (64, W - 24, 54, H - 64))
+        X = lambda m: x0 + m * (x1 - x0); Y = lambda w: y1 - w * (y1 - y0)
+        c.create_text(6 if compact else 14, 4 if compact else 12, anchor=tk.NW, fill=COLOR_FG, font=f(10, True),
+                      text=("CAMERA ↔ EMG  w = f(m, d)" if compact else "hand = w · camera + (1 − w) · EMG,   w = f(m, d)"))
+        if not compact:
+            c.create_text(14, 28, anchor=tk.NW, fill=COLOR_FG_DIM, font=f(8),
+                          text="one S-curve per disagreement d: gentle when camera and EMG agree, a step when they disagree"
+                               + ("" if fuse_on else " · switched OFF in the Studio"))
+        elif not fuse_on:
+            c.create_text(W - 6, 4, anchor=tk.NE, fill=COLOR_ORANGE, font=f(8), text="off")
+        for v in ((0.0, 0.5, 1.0) if compact else (0.0, 0.25, 0.5, 0.75, 1.0)):
+            c.create_line(X(v), y0, X(v), y1, fill="#333333"); c.create_line(x0, Y(v), x1, Y(v), fill="#333333")
+            c.create_text(X(v), y1 + (7 if compact else 12), text=f"{v:g}", fill=COLOR_FG_DIM, font=f(8))
+            c.create_text(x0 - (8 if compact else 14), Y(v), text=f"{v:g}", fill=COLOR_FG_DIM, font=f(8))
+        c.create_rectangle(x0, y0, x1, y1, outline="#555555")
+        if not compact:
+            c.create_text((x0 + x1) / 2, y1 + 30, text="m — how well the camera sees the finger", fill=COLOR_FG, font=f(9))
+            c.create_text(22, (y0 + y1) / 2, text="w — camera weight", fill=COLOR_FG, font=f(9), angle=90)
+        else:
+            c.create_text(X(0.78), y1 + 7, text="m →", fill=COLOR_FG_DIM, font=f(8))
+        m0, lw = finger_fusion.M0, finger_fusion.LEARN_W
+        c.create_line(X(m0), y0, X(m0), y1, fill="#888888", dash=(4, 3))
+        c.create_line(x0, Y(lw), x1, Y(lw), fill=COLOR_GREEN, dash=(4, 3))
+        if not compact:
+            c.create_text(X(m0) + 6, Y(0.16), anchor=tk.W, text=f"m₀ = {m0:g}: where it flips\nwhen they disagree", fill=COLOR_FG_DIM, font=f(8))
+            c.create_text(x0 + 4, Y(lw) - 4, anchor=tk.SW, text=f"EMG learns from the camera above w = {lw:g}", fill=COLOR_GREEN, font=f(8))
+        else:
+            c.create_text(x0 + 3, Y(lw) - 2, anchor=tk.SW, text="learns", fill=COLOR_GREEN, font=f(8))
+        ms = _np.linspace(0.0, 1.0, 41 if compact else 81)
+        for k, d in enumerate(cls.D_CURVES):
+            col = cls._mix("#6fa8dc", "#ff5a5a", d / 0.5)
+            w = finger_fusion.weight(ms, d)
+            pts = [v for m, ww in zip(ms, w) for v in (X(float(m)), Y(float(ww)))]
+            c.create_line(*pts, fill=col, width=(1.5 if compact else 2), smooth=True)
+            if not compact:
+                lbl = "d = 0   agree" if d == 0 else (f"d ≥ {d:g} disagree" if d == cls.D_CURVES[-1] else f"d = {d:g}")
+                ly = Y(0.40) + k * 14                                  # legend in the empty lower right
+                c.create_line(X(0.76), ly, X(0.80), ly, fill=col, width=2)
+                c.create_text(X(0.81), ly, anchor=tk.W, text=lbl, fill=col, font=f(8))
+        if compact:
+            c.create_text(X(0.30), Y(0.42), anchor=tk.SE, text="agree", fill="#6fa8dc", font=f(8))
+            c.create_text(X(m0) - 3, Y(0.06), anchor=tk.SE, text="disagree", fill="#ff5a5a", font=f(8))
+        else:
+            where = {"camera": "camera sees the hand: every finger weighed live",
+                     "other": "another hand on top: camera fingers at their lowered m"}.get((fuse or {}).get("where"),
+                                                                                           "camera not used now (hidden): the hand is the EMG / posture estimate, w = 0")
+            c.create_text(14, H - 18, anchor=tk.W, text=where, fill=COLOR_FG_DIM, font=f(9))
+        if fuse is not None and fuse.get("m") is not None:
+            m = _np.asarray(fuse["m"], float); d = _np.asarray(fuse.get("d", _np.zeros(5)), float); w = _np.asarray(fuse["w"], float)
+            rr = 5 if compact else 7
+            for k in range(min(5, len(m))):
+                x, y = X(float(m[k])), Y(float(w[k]))
+                c.create_oval(x - rr, y - rr, x + rr, y + rr, fill=cls.FINGER_COLS[k], outline="#ffffff", width=1)
+                if not compact:
+                    c.create_text(x, y, text=cls.FINGERS[k][0].upper(), fill=COLOR_BG, font=f(8, True))
+            if not compact:
+                for k in range(min(5, len(m))):                      # finger values in the empty upper left
+                    c.create_text(X(0.02), Y(0.98) + k * 14, anchor=tk.NW, fill=cls.FINGER_COLS[k], font=f(8),
+                                  text=f"{cls.FINGERS[k]:<6} m {m[k]:.2f}  d {d[k]:.2f}  w {w[k]:.2f}")
 class FusionStudioTab:
     """Fusion Studio — ONE professional view of everything: your body (placed and turned by the headset), the arm and the
     whole 26-joint hand at its estimated POSITION with its estimated POSTURE, from whichever sensors are switched on,
@@ -4562,8 +5266,9 @@ class FusionStudioTab:
     FINGERS = ("thumb", "index", "middle", "ring", "pinky")
     TRAIL_S = 3.0
 
-    def __init__(self, parent, on_forward=None, on_reset=None, on_save=None):
+    def __init__(self, parent, on_forward=None, on_reset=None, on_save=None, on_steamvr=None):
         self.visible = False
+        self._on_steamvr = on_steamvr or (lambda on: None)
         self._on_forward = on_forward or (lambda: None)
         self._on_reset = on_reset or (lambda: None); self._on_save = on_save or (lambda: None)
         self._trail = []; self._dhist = []; self._ref_f = None; self._ref_t = None
@@ -4572,13 +5277,48 @@ class FusionStudioTab:
         head = ttk.Frame(outer); head.pack(fill=tk.X, padx=16, pady=(10, 0))
         ttk.Label(head, text="⬡ Fusion Studio — the whole hand on your body, every sensor in one view",
                   style="Title.TLabel").pack(side=tk.LEFT)
-        self.msg = tk.Label(head, text="", bg=COLOR_BG, fg=COLOR_ORANGE, font=("Consolas", 10, "bold"), anchor=tk.E)
+        self.fps_lbl = tk.Label(head, text="", bg=COLOR_BG, fg=COLOR_FG_DIM, font=("Consolas", 9), anchor=tk.E)
+        self.fps_lbl.pack(side=tk.RIGHT, padx=(12, 0))
+        bar = ttk.Frame(outer); bar.pack(fill=tk.X, padx=16, pady=(2, 0))      # SteamVR output + the Studio's messages
+        self.svr_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="⇢ send this hand to SteamVR", style="TCheckbutton", variable=self.svr_var,
+                        command=lambda: self._on_steamvr(bool(self.svr_var.get()))).pack(side=tk.LEFT)
+        self.svr_lbl = tk.Label(bar, text="", bg=COLOR_BG, fg=COLOR_FG_DIM, font=("Consolas", 9), anchor=tk.W)
+        self.svr_lbl.pack(side=tk.LEFT, padx=(8, 0))
+        self.msg = tk.Label(bar, text="", bg=COLOR_BG, fg=COLOR_ORANGE, font=("Consolas", 10, "bold"), anchor=tk.E)
         self.msg.pack(side=tk.RIGHT)
+        self._fn = 0; self._chips_last = None; self._msg_last = None      # draw schedule · redraw chips/message on change
         self.chips = tk.Canvas(outer, bg=COLOR_BG, highlightthickness=0, height=28)
         self.chips.pack(fill=tk.X, padx=16, pady=(4, 2))
         main = ttk.Frame(outer); main.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 10))
-        # ── left column: switches ──
-        left = ttk.Frame(main); left.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        # ── left column: switches — scrolls (scrollbar + mouse wheel over it) when the window is too short for it ──
+        lwrap = ttk.Frame(main); lwrap.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        lcv = tk.Canvas(lwrap, bg=COLOR_BG, highlightthickness=0, width=10)
+        lsb = ttk.Scrollbar(lwrap, orient=tk.VERTICAL, command=lcv.yview)
+        lcv.configure(yscrollcommand=lsb.set)
+        left = ttk.Frame(lcv)
+        lcv.create_window(0, 0, window=left, anchor=tk.NW)
+        lcv.pack(side=tk.LEFT, fill=tk.Y)
+        self._left_cv, self._left_sb, self._left_wrap = lcv, lsb, lwrap
+
+        def _left_cfg(_e=None):
+            lcv.configure(scrollregion=(0, 0, left.winfo_reqwidth(), left.winfo_reqheight()), width=left.winfo_reqwidth())
+            need = left.winfo_reqheight() > lcv.winfo_height() > 1
+            if need and not lsb.winfo_ismapped():
+                lsb.pack(side=tk.RIGHT, fill=tk.Y)
+            elif not need and lsb.winfo_ismapped():
+                lsb.pack_forget(); lcv.yview_moveto(0)
+        left.bind("<Configure>", _left_cfg); lcv.bind("<Configure>", _left_cfg)
+
+        def _left_wheel(e):
+            w = lcv.winfo_containing(e.x_root, e.y_root)
+            while w is not None and w is not lwrap:
+                w = w.master
+            if w is lwrap and left.winfo_reqheight() > lcv.winfo_height():
+                step = -1 if (getattr(e, "num", 0) == 4 or getattr(e, "delta", 0) > 0) else 1
+                lcv.yview_scroll(step * 3, "units")
+        for ev_ in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            lcv.bind_all(ev_, _left_wheel, add="+")
         tk.Label(left, text="SOURCES", bg=COLOR_BG, fg=COLOR_FG, font=("Consolas", 10, "bold"), anchor=tk.W).pack(fill=tk.X)
         self.src_vars = {}
         for key, label, col in self.SOURCES:
@@ -4592,15 +5332,25 @@ class FusionStudioTab:
         for key, label, default in (("body", "body outline", True), ("fov", "camera field of view", True),
                                     ("trail", "hand trail (3 s)", True), ("smooth", "smooth the prediction", True),
                                     ("follow", "body heading follows the headset", True), ("names", "labels", True),
-                                    ("snap", "snap to KEY POSTURES when hidden", True)):
+                                    ("snap", "snap to KEY POSTURES when hidden", True),
+                                    ("steady", "hold the posture while the arm turns", True),
+                                    ("prior", "expected next posture (prior)", True),
+                                    ("flags", "⚡ transition flags: switch fast, else hold steady", False),
+                                    ("soft", "◍ soft hand + flag HMM (fast out of view)", False),
+                                    ("own", "  ↳ anticipate from MY transitions", True),
+                                    ("hmm", "HMM posture smoothing (+33 ms)", False),
+                                    ("fuse", "camera ↔ EMG weight w = f(m, d)", True),
+                                    ("anat", "keep the hand anatomical", True),
+                                    ("transitions", "smooth camera ↔ prediction switches", True),
+                                    ("crosscheck", "distrust the camera when the IMU disagrees", True)):
             v = tk.BooleanVar(value=default); self.view_vars[key] = v
             ttk.Checkbutton(left, text=label, style="TCheckbutton", variable=v).pack(anchor=tk.W)
         ttk.Button(left, text="⌖ Set forward (lock heading)", style="Console.TButton",
                    command=lambda: self._on_forward()).pack(anchor=tk.W, pady=(6, 2))
         tk.Label(left, text="\nHAND OUT OF VIEW", bg=COLOR_BG, fg=COLOR_FG, font=("Consolas", 10, "bold"), anchor=tk.W).pack(fill=tk.X)
         self.oov_var = tk.StringVar(value="knuckle")
-        for val, label in (("knuckle", "knuckle IMU: live wrist bend\n(mount taught by the camera)"),
-                           ("wrist", "wrist IMU: bend held from\nthe last camera fix")):
+        for val, label in (("knuckle", "knuckle IMU (live wrist bend)"),
+                           ("wrist", "wrist IMU (bend held)")):
             ttk.Radiobutton(left, text=label, value=val, variable=self.oov_var, style="TRadiobutton").pack(anchor=tk.W)
         tk.Label(left, text="\nLEARNING", bg=COLOR_BG, fg=COLOR_FG, font=("Consolas", 10, "bold"), anchor=tk.W).pack(fill=tk.X)
         self.learn_var = tk.BooleanVar(value=True)          # same continual learning as Pose Hand (shared model + memory)
@@ -4631,11 +5381,15 @@ class FusionStudioTab:
         self.p_emg = tk.Canvas(right, bg=COLOR_BG2, highlightthickness=0, height=112); self.p_emg.pack(fill=tk.X, pady=(0, 6))
         self.p_pos = tk.Canvas(right, bg=COLOR_BG2, highlightthickness=0, height=190); self.p_pos.pack(fill=tk.X, pady=(0, 6))
         self.p_head = tk.Canvas(right, bg=COLOR_BG2, highlightthickness=0); self.p_head.pack(fill=tk.BOTH, expand=True)
-        # ── centre: the two stages ──
+        # ── centre: the two stages, and under them the fusion logic in small (transition prior · w = f(m, d)) ──
         centre = ttk.Frame(main); centre.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        logic = ttk.Frame(centre, height=168); logic.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=(6, 0)); logic.pack_propagate(False)
+        self.p_map = tk.Canvas(logic, bg=COLOR_BG2, highlightthickness=0, width=1); self.p_map.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 3))
+        self.p_wfn = tk.Canvas(logic, bg=COLOR_BG2, highlightthickness=0, width=1); self.p_wfn.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(3, 0))
+        stages_row = ttk.Frame(centre); stages_row.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         self.stages = []
         for title in ("FRONT — mirror view, you face the screen", "TOP — room map, forward is up"):
-            f = ttk.Frame(centre); f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
+            f = ttk.Frame(stages_row); f.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
             tk.Label(f, text=title, bg=COLOR_BG, fg=COLOR_FG, font=("Consolas", 10, "bold"), anchor=tk.W).pack(fill=tk.X)
             c = tk.Canvas(f, bg="#1e2126", highlightthickness=0); c.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
             self.stages.append(c)
@@ -4656,11 +5410,26 @@ class FusionStudioTab:
     def set_msg(self, text):
         self.msg.configure(text=text)
 
+    def set_steamvr_on(self, on):
+        self.svr_var.set(bool(on))
+
+    def set_steamvr(self, text, col):
+        self.svr_lbl.configure(text=text, fg=col)
+
+    def set_fps(self, fps, ms):
+        """Live frame rate of this tab and the time one frame takes (computing + drawing)."""
+        col = COLOR_GREEN if fps >= 50 else COLOR_ORANGE if fps >= 30 else COLOR_RED
+        self.fps_lbl.configure(text=f"{fps:4.0f} fps · {ms:4.1f} ms per frame", fg=col)
+
     # ── drawing ──
     def draw(self, S, msg="", chips=None):
-        now = time.time()
-        self.set_msg(msg)
-        self._chips(chips if chips is not None else (S.get("chips", {}) if S else {}))
+        now = time.time(); self._fn += 1
+        if msg != self._msg_last:
+            self.set_msg(msg); self._msg_last = msg
+        ch = chips if chips is not None else (S.get("chips", {}) if S else {})
+        ck = tuple(sorted((k, tuple(v)) for k, v in ch.items()))
+        if ck != self._chips_last:                        # the status chips change rarely: redraw only then
+            self._chips(ch); self._chips_last = ck
         if S is None:
             for c in self.stages:
                 c.delete("all"); c._bg = None
@@ -4670,6 +5439,9 @@ class FusionStudioTab:
                                   text="needs the headset pose — press ◉ Start preview (top bar)")
             for p in (self.p_hand, self.p_imu, self.p_emg, self.p_pos, self.p_head):
                 p.delete("all")
+            if self._fn % 15 == 1:                        # the diagrams themselves, without live data
+                FusionLogicTab.draw_map(self.p_map, {}, None, True, False, compact=True)
+                FusionLogicTab.draw_weight(self.p_wfn, None, True, compact=True)
             self._trail = []
             return
         if S.get("wrist") is not None:
@@ -4678,7 +5450,18 @@ class FusionStudioTab:
             self._trail.pop(0)
         for c, axis in ((self.stages[0], 1), (self.stages[1], 2)):
             self._stage(c, axis, S, now)
-        self._panel_hand(S); self._panel_imu(S); self._panel_emg(S); self._panel_pos(S, now); self._panel_head(S)
+        # The body views are drawn every frame; the signal panels in turns (hand close-up and position every 2nd
+        # frame, IMU / EMG / headset every 3rd), which keeps the tab near 60 fps.
+        n = self._fn
+        if n % 2 == 0:
+            self._panel_hand(S)
+        else:
+            self._panel_pos(S, now)
+        (self._panel_imu, self._panel_emg, self._panel_head)[n % 3](S)
+        if n % 3 == 1:                                    # the fusion logic in small, ~20 times a second
+            F = S.get("flags") or {}
+            FusionLogicTab.draw_map(self.p_map, S.get("kp") or {}, S.get("gate_dbg"), bool(F.get("prior")), True, compact=True)
+            FusionLogicTab.draw_weight(self.p_wfn, S.get("fuse_dbg"), bool(F.get("fuse")), compact=True)
 
     def _chips(self, st):
         c = self.chips; c.delete("all"); x = 2
@@ -4892,7 +5675,9 @@ class FusionStudioTab:
         kp = S.get("kp") or {}
         if kp.get("classes"):
             if kp.get("active"):
-                c.create_text(8, h - 36, anchor="w", text=f"KEY POSTURE  {str(kp['active']).upper()}  {kp.get('p', 0) * 100:.0f} %", fill=key_postures.COLORS.get(kp["active"], COLOR_FG) if key_postures else COLOR_FG, font=("Consolas", 9, "bold"))
+                fa = kp.get("flag_age")
+                flag = "  ⚡" if (fa is not None and key_postures is not None and fa <= getattr(key_postures, "FLAG_WIN", 0.6)) else ""
+                c.create_text(8, h - 36, anchor="w", text=f"KEY POSTURE  {str(kp['active']).upper()}  {kp.get('p', 0) * 100:.0f} %{flag}", fill=key_postures.COLORS.get(kp["active"], COLOR_FG) if key_postures else COLOR_FG, font=("Consolas", 9, "bold"))
             else:
                 c.create_text(8, h - 36, anchor="w", text=f"key posture: none  (leading {kp.get('top') or '—'} {kp.get('p', 0) * 100:.0f} %)", fill=COLOR_FG_DIM, font=("Consolas", 8))
         c.create_text(8, h - 22, anchor="w", text=("orientation: " + (S.get("src_R") or "—")), fill=(COLOR_ORANGE if "·" in (S.get("src_R") or "") else COLOR_FG_DIM), font=("Consolas", 8), width=w - 12)
@@ -4987,9 +5772,18 @@ class FusionStudioTab:
 
 
 def main():
+    # The packaged .exe (fusion_studio.spec) is also the OpenXR helper process (openxr_skeleton starts a second copy of
+    # it with --openxr-provider) and can check itself (--selftest [report file]).
+    if "--openxr-provider" in sys.argv:
+        sys.argv.remove("--openxr-provider")
+        import openxr_skeleton_provider
+        return openxr_skeleton_provider.main()
+    if "--selftest" in sys.argv:
+        import fusion_studio_selftest
+        return fusion_studio_selftest.run(sys.argv[sys.argv.index("--selftest") + 1:])
     app = FusionStudioApp()
     app.run()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,6 +1,23 @@
-# CyberFinger Fusion Studio — dependencies on top of bridge/requirements.txt
+# CyberFinger Fusion Studio — everything the Studio needs (the bridge's gamepad and VRChat OSC packages are not used)
 #
-#   pip install -r requirements.txt -r requirements-fusion-studio.txt
+#   pip install -r requirements-fusion-studio.txt
+#
+# requirements-fusion-studio-lock.txt pins the versions the packaged .exe was built and tested with.
+
+# CyberFinger over BLE (WinRT)
+winrt-runtime
+winrt-Windows.Devices.Bluetooth
+winrt-Windows.Devices.Bluetooth.GenericAttributeProfile
+winrt-Windows.Devices.Enumeration
+winrt-Windows.Storage.Streams
+winrt-Windows.Foundation
+winrt-Windows.Foundation.Collections
+
+# System tray icon, the pink button's key events, the SteamVR skeleton reader
+pystray
+pillow
+pynput
+openvr
 
 numpy
 matplotlib
