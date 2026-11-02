@@ -76,11 +76,12 @@ PyInstaller installed (e.g. `conda activate cybrgui`). Inno Setup is found in it
 The Resonite mods are built by `tools\stage_resonite_mods.py` into `bridge\installer\resonite_mods\`, each from a
 fresh shallow clone of its GitHub repository (default branch), made anew on every run under
 `out\resonite_mods_src\`: the installer gets what is pushed, not what's in local checkouts. `VERSIONS.txt` there
-records the commits. They
-compile against Resonite's assemblies, so this needs git, the .NET SDK and Resonite installed. On a PC without
-Resonite, stage them on one that has it (`python tools\stage_resonite_mods.py`), copy
-`bridge\installer\resonite_mods\` over and set `CF_RESONITE_MODS=keep`; or set `CF_RESONITE_MODS=skip` to build
-the installer without them.
+records the commits. It also fetches the latest BepInExRenderer and RenderiteHook from Thunderstore into
+`resonite_mods\standalone\`: BepInEx for the renderer and its loader, with which setup installs SteamVRRoleFix
+in builds without Gale (LGPL-2.1, with `THIRD-PARTY-NOTICES.txt`). The mods compile against Resonite's
+assemblies, so this needs git, the .NET SDK, Resonite and internet access. On a PC without Resonite, stage them
+on one that has it (`python tools\stage_resonite_mods.py`), copy `bridge\installer\resonite_mods\` over and set
+`CF_RESONITE_MODS=keep`; or set `CF_RESONITE_MODS=skip` to build the installer without them.
 
 ### Linux
 
@@ -93,7 +94,7 @@ Quit SteamVR first: it holds the driver while running and reads the registration
 - **Installer** — run `CyberFingerBridge_Setup_<version>.exe`. It installs the bridge app and the SteamVR
   driver, and registers the driver with SteamVR for your user. An earlier CyberFinger Bridge is upgraded in
   place (same folder, one entry in *Settings → Apps*). Uninstall from Windows *Settings → Apps*, which also
-  unregisters the driver.
+  unregisters the driver and puts the Resonite builds and Gale profiles setup changed back as they were.
 - **From a build** — `tools\install_driver.cmd` copies `out\build\x64-Release\driver\cyberfinger` to
   `%LOCALAPPDATA%\CyberFinger\SteamVR\cyberfinger` and registers it; `tools\uninstall_driver.cmd` undoes it.
   `install_driver.cmd -InPlace` registers the build folder itself, and `-Status` shows what is installed.
@@ -120,30 +121,174 @@ Then:
    Resonite* option does it, with a box for each mod:
    - **MoreFluxActions and SteamVRRoleFix** are BepInEx plugins, and load from the BepInEx that Resonite starts
      with. With [Gale](https://github.com/Kesomannen/gale), that's the profile's (Gale starts Resonite with
-     `--bepinex-target <profile>\BepInEx`), so the installer lists your Gale profiles, the last used one ticked,
-     and copies them into `%APPDATA%\com.kesomannen.gale\resonite\profiles\<profile>\BepInEx\plugins` and
+     `--bepinex-target <profile>\BepInEx`), so the installer lists your Gale profiles, the last used one and
+     those your builds load ticked, and copies them into
+     `%APPDATA%\com.kesomannen.gale\resonite\profiles\<profile>\BepInEx\plugins` and
      `…\Renderer\BepInEx\plugins`. With BepisLoader installed in the Resonite folder itself (no mod manager:
      `<Resonite>\BepInEx\core`), it lists that folder too. A Gale user's game folder also has a
      `Renderer\BepInEx`: that's Gale's loader, not where its plugins go.
-   - **CyberFingerMod and ProximityGrab** are ResoniteModLoader mods, and go into `<Resonite>\rml_mods` either
-     way. Under Gale, RML starts through the ResoniteModLoaderLoader package, or through
-     `-LoadAssembly Libraries/ResoniteModLoader.dll` in Resonite's Steam launch options, never both (see the
-     gotcha below). Without a config of its own, CyberFingerMod gets one with `GamepadBindings` off.
+   - **CyberFingerMod and ProximityGrab** are ResoniteModLoader mods, and go into the `rml_mods` folder of each
+     build with RML either way: Steam's Resonite, and others found such as Delphium. The supported setup starts
+     RML with the ResoniteModLoaderLoader package in the Gale profile, and nothing passes
+     `-LoadAssembly Libraries/ResoniteModLoader.dll` (see [ResoniteModLoader](#resonitemodloader)). Without a
+     config of its own, CyberFingerMod gets one with `GamepadBindings` off.
    - It installs neither the loaders nor MoreFluxActions' dependencies (BepisLoader, BepInExRenderer,
-     BepisResoniteWrapper, BepInExResoniteShim, InterprocessLib, RenderiteHook, and for RML mods under Gale
-     ResoniteModLoaderLoader, unless the launch options load RML). It checks for them, and lists what's missing
-     or disabled to add in Gale.
+     BepisResoniteWrapper, BepInExResoniteShim, InterprocessLib, RenderiteHook, and for RML mods
+     ResoniteModLoaderLoader). It checks for them, and lists what's missing or disabled to add in Gale.
    - **Gotcha: RML loaded twice.** Resonite stops as it starts, its window left on the renderer, and the log in
      `<Resonite>\Logs` says `An item with the same key has already been added. Key: ResoniteModLoader`. RML is
-     being loaded twice: Gale launches Resonite through Steam, which adds its launch options, so a
-     `-LoadAssembly Libraries/ResoniteModLoader.dll` there (RML's own setup, or a tool that writes the launch
-     options) and ResoniteModLoaderLoader in the Gale profile each load it. Keep one: disable
-     ResoniteModLoaderLoader in Gale, or remove `-LoadAssembly …` from *Steam → Resonite → Properties → Launch
-     Options*. Keeping `-LoadAssembly` also loads RML when you start Resonite from Steam without Gale. The
-     installer warns when it finds both. (Launching through Steam is Gale's default. If you set Gale to start the
-     game directly, Steam's launch options don't apply, and ResoniteModLoaderLoader is what loads RML.)
-   - Uninstalling removes the copies. The mods are also in `<install folder>\ResoniteMods`, laid out as they
-     install, to copy by hand into another mod manager's profile.
+     being loaded twice: ResoniteModLoaderLoader in the Gale profile loads it, and so does a
+     `-LoadAssembly Libraries/ResoniteModLoader.dll` in how Resonite starts (RML's own setup puts one in *Steam →
+     Resonite → Properties → Launch Options*; Gale launches through Steam, so those apply to it too). Remove
+     `-LoadAssembly …` there, and from any shortcut that passes it. Setup and the link script say where they find
+     one.
+   - **Resonite builds:** setup also offers to make each Resonite build it finds load its Gale profile's mods
+     however it starts, without Gale's *Launch* or a launch script, and without Gale, to install SteamVRRoleFix
+     on its own: [Loading Gale mods without Gale's launcher](#loading-gale-mods-without-gales-launcher). Run
+     setup again after installing another build, such as a private universe, to set it up too.
+   - Uninstalling removes the copies and puts back what they replaced (kept as `*.pre-cyberfinger`). The mods are
+     also in `<install folder>\ResoniteMods`, laid out as they install, to copy by hand into another mod
+     manager's profile.
+
+## Loading Gale mods without Gale's launcher
+
+[Gale](https://github.com/Kesomannen/gale) loads a profile's mods only when its *Launch* button starts Resonite:
+it passes the profile's location on the command line. Started any other way (Steam's library, SteamVR's
+dashboard, a shortcut, a private universe's launcher such as Delphium's), Resonite loads none of them; launch
+scripts such as a `LaunchModded.bat` work around that. Linking a build to its Gale profile puts the profile's
+location into the build's folder instead, so the build loads the profile's mods however it starts, and Gale keeps
+managing them.
+
+### Setting it up
+
+1. **Install Gale** and add Resonite. Recommended even for just the CyberFinger mods: it installs the loaders
+   (BepisLoader, BepInExRenderer, RenderiteHook) and the mods' dependencies, which MoreFluxActions needs.
+2. **Give each build a Gale profile** with those loaders, and ResoniteModLoaderLoader for the ResoniteModLoader
+   mods (CyberFingerMod, ProximityGrab). Steam's Resonite uses the profile named *Resonite*, else *Default*
+   (Gale's first profile). Another build, such as the Delphium private universe, uses a profile named like the
+   build (*Delphium*): a build of its own can be on another Resonite version than Steam's, so its mods are best
+   kept apart.
+3. **Run CyberFinger Bridge setup** with *Install CyberFinger mods for Resonite*. Its *Resonite builds* page
+   lists every build it finds, ticked: *load Gale profile "…"* links the build, and builds without a profile get
+   SteamVRRoleFix on its own ([below](#steamvrrolefix-without-gale)). At the end, setup shows what was done, with
+   a *WARN* and a *NEXT* line for anything left to fix.
+4. **Clear the launch options.** Take launch scripts (`LaunchModded.bat %command%`), BepInEx arguments
+   (`--bepinex-target …`, `--doorstop-…`) and `-LoadAssembly Libraries/ResoniteModLoader.dll` out of *Steam →
+   Resonite → Properties → Launch Options*, a Steam shortcut's launch options and shortcuts' targets, keeping your
+   own options (`-SkipIntroTutorial`, say). The build's folder now does what they did, and with
+   ResoniteModLoaderLoader in the profile a `-LoadAssembly` would load RML twice. Setup's report and `-Status`
+   list each one they find, and where to change it; setup doesn't edit them itself (Steam keeps them in its own
+   settings, per Steam account).
+5. **Start the build however you like.** For a build other than Steam's, use its own shortcut or launcher, not
+   Gale's *Launch*: Gale's game location is set per game, not per profile, so *Launch* starts the same copy
+   (Steam's, unless you changed it) whichever profile is selected.
+
+Run setup again after installing another build or making its profile: the build shows up, and one that had
+SteamVRRoleFix on its own switches to its profile. The link script does the same without setup: *Start menu →
+CyberFinger Bridge → Link Resonite builds to Gale profiles* lists the builds and asks which to link. Or run it
+from a command prompt in `<install folder>\tools` (by default `C:\Program Files (x86)\CyberFinger Bridge\tools`;
+in this repository, `tools\`):
+
+```
+resonite_gale_link.cmd -Status
+resonite_gale_link.cmd -Game "C:\Games\Delphium-2026.7.21.417" [-GaleProfile Delphium]
+```
+
+It finds Steam's Resonite, Steam's shortcuts to other games, desktop and Start menu shortcuts that start a folder
+holding `Renderer\Renderite.Renderer.exe`, and the builds linked before. For a build started some other way,
+pass its folder (or its launcher) with `-Game`.
+
+### What linking changes
+
+In the build's folder:
+
+| File or folder | Change |
+|---|---|
+| `hookfxr.ini` | `enable=true`: the engine-side loader (BepisLoader) runs on every start. |
+| `hostfxr.dll`, `BepisLoader.dll`, `BepisLoader.deps.json`, `BepisLoader.runtimeconfig.json` | That loader, copied from the profile. |
+| `BepInEx` | A junction to `<profile>\BepInEx`, where BepisLoader looks when no arguments say otherwise: the engine-side plugins. |
+| `Renderer\doorstop_config.ini` | `enabled=true`, `target_assembly=BepInEx\core\BepInEx.Preloader.dll`: the renderer-side loader (UnityDoorstop) runs on every start. |
+| `Renderer\winhttp.dll`, `Renderer\.doorstop_version` | That loader, from the profile's RenderiteHook. |
+| `Renderer\BepInEx` | A junction to `<profile>\Renderer\BepInEx`: the renderer-side plugins, such as SteamVRRoleFix. |
+| `CyberFinger-GaleLink.json` | The record of every change, which undoing works from. |
+
+In the profile, `hookfxr.ini` gets `enable=true` as well (Gale's *Launch* copies it into the build, which would
+switch the engine side off again), and `CyberFinger-GaleLink.txt` names the builds that load the profile.
+`%LOCALAPPDATA%\CyberFinger\gale_links.json` lists the linked builds, for the uninstaller.
+
+A file the build had that differs is kept as `<name>.pre-gale-link`. A `BepInEx` or `Renderer\BepInEx` folder of
+the build's own is moved aside as `….pre-gale-link` when it holds no plugins (Gale leaves such a
+`Renderer\BepInEx` in the Steam copy). One with plugins stops the link, with a message to move them into the
+profile, or to pass `-Force` to move the folder aside anyway. The profile's mods are neither copied nor changed:
+Gale's switch for each mod applies as with its *Launch*, which still works (its arguments take precedence over
+these files). So does a launch script that passes `--bepinex-target` and `--doorstop-target-assembly`, which is
+no longer needed.
+
+### Switching the mods off, for troubleshooting
+
+```
+resonite_gale_link.cmd -Status                               each build: what it loads, each side on or off
+resonite_gale_link.cmd -Game "<build folder>" -Mods Off      no mods at all; -Mods On loads them again
+resonite_gale_link.cmd -Game "<build folder>" -Engine Off    no engine-side mods; -Engine On
+```
+
+`-Mods Off` sets `enable=false` in `hookfxr.ini` (the build's and the profile's) and `enabled=false` in
+`Renderer\doorstop_config.ini`. `-Engine Off` sets only `hookfxr.ini`: no engine-side mods, which include the
+ResoniteModLoader ones (ResoniteModLoaderLoader is an engine-side plugin), while renderer-side mods such as
+SteamVRRoleFix still load. By hand, change the same lines in Notepad, and for no mods change both: while the
+engine-side loader runs, RenderiteHook rewrites `Renderer\doorstop_config.ini` on every start. Either way this
+applies to starts without Gale's *Launch*, whose arguments switch the loaders on regardless. A `-LoadAssembly`
+in how the build starts loads RML outside BepInEx, so its mods stay on: `-Mods Off` names where one is. To
+leave out one mod, disable it in Gale as usual.
+
+`-Status` also shows a side switched off by Gale itself: updating BepisLoader in Gale can reset the profile's
+`hookfxr.ini` to the package's `enable=false`, which Gale's *Launch* then copies into the build. `-Engine On` (or linking
+again) switches it back on.
+
+The logs are `<profile>\BepInEx\LogOutput.log` (engine side), `<profile>\Renderer\BepInEx\LogOutput.log`
+(renderer side), and Resonite's own in `<build>\Logs`.
+
+### Undoing it
+
+```
+resonite_gale_link.cmd -Game "<build folder>" -Unlink
+resonite_gale_link.cmd -Unlink -All                          every build linked on this PC
+```
+
+This removes the junctions and the copied files, puts back the `*.pre-gale-link` originals and the profile's
+`hookfxr.ini` setting, and deletes the record: the build is as it was, and the profile keeps its mods.
+
+**Uninstalling CyberFinger Bridge** does `-Unlink -All`, then removes the mods setup copied into builds and
+profiles and puts back what they replaced (kept as `*.pre-cyberfinger`). If a build can't be restored (a file in
+use, say), it asks whether to go on; *No* cancels the uninstall, so you can close what holds the file and
+uninstall again.
+
+Without the script: in a command prompt, `rmdir "<build>\BepInEx"` and `rmdir "<build>\Renderer\BepInEx"` remove
+the junctions (`rmdir` without `/s` removes a junction only, never the profile's folder it points to). Then, from
+`CyberFinger-GaleLink.json`: delete the files under `files` and the folders under `dirs`, rename each `backup`
+under `backups` back to its `path`, set `enable=` in the profile's `hookfxr.ini` back to the `old` value under
+`iniEdits`, and delete the record.
+
+### SteamVRRoleFix without Gale
+
+For a build without a Gale profile, or without Gale, setup installs SteamVRRoleFix on its own when it is
+selected; so does `resonite_gale_link.cmd -Game "<build folder>" -Standalone`. That copies BepInEx for the
+renderer (from BepInExRenderer) and its loader (UnityDoorstop, from RenderiteHook) into `<build>\Renderer`, sets
+`enabled=true` in `Renderer\doorstop_config.ini`, and puts SteamVRRoleFix into `Renderer\BepInEx\plugins`. A
+renderer that already has BepInEx gets just the plugin. It is recorded the same way: `-Mods Off` and `-Unlink`
+work as above, and the uninstaller undoes it. Only renderer-side mods load like this: MoreFluxActions and other
+engine-side mods need Gale. Linking the build later (make its profile, run setup again) replaces it. BepInEx and
+UnityDoorstop are LGPL-2.1: see `<install folder>\ResoniteMods\standalone\THIRD-PARTY-NOTICES.txt`.
+
+### ResoniteModLoader
+
+The supported setup: ResoniteModLoaderLoader in each Gale profile loads ResoniteModLoader from the build's
+`Libraries\ResoniteModLoader.dll`, and nothing that starts the build passes
+`-LoadAssembly Libraries/ResoniteModLoader.dll` (Steam's launch options, a Steam shortcut's, a shortcut's
+target). RML then loads with the profile however the build starts, and `-Mods Off` switches its mods off with
+the rest. With both, RML loads twice and Resonite stops as it starts (the gotcha under
+[Installation](#installation)). Linking and `-Status` check each build against this: they warn about a double
+load or an RML that nothing loads, point out a `-LoadAssembly` that should go, and say where to change it.
 
 ## Switching it off
 
@@ -355,7 +500,7 @@ Settings live in `resources/settings/default.vrsettings` (section `driver_cyberf
 | `skeletal_tracking_level` | `full` | Reported to apps: `full` (camera-tracked hands) or `partial` (VRChat keeps its hand-gesture controls off). Resonite ignores it |
 | `optical_tap` / `optical_tap_hook` | `true` / `true` | Use the headset's hand tracking; capture its skeleton with the hook |
 | `tap_serial_left` / `_right` | `Hand_Left` / `Hand_Right` | Serial substrings of the headset hand devices (Steam Link: `VRLINKQ_Hand_Left`); `a\|b` lists |
-| `tap_controller_types` | `svl_hand_interaction_augmented\|vd_hand_controller` | Controller types of headset hand devices (Steam Link, Virtual Desktop) |
+| `tap_controller_types` | `svl_hand_interaction_augmented\|vd_hand_controller` | Controller types of headset hand devices (Steam Link, Virtual Desktop). Only the skeletons of these devices and of `tap_serial_*` matches are followed: a controller's (Steam Link's Touch controllers estimate fingers from their sensors) would keep CyberFinger from releasing the hand to it |
 | `forward_tap_system_button` | `false` | Also forward the headset hand's system button (Quest left-palm pinch) to the dashboard; the left pink button opens it anyway (through the dashboard's binding) |
 | `black_hold_ms` | `800` | Held this long, the black button is `/input/a_hold` instead of A (Resonite: FluxAction1 left, FluxAction2 right, with the MoreFluxActions mod); A then reports on release. 0 = no long press |
 | `grab_tap_to_hold` | `true` | `/input/grab`'s tap to hold (live); off, the grab follows the grip button |
@@ -443,6 +588,9 @@ hand every 10 s.
   button held on the other device at the switch is still held for Resonite. Update
   [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix) to 0.3+ and restart Resonite; its log shows
   `is no longer read: cleared its inputs (…)` when it releases one.
+- **Resonite (or a private universe) starts without its mods, or stops as it starts** — `resonite_gale_link.cmd
+  -Status` shows what each build loads, whether each side is on, and what loads RML twice; `-Mods Off` starts
+  a build without mods. See [Loading Gale mods without Gale's launcher](#loading-gale-mods-without-gales-launcher).
 - **Resonite: tools work after switching back, but you can't move or jump** — install
   [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) 1.10+ with `FollowActiveController` on. The
   Resonite log shows `rebinding locomotion to it` at each switch.

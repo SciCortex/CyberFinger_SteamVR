@@ -389,11 +389,16 @@ void OpticalTap::ResolveSerial(SkeletonEntry& e) {
         e.own = own;
         e.serialResolved = true;
     }
-    if (!own)
+    if (own) return;
+    if (MatchesPattern(serial, e.hand) || IsHandType(type))
         DriverLog("OpticalTap: %s hand skeleton source '%s' (type %s, tracking level %d, hand priority %d%s)\n",
                   e.hand == 0 ? "left" : "right", serial.c_str(), type.empty() ? "?" : type.c_str(), e.level,
                   (err == vr::TrackedProp_Success) ? priority : 0,
                   e.baseIsRaw ? "" : ", base pose is not /pose/raw");
+    else
+        DriverLog("OpticalTap: %s hand skeleton of '%s' (type %s) not followed: not a hand-tracking device "
+                  "(tap_serial_%s, tap_controller_types)\n", e.hand == 0 ? "left" : "right", serial.c_str(),
+                  type.empty() ? "?" : type.c_str(), e.hand == 0 ? "left" : "right");
 }
 
 // ── hook callbacks ─────────────────────────────────────────────────────────
@@ -692,6 +697,11 @@ void OpticalTap::Update(const vr::TrackedDevicePose_t* poses, uint32_t count) {
             if (e.hand != hand) continue;
             std::lock_guard<std::mutex> g(e.lock);
             if (e.own || (!e.orphan && !e.serialResolved)) continue;
+            // Only hand tracking stands in for the hand. A controller's skeleton (the fingers Steam Link's Touch
+            // controllers estimate from their sensors) streams on while the controller is in use: following it, the
+            // handoff never sees the hand lost, so CyberFinger keeps the hand and hides the controller from apps.
+            // Adopted skeletons (Virtual Desktop's, created before the hooks) carry no device to tell by.
+            if (!e.orphan && !MatchesPattern(e.serial, hand) && !e.handType) continue;
             double score = 0;
             if (!e.orphan && (MatchesPattern(e.serial, hand) || e.handType)) score += 8;
             if (e.level == vr::VRSkeletalTracking_Full) score += 4;

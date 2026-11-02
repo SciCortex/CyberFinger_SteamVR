@@ -12,18 +12,27 @@ Writes bridge/installer/resonite_mods/, laid out as the installer copies it:
     Renderer/BepInEx/plugins/DrSciCortex-MoreFluxActions/...              renderer plugins (BepInExRenderer)
     Renderer/BepInEx/plugins/DrSciCortex-SteamVRRoleFix/
     rml_mods/CyberFingerMod.dll, rml_mods/ProximityGrab.dll                ResoniteModLoader mods
+    standalone/Renderer/...                                                BepInEx for the renderer, without Gale
 
 and VERSIONS.txt, the commit each mod was built from. Each mod is built from a fresh shallow clone of its GitHub
 repository (default branch) under out/resonite_mods_src/, made anew on every run: the installer gets what is
 pushed, whatever is in local checkouts. Needs git, the .NET SDK and Resonite installed: the mods compile against
 Resonite's assemblies.
+
+standalone/ holds what SteamVRRoleFix needs on a build without Gale (tools/resonite_gale_link.ps1 -Standalone): the
+renderer's BepInEx from the latest ResoniteModding-BepInExRenderer on Thunderstore, and the doorstop that loads it
+from the latest ResoniteModding-RenderiteHook, with THIRD-PARTY-NOTICES.txt (BepInEx and UnityDoorstop: LGPL-2.1).
 """
 
+import io
+import json
 import os
 import shutil
 import stat
 import subprocess
 import sys
+import urllib.request
+import zipfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "bridge", "installer", "resonite_mods")
@@ -80,6 +89,71 @@ def fresh_clone(name, url):
     return clone
 
 
+def fetch(url):
+    # Thunderstore refuses urllib's default User-Agent (403)
+    req = urllib.request.Request(url, headers={"User-Agent": "CyberFinger-installer-staging/1.0"})
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return r.read()
+
+
+def thunderstore_latest(namespace, name):
+    """The latest version of a Thunderstore package: (version, the zip's bytes)."""
+    info = json.loads(fetch(f"https://thunderstore.io/api/experimental/package/{namespace}/{name}/"))
+    latest = info["latest"]
+    return latest["version_number"], fetch(latest["download_url"])
+
+
+def stage_standalone():
+    """BepInEx for the renderer and its doorstop, for builds without Gale (SteamVRRoleFix only)."""
+    out = os.path.join(OUT, "standalone", "Renderer")
+    versions = []
+    ver, data = thunderstore_latest("ResoniteModding", "BepInExRenderer")
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        core = [n for n in z.namelist() if "/Renderer/BepInEx/core/" in "/" + n and not n.endswith("/")]
+        for n in core:
+            dest = os.path.join(out, "BepInEx", "core", os.path.basename(n))
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as f:
+                f.write(z.read(n))
+    if not any(n.endswith("BepInEx.Preloader.dll") for n in core):
+        raise OSError("BepInExRenderer package without Renderer/BepInEx/core/BepInEx.Preloader.dll")
+    versions.append(f"ResoniteModding-BepInExRenderer {ver} (Thunderstore): renderer BepInEx core, {len(core)} files")
+    ver, data = thunderstore_latest("ResoniteModding", "RenderiteHook")
+    licence = ""
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        door = [n for n in z.namelist() if "/Doorstop/" in "/" + n and not n.endswith("/")]
+        for n in door:
+            with open(os.path.join(out, os.path.basename(n)), "wb") as f:
+                f.write(z.read(n))
+        lic = [n for n in z.namelist() if os.path.basename(n).upper().startswith("LICENSE")]
+        if lic:
+            licence = z.read(lic[0]).decode("utf-8", "replace")
+    if not all(os.path.isfile(os.path.join(out, f)) for f in ("winhttp.dll", "doorstop_config.ini")):
+        raise OSError("RenderiteHook package without Doorstop/winhttp.dll and doorstop_config.ini")
+    versions.append(f"ResoniteModding-RenderiteHook {ver} (Thunderstore): the renderer's doorstop")
+    notices = [
+        "Third-party software in this folder",
+        "",
+        "Renderer/BepInEx/core: BepInEx (https://github.com/BepInEx/BepInEx), LGPL-2.1, as packaged for",
+        "Resonite by ResoniteModding (https://thunderstore.io/c/resonite/p/ResoniteModding/BepInExRenderer/).",
+        "Renderer/winhttp.dll, doorstop_config.ini, .doorstop_version: UnityDoorstop",
+        "(https://github.com/NeighTools/UnityDoorstop), LGPL-2.1, from ResoniteModding's RenderiteHook",
+        "(https://github.com/ResoniteModding/RenderiteHook, MIT No Attribution).",
+        "Both are unmodified; their source is at the addresses above.",
+    ]
+    for title, url in (("BepInEx", "https://raw.githubusercontent.com/BepInEx/BepInEx/master/LICENSE"),
+                       ("UnityDoorstop", "https://raw.githubusercontent.com/NeighTools/UnityDoorstop/master/LICENSE")):
+        try:
+            notices += ["", "=" * 78, f"{title} licence ({url})", "=" * 78, fetch(url).decode("utf-8", "replace")]
+        except OSError:
+            notices += ["", f"{title} licence: {url}"]
+    if licence:
+        notices += ["", "=" * 78, "RenderiteHook licence", "=" * 78, licence]
+    with open(os.path.join(OUT, "standalone", "THIRD-PARTY-NOTICES.txt"), "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(notices) + "\n")
+    return versions
+
+
 def main():
     remove_tree(OUT)
     versions = []
@@ -93,6 +167,7 @@ def main():
             shutil.copy2(os.path.join(repo, built), dest)
         commit = git(repo, "log", "-1", "--format=%h %cs %s")
         versions.append(f"{name}: {commit} ({url})")
+    versions += stage_standalone()
     with open(os.path.join(OUT, "VERSIONS.txt"), "w", encoding="utf-8") as f:
         f.write("\n".join(versions) + "\n")
     print("\nStaged in " + OUT + ":\n  " + "\n  ".join(versions))

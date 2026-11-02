@@ -52,6 +52,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(os.path.dirname(HERE), "resources", "input")
 HANDS = ("left", "right")
+# App keys of Resonite builds that don't run as Steam app 2519830 (see resonite()); each needs an entry in
+# default_bindings in cyberfinger_profile.json. SteamVR names a build it doesn't know after its renderer's
+# executable; a build started from a non-Steam shortcut in Steam's VR library gets the shortcut's app id, which
+# Steam assigns per install: steam.app.3454604410 is the Delphium private universe's shortcut on the author's PC.
+RESONITE_OTHER_APP_KEYS = ("system.generated.renderite.renderer.exe", "steam.app.3454604410")
 
 
 def load(path):
@@ -305,6 +310,10 @@ def resonite():
                     "inputs": {"click": {"output": "/actions/fluxactions/in/fluxaction42"}}})
     b["bindings"]["/actions/fluxactions"] = {"sources": sources}
     save(b, "bindings/steam.app.2519830_cyberfinger.json")
+    # The same layout for a Resonite build SteamVR doesn't know as Steam app 2519830, e.g. a private universe
+    # (Delphium) started from a non-Steam shortcut: SteamVR names it after its renderer's executable.
+    for key in RESONITE_OTHER_APP_KEYS:
+        save(dict(b, app_key=key), f"bindings/{key}_cyberfinger.json")
 
 
 # (component, binding mode, input, FluxAction for the left hand; the right hand gets the next one)

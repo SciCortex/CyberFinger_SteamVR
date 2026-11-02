@@ -206,6 +206,14 @@
       "binding_url": "bindings/steam.app.2519830_cyberfinger.json"
     },
     {
+      "app_key": "system.generated.renderite.renderer.exe",
+      "binding_url": "bindings/system.generated.renderite.renderer.exe_cyberfinger.json"
+    },
+    {
+      "app_key": "steam.app.3454604410",
+      "binding_url": "bindings/steam.app.3454604410_cyberfinger.json"
+    },
+    {
       "app_key": "openvr.component.vrcompositor",
       "binding_url": "bindings/vrcompositor_cyberfinger.json"
     }
