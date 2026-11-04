@@ -163,11 +163,12 @@ managing them.
 
 1. **Install Gale** and add Resonite. Recommended even for just the CyberFinger mods: it installs the loaders
    (BepisLoader, BepInExRenderer, RenderiteHook) and the mods' dependencies, which MoreFluxActions needs.
-2. **Give each build a Gale profile** with those loaders, and ResoniteModLoaderLoader for the ResoniteModLoader
-   mods (CyberFingerMod, ProximityGrab). Steam's Resonite uses the profile named *Resonite*, else *Default*
-   (Gale's first profile). Another build, such as the Delphium private universe, uses a profile named like the
-   build (*Delphium*): a build of its own can be on another Resonite version than Steam's, so its mods are best
-   kept apart.
+2. **Give each build a Gale profile** with InterprocessLib and ResoniteModLoaderLoader (which loads the
+   ResoniteModLoader mods, CyberFingerMod and ProximityGrab): Gale adds what they depend on, which is all the
+   CyberFinger mods need (BepisLoader, BepisResoniteWrapper, BepInExResoniteShim, BepInExRenderer, RenderiteHook).
+   Steam's Resonite uses the profile named *Resonite*, else *Default* (Gale's first profile). Another build, such
+   as the Delphium private universe, uses a profile named like the build (*Delphium*): a build of its own can be
+   on another Resonite version than Steam's, so its mods are best kept apart.
 3. **Run CyberFinger Bridge setup** with *Install CyberFinger mods for Resonite*. Its *Resonite builds* page
    lists every build it finds, ticked: *load Gale profile "…"* links the build, and builds without a profile get
    SteamVRRoleFix on its own ([below](#steamvrrolefix-without-gale)). At the end, setup shows what was done, with

@@ -99,7 +99,9 @@ Items marked *check* are hypotheses to verify.
   *Check* on Steam Link that the first pickup no longer leaves a tracker.
 - [x] **Handoff to the Touch controllers** (`yield_to_controllers`): when a hand's skeleton stops while a controller
   for it is tracked, CyberFinger releases the hand (~0.5 s); it takes it back as soon as hand tracking is live.
-  Round trips tested on Virtual Desktop and Steam Link. *Check* the faster rule on Steam Link.
+  Round trips tested on Virtual Desktop and Steam Link. *Check* the faster rule on Steam Link. Steam Link's Touch
+  controllers stream a skeleton of their own while in use: OpticalTap follows only the skeletons of the
+  hand-tracking devices (`tap_serial_*`, `tap_controller_types`), or the handoff never saw the hand lost (2.2.0).
 
 ### Buttons and bindings
 

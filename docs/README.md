@@ -16,6 +16,7 @@ This page is the map: what the pieces are, how they connect, and where each is d
 |---|---|
 | Set the CyberFingers up and use them | The **user manual**: [docs/manual](manual/). `python docs/manual/build_manual.py` builds it; `--single-file` gives one HTML file to share |
 | Build, install or change the SteamVR driver and bridge | The [README](../README.md) |
+| Load the Resonite mods however Resonite starts, in Steam's build or another (a private universe) | [Loading Gale mods without Gale's launcher](../README.md#loading-gale-mods-without-gales-launcher), in the README |
 | See what's planned | [STEAMVR_PLAN.md](../STEAMVR_PLAN.md) |
 | Program the buttons in Resonite | [Programmable buttons in Resonite](#programmable-buttons-in-resonite) below, then the MoreFluxActions docs |
 
@@ -43,6 +44,7 @@ flowchart LR
 | **SteamVRRoleFix** | [SteamVRRoleFix](https://github.com/DrSciCortex/SteamVRRoleFix) | A plugin for Resonite's renderer: hands and input follow SteamVR when you switch between CyberFinger and the Quest controllers, and hand controllers aren't drawn as trackers |
 | **CyberFingerMod** | [CyberFingerMod](https://github.com/DrSciCortex/CyberFingerMod) | A Resonite mod: locomotion follows the controller in use after a switch (1.10+), hides the virtual keyboard, and keeps your laser where your avatar puts it with the dash open |
 | **ProximityGrab** | [ProximityGrab](https://github.com/SciCortex/ProximityGrab) | A Resonite mod for grabbing with your hand: a fist grabs what's near it (the grab sphere, not the laser), and an index-thumb pinch is a precision grab at the pinch point |
+| **Resonite build links** | [`tools/resonite_gale_link.ps1`](../tools/resonite_gale_link.ps1), run by the installer | Makes a Resonite build load its Gale profile's mods however it starts (Steam, SteamVR, a shortcut, a private universe's launcher), or installs SteamVRRoleFix in it without Gale. `-Status` checks the builds, `-Mods Off` starts one without mods, `-Unlink` undoes it |
 
 ## Programmable buttons in Resonite
 
@@ -71,8 +73,10 @@ The CyberFinger is set up for it out of the box:
 
 Without the mod, the hold and the other Flux Actions do nothing: Resonite doesn't know them. To start:
 
-1. Install [MoreFluxActions](https://github.com/DrSciCortex/MoreFluxActionsMod) with a Resonite mod manager
-   (Gale, r2modman). It brings its dependencies.
+1. Install [MoreFluxActions](https://github.com/DrSciCortex/MoreFluxActionsMod): the installer's *Install
+   CyberFinger mods for Resonite* copies it into your Gale profiles. Its dependencies come from Gale: add
+   InterprocessLib and ResoniteModLoaderLoader to the profile, and Gale brings the rest (see
+   [Loading Gale mods without Gale's launcher](../README.md#loading-gale-mods-without-gales-launcher)).
 2. Try the ready-made examples. Enable ResoniteLink in your session, then run `python tools/deploy.py all` from
    the mod's repository. It builds a console that logs every Flux Action, a Dev Tool on Flux Action 1, and
    fly/walk on Flux Action 2, straight onto your avatar.
