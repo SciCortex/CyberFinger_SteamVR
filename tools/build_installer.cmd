@@ -17,7 +17,7 @@ python "%ROOT%\tools\stage_resonite_mods.py" || goto :fail
 :modsdone
 
 pushd "%ROOT%\bridge"
-call build.bat < NUL
+call ".\build.bat" < NUL
 set "RC=%ERRORLEVEL%"
 popd
 if not "%RC%"=="0" goto :fail
