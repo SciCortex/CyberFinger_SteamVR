@@ -12,6 +12,18 @@ import PyInstaller.utils.hooks
 vgamepad_datas, vgamepad_binaries, vgamepad_hiddenimports = \
     PyInstaller.utils.hooks.collect_all('vgamepad')
 
+# Collect Tcl/Tk's native DLLs when building with a conda Python: conda keeps tcl86t.dll/tk86t.dll (and their
+# own dependencies) in Library\bin, not next to _tkinter.pyd in DLLs\, so PyInstaller's automatic dependency
+# scan can miss them unless Library\bin happens to be on PATH at build time -- it isn't with a plain PATH
+# prepend of the env root, only with a full "conda activate". Without this, the built exe fails at startup:
+# "ImportError: DLL load failed while importing _tkinter: The specified module could not be found."
+tk_binaries = []
+try:
+    from PyInstaller.utils.hooks.conda import collect_dynamic_libs
+    tk_binaries = collect_dynamic_libs('tk')
+except Exception:
+    pass
+
 # Collect all pystray submodules (backends are loaded dynamically)
 pystray_submodules = PyInstaller.utils.hooks.collect_submodules('pystray')
 
@@ -46,7 +58,7 @@ for m in winrt_explicit:
 a = Analysis(
     ['cyberfinger_gui.py'],
     pathex=[],
-    binaries=vgamepad_binaries,
+    binaries=vgamepad_binaries + tk_binaries,
     datas=[
         ('assets/icon_32x32.png', 'assets'),
         ('assets/icon_32x32_bw.png', 'assets'),
