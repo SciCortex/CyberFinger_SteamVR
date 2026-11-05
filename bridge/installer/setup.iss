@@ -252,7 +252,7 @@ end;
 // Steam, which adds the game's launch options. Never both: RML loaded twice stops Resonite as it starts).
 
 //
-// Resonite builds (the Steam copy, and others such as the Delphium private universe) can load a Gale profile's mods
+// Resonite builds (the Steam copy, and others such as a private universe) can load a Gale profile's mods
 // however they start, without Gale's launcher: tools\resonite_gale_link.ps1 points their loaders at the profile
 // (README, "Loading Gale mods without Gale's launcher"). Setup asks it for the builds it finds (-Plan), links the
 // ones ticked on the "Resonite builds" page, or without Gale installs SteamVRRoleFix on its own (-Standalone).

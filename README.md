@@ -128,7 +128,7 @@ Then:
      `<Resonite>\BepInEx\core`), it lists that folder too. A Gale user's game folder also has a
      `Renderer\BepInEx`: that's Gale's loader, not where its plugins go.
    - **CyberFingerMod and ProximityGrab** are ResoniteModLoader mods, and go into the `rml_mods` folder of each
-     build with RML either way: Steam's Resonite, and others found such as Delphium. The supported setup starts
+     build with RML either way: Steam's Resonite, and others found such as a private universe. The supported setup starts
      RML with the ResoniteModLoaderLoader package in the Gale profile, and nothing passes
      `-LoadAssembly Libraries/ResoniteModLoader.dll` (see [ResoniteModLoader](#resonitemodloader)). Without a
      config of its own, CyberFingerMod gets one with `GamepadBindings` off.
@@ -154,7 +154,7 @@ Then:
 
 [Gale](https://github.com/Kesomannen/gale) loads a profile's mods only when its *Launch* button starts Resonite:
 it passes the profile's location on the command line. Started any other way (Steam's library, SteamVR's
-dashboard, a shortcut, a private universe's launcher such as Delphium's), Resonite loads none of them; launch
+dashboard, a shortcut, a private universe's own launcher), Resonite loads none of them; launch
 scripts such as a `LaunchModded.bat` work around that. Linking a build to its Gale profile puts the profile's
 location into the build's folder instead, so the build loads the profile's mods however it starts, and Gale keeps
 managing them.
@@ -167,7 +167,7 @@ managing them.
    ResoniteModLoader mods, CyberFingerMod and ProximityGrab): Gale adds what they depend on, which is all the
    CyberFinger mods need (BepisLoader, BepisResoniteWrapper, BepInExResoniteShim, BepInExRenderer, RenderiteHook).
    Steam's Resonite uses the profile named *Resonite*, else *Default* (Gale's first profile). Another build, such
-   as the Delphium private universe, uses a profile named like the build (*Delphium*): a build of its own can be
+   as a private universe, uses a profile named like the build: a build of its own can be
    on another Resonite version than Steam's, so its mods are best kept apart.
 3. **Run CyberFinger Bridge setup** with *Install CyberFinger mods for Resonite*. Its *Resonite builds* page
    lists every build it finds, ticked: *load Gale profile "…"* links the build, and builds without a profile get
@@ -192,7 +192,7 @@ in this repository, `tools\`):
 
 ```
 resonite_gale_link.cmd -Status
-resonite_gale_link.cmd -Game "C:\Games\Delphium-2026.7.21.417" [-GaleProfile Delphium]
+resonite_gale_link.cmd -Game "C:\Games\YourPrivateUniverse-1.2.3.456" [-GaleProfile YourPrivateUniverse]
 ```
 
 It finds Steam's Resonite, Steam's shortcuts to other games, desktop and Start menu shortcuts that start a folder

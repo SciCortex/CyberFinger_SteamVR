@@ -6,7 +6,7 @@
 .SYNOPSIS
 Makes a Resonite build load a Gale profile's mods however it is started (Steam, SteamVR's library, a shortcut), so
 neither Gale's Launch button nor a launch script is needed. Works for the Steam copy of Resonite and for other
-builds, such as a private universe like Delphium. Without Gale, -Standalone installs SteamVRRoleFix on its own.
+builds, such as a private universe. Without Gale, -Standalone installs SteamVRRoleFix on its own.
 
 .DESCRIPTION
 Gale starts Resonite with arguments that tell BepInEx where the profile is. Linking puts that into the build's
@@ -25,10 +25,10 @@ change, and -Unlink undoes them. -Mods Off starts the build without any mods, -E
 engine-side ones; -Mods On / -Engine On switch them back.
 
 .PARAMETER Game
-The build's folder, or its launcher (Resonite.exe, Delphium.exe, ...). Without it, the builds found are listed.
+The build's folder, or its launcher (Resonite.exe, or another build's, ...). Without it, the builds found are listed.
 
 .PARAMETER GaleProfile
-The Gale profile, by name or folder. Default: the profile named like the build ("Delphium"), for the Steam copy
+The Gale profile, by name or folder. Default: the profile named like the build, for the Steam copy
 "Resonite" or else "Default".
 
 .EXAMPLE
@@ -39,14 +39,14 @@ Lists the builds found, and asks which to link to which profile.
 resonite_gale_link.cmd -Status
 
 .EXAMPLE
-resonite_gale_link.cmd -Game "C:\Games\Delphium-2026.7.21.417" -GaleProfile Delphium
+resonite_gale_link.cmd -Game "C:\Games\YourPrivateUniverse-1.2.3.456" -GaleProfile YourPrivateUniverse
 
 .EXAMPLE
-resonite_gale_link.cmd -Game "C:\Games\Delphium-2026.7.21.417" -Mods Off
+resonite_gale_link.cmd -Game "C:\Games\YourPrivateUniverse-1.2.3.456" -Mods Off
 Starts it without mods from now on (troubleshooting); -Mods On loads them again.
 
 .EXAMPLE
-resonite_gale_link.cmd -Game "C:\Games\Delphium-2026.7.21.417" -Unlink
+resonite_gale_link.cmd -Game "C:\Games\YourPrivateUniverse-1.2.3.456" -Unlink
 
 .EXAMPLE
 resonite_gale_link.cmd -Unlink -All
@@ -252,7 +252,7 @@ function Get-Builds([object[]]$Shortcuts) {
     try { $shell = New-Object -ComObject WScript.Shell } catch { $shell = $null }
     foreach ($b in $byPath.Values) {
         foreach ($s in $Shortcuts) { if ((Get-FullDir (Split-Path -Parent $s.Exe)) -eq $b.Path) { $b.Shortcuts.Add($s) } }
-        if ($shell) {   # shortcuts kept in the build's own folder, e.g. "Delphium Launcher.lnk"
+        if ($shell) {   # shortcuts kept in the build's own folder, e.g. "YourPrivateUniverse Launcher.lnk"
             foreach ($l in @(Get-ChildItem -LiteralPath $b.Path -Filter '*.lnk' -ErrorAction SilentlyContinue)) {
                 $sc = $shell.CreateShortcut($l.FullName)
                 if ($sc.TargetPath -and (Get-FullDir (Split-Path -Parent $sc.TargetPath)) -eq $b.Path) {
